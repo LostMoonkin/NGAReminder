@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  nga-reminder:
+    build: .
+    image: nga-reminder:latest
+    container_name: nga-reminder
+    restart: unless-stopped
+    ports:
+      - "8848:8848"
+    volumes:
+      # Persistent data
+      - ./data:/app/data
+      # Configuration file
+      - ./config:/app/config
+    environment:
+      - TZ=Asia/Shanghai

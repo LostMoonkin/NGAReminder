@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>NGA Reminder Config</title>
+    <link rel="stylesheet" type="text/css" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <h2>Configuration</h2>
+
+        <!-- Global Settings -->
+        <div class="section">
+            <h3>Server Settings</h3>
+            <div class="form-group">
+                <label for="apiUrl">API Server URL:</label>
+                <input type="text" id="apiUrl" placeholder="http://127.0.0.1:8848" required>
+            </div>
+            <div class="form-group">
+                <label for="interval">Polling Interval (seconds):</label>
+                <input type="number" id="interval" min="10" value="30" required>
+            </div>
+        </div>
+
+        <!-- Threads List -->
+        <div class="section">
+            <h3>Monitored Threads</h3>
+            <div id="threadList" class="thread-list">
+                <!-- Threads will be added here dynamically -->
+            </div>
+
+            <button id="addThreadBtn" class="add-btn">+ Add Thread</button>
+
+            <!-- Add Thread Form (Hidden by default) -->
+            <div id="addThreadForm" class="add-thread-form hidden">
+                <div class="form-group">
+                    <label for="newTid">Thread ID:</label>
+                    <input type="number" id="newTid" placeholder="e.g. 45974302">
+                </div>
+                <div class="form-group">
+                    <label for="newStartPost">Start Post:</label>
+                    <input type="number" id="newStartPost" value="0">
+                </div>
+                <div class="form-group">
+                    <label for="newAuthorUid">Author UID (optional):</label>
+                    <input type="number" id="newAuthorUid" placeholder="Filter by UID">
+                </div>
+                <div class="button-group">
+                    <button id="confirmAddBtn" class="small-btn">Add</button>
+                    <button id="cancelAddBtn" class="small-btn secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <button id="saveBtn">Save All Settings</button>
+            <div id="status" class="status"></div>
+            <button id="testBtn" class="secondary-btn">Test Server Connection</button>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>

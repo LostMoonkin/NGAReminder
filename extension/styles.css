@@ -1,0 +1,206 @@
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  width: 300px;
+  padding: 10px;
+  margin: 0;
+  background-color: #f5f5f5;
+}
+
+.container {
+  background-color: white;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+h2 {
+  margin-top: 0;
+  color: #333;
+  text-align: center;
+  font-size: 18px;
+  margin-bottom: 20px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #555;
+}
+
+input[type="text"],
+input[type="number"] {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+input:focus {
+  border-color: #4a90e2;
+  outline: none;
+}
+
+.help-text {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}
+
+button {
+  width: 100%;
+  padding: 10px;
+  background-color: #4a90e2;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+button:hover {
+  background-color: #357abd;
+}
+
+.secondary-btn {
+  background-color: #f0f0f0;
+  color: #333;
+  margin-top: 10px;
+}
+
+.secondary-btn:hover {
+  background-color: #e0e0e0;
+}
+
+.section {
+  margin-bottom: 20px;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 10px;
+}
+
+.section:last-child {
+  border-bottom: none;
+}
+
+h3 {
+  font-size: 14px;
+  color: #333;
+  margin: 0 0 10px 0;
+  border-left: 3px solid #4a90e2;
+  padding-left: 8px;
+}
+
+.thread-list {
+  margin-bottom: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.thread-item {
+  background: white;
+  border: 1px solid #eee;
+  padding: 8px;
+  margin-bottom: 5px;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.thread-info {
+  font-size: 12px;
+}
+
+.thread-tid {
+  font-weight: bold;
+  color: #333;
+}
+
+.thread-details {
+  color: #888;
+  font-size: 11px;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: #dc3545;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 5px;
+  width: auto;
+}
+
+.delete-btn:hover {
+  background: none;
+  color: #bd2130;
+}
+
+.add-btn {
+  background-color: #28a745;
+  width: 100%;
+}
+
+.add-btn:hover {
+  background-color: #218838;
+}
+
+.hidden {
+  display: none;
+}
+
+.add-thread-form {
+  background: #f9f9f9;
+  padding: 10px;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+
+.button-group {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.small-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.secondary {
+  background-color: #6c757d;
+}
+
+.secondary:hover {
+  background-color: #5a6268;
+}
+
+.status {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 13px;
+  min-height: 20px;
+}
+
+.success {
+  color: #28a745;
+}
+
+.error {
+  color: #dc3545;
+}
+
+.footer {
+  margin-top: 10px;
+  padding-top: 10px;
+}

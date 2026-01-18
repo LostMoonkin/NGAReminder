@@ -1,0 +1,36 @@
+{
+    "ngaPassportUid": "your_uid_here",
+    "ngaPassportCid": "your_cid_here",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "max_threads": 5,
+    "rate_limit_per_minute": 30,
+    "bark_enabled": false,
+    "bark_server_url": "https://api.day.app",
+    "bark_device_key": "your_device_key_here",
+    "bark_sound": "bell",
+    "bark_group": "NGA Monitor",
+    "bark_icon": "",
+    "console_notification_enabled": true,
+    "monitored_threads": [
+        {
+            "tid": 45974302,
+            "author_filter": [
+                150058
+            ],
+            "author_notification": [
+                150058
+            ],
+            "check_interval": 300,
+            "enabled": true
+        },
+        {
+            "tid": 43098323,
+            "author_filter": null,
+            "author_notification": null,
+            "check_interval": 600,
+            "enabled": true
+        }
+    ],
+    "server_host": "127.0.0.1",
+    "server_port": 8000
+}
