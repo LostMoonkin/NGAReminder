@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NGA Reminder (Standalone)</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🔔 NGA Reminder</h1>
+            <p class="subtitle">Standalone Edition</p>
+            <button id="view-posts-btn" class="btn btn-small" style="margin-top: 10px; width: 100%;">
+                📬 View Unseen Posts (<span id="unseen-count">0</span>)
+            </button>
+        </header>
+
+        <!-- Cookie Status -->
+        <div class="section">
+            <div class="status-box" id="cookie-status">
+                <span class="loading">Checking cookies...</span>
+            </div>
+            <button id="login-btn" class="btn btn-secondary" style="display:none;">
+                Open NGA to Login
+            </button>
+        </div>
+
+        <!-- Bark Settings -->
+        <div class="section">
+            <div class="section-header">
+                <h2>🔕 Bark Settings</h2>
+                <button id="save-bark-btn" class="btn btn-small">Save</button>
+            </div>
+            <div class="bark-info">
+                <p>Configure Bark to receive notifications when browser is unfocused</p>
+            </div>
+            <form id="bark-settings-form">
+                <div class="form-group">
+                    <label for="bark-server">Bark Server URL</label>
+                    <input type="text" id="bark-server" placeholder="https://api.day.app">
+                </div>
+
+                <div class="form-group">
+                    <label for="bark-device-key">Device Key *</label>
+                    <input type="text" id="bark-device-key" placeholder="Your Bark device key">
+                    <small>Required for Bark notifications. Leave empty to disable.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="bark-priority">Priority</label>
+                    <select id="bark-priority">
+                        <option value="active">Active (default)</option>
+                        <option value="timeSensitive">Time Sensitive</option>
+                        <option value="passive">Passive</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+
+        <!-- Threads List -->
+        <div class="section">
+            <div class="section-header">
+                <h2>Monitored Threads</h2>
+                <button id="add-thread-btn" class="btn btn-small">+ Add</button>
+            </div>
+            <div id="threads-list" class="threads-list">
+                <p class="empty-state">No threads configured yet</p>
+            </div>
+        </div>
+
+        <!-- Add/Edit Thread Form -->
+        <div id="thread-form" class="section" style="display:none;">
+            <h3 id="form-title">Add Thread</h3>
+            <form id="thread-config-form">
+                <div class="form-group">
+                    <label for="tid">Thread ID (TID) *</label>
+                    <input type="number" id="tid" required placeholder="e.g., 45974302">
+                </div>
+
+                <div class="form-group">
+                    <label for="author-notification">Author UIDs to Notify (comma-separated)</label>
+                    <input type="text" id="author-notification" placeholder="e.g., 150058,123456 (leave empty for all)">
+                    <small>Only send notifications for posts from these authors</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="last-seen">Start Monitoring From Post # (Optional)</label>
+                    <input type="number" id="last-seen" min="0" placeholder="0 (start from beginning)">
+                    <small>Set initial post number to skip earlier posts</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="check-interval">Check Interval (seconds)</label>
+                    <input type="number" id="check-interval" value="300" min="60">
+                    <small>How often to check for new posts (minimum 60 seconds)</small>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="use-schedule">
+                        Use Time-based Schedule
+                    </label>
+                </div>
+
+                <div id="schedule-config" style="display:none;">
+                    <textarea id="schedule-json" rows="10" placeholder='{
+  "days": ["weekdays"],
+  "start_time": "09:00",
+  "end_time": "18:00",
+  "interval": 300,
+  "description": "Weekday business hours"
+}'></textarea>
+                    <small>JSON array format. See examples in README.</small>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Save</button>
+                    <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Config Management -->
+        <div class="section" style="padding: 10px 20px;">
+            <div style="display: flex; gap: 10px;">
+                <button id="export-config-btn" class="btn btn-secondary" style="flex: 1;">
+                    📥 Export Config
+                </button>
+                <button id="import-config-btn" class="btn btn-secondary" style="flex: 1;">
+                    📤 Import Config
+                </button>
+            </div>
+            <input type="file" id="import-file-input" accept=".json" style="display: none;">
+        </div>
+
+        <!-- Footer -->
+        <footer>
+            <p class="version">v1.0.0 | No server required</p>
+        </footer>
+    </div>
+
+    <script src="popup.js" type="module"></script>
+</body>
+
+</html>
