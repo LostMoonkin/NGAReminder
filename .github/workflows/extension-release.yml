@@ -1,32 +1,85 @@
-name: Publish Extension
+name: Release Standalone Extension
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
-  build:
-    name: Package and Release
+  release:
+    name: Package and Release Standalone Extension
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Zip extension
-        run: |
-          cd extension
-          zip -r ../extension.zip ./*
-          cd ..
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Package standalone extension
+        run: |
+          cd extension-standalone
+          # Create zip excluding unnecessary files
+          zip -r ../extension-standalone.zip . \
+            -x "*.git*" \
+            -x "*README.md" \
+            -x "*.DS_Store"
+          cd ..
+          
+          # Verify the zip was created
+          ls -lh extension-standalone.zip
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## NGA Reminder Standalone Extension ${{ steps.get_version.outputs.VERSION }}
+          
+          ### Installation
+          
+          1. Download `extension-standalone.zip` below
+          2. Extract the ZIP file
+          3. Open Chrome → `chrome://extensions/`
+          4. Enable **Developer mode** (top right)
+          5. Click **Load unpacked**
+          6. Select the extracted folder
+          
+          ### Features in this Release
+          
+          - 🔐 Automatic authentication via browser cookies
+          - 🔔 Smart notifications (Chrome when focused, Bark when unfocused)
+          - 🔗 Clickable notification URLs to jump to posts
+          - ⏰ Time-based check schedules
+          - 👤 Author filtering
+          - 📊 Multi-thread monitoring
+          - 🎯 Configurable start position
+          
+          ### What's New
+          
+          See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/extension-standalone/README.md) for details.
+          
+          ---
+          
+          **Note:** This extension reads your NGA authentication cookies. This is necessary for the extension to work and all data stays in your browser.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: extension.zip
+          files: extension-standalone.zip
+          body_path: release_notes.md
           draft: false
           prerelease: false
+          name: Standalone Extension ${{ steps.get_version.outputs.VERSION }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-standalone-${{ steps.get_version.outputs.VERSION }}
+          path: extension-standalone.zip
+          retention-days: 30
