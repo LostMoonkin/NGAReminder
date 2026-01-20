@@ -1,37 +1,23 @@
-# Configuration files with sensitive credentials
-config.json
+# Compiled files
+**/*.rs.bk
+target/
 
-# Database files
-*.db
-*.db-journal
+# Executables
+*.exe
+*.out
+*.app
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Dependencies
+**/Cargo.lock
 
-# Virtual environments
-venv/
-env/
-ENV/
-.venv
+# Documentation
+**/doc/
+/target/doc/
+
+# Environment
+.env
+.env.test
+.env.local
 
 # IDE
 .vscode/
@@ -40,9 +26,20 @@ ENV/
 *.swo
 *~
 
-# OS
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
-# example result
-result.example.json
+# Coverage
+**/coverage/
+*.profraw
+
+# Rust analyzer
+rust-analyzer/
+config/config.json
+config/result.json
