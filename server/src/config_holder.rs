@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::iter::Map;
-use std::sync::{Mutex};
-use crate::model::config::Config;
+use std::sync::{Arc, Mutex};
+use crate::model::config::{Config, CrawlerConfig, MonitorConfig, NotifierConfig};
 
 pub struct ConfigHolder {
     config_file_path: String,
@@ -23,8 +22,20 @@ impl ConfigHolder {
         })
     }
 
-    pub fn get_config(&self) -> Config {
+    pub fn get_all_config(&self) -> Config {
         self.config.clone()
+    }
+
+    pub fn get_crawler_config(&self) -> CrawlerConfig {
+        self.config.crawler.clone()
+    }
+
+    pub fn get_monitor_config(&self) -> MonitorConfig {
+        self.config.monitor.clone()
+    }
+
+    pub fn get_notifier_config(&self) -> NotifierConfig {
+        self.config.notifier.clone()
     }
 
     pub async fn update_passport(&mut self, cid: String, uid: String) -> Result<(), Box<dyn Error>> {
@@ -36,7 +47,7 @@ impl ConfigHolder {
 
     pub async fn update_post_last_seen(&mut self, tid_to_post_number: &HashMap<u64, u64>) -> Result<(), Box<dyn Error>> {
         let _lock = self.file_lock.lock().unwrap();
-        for t in &mut self.config.crawler.monitored_threads {
+        for t in &mut self.config.monitor.monitored_threads {
             if tid_to_post_number.contains_key(&t.tid) {
                 let last_seen = tid_to_post_number[&t.tid];
                 t.last_seen_post_number = last_seen
