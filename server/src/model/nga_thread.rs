@@ -19,13 +19,17 @@ pub struct NGAThread {
     #[serde(rename(deserialize = "currentPage"))]
     pub current_page: u64,
     #[serde(rename(deserialize = "result"))]
-    pub posts: Vec<NAGPost>,
+    pub posts: Vec<NGAPost>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct NAGPost {
+pub struct NGAPost {
     pub tid: u64,
     pub pid: u64,
+    #[serde(default)]
+    pub page: u64,
+    #[serde(default)]
+    pub thread_title: String,
     pub content: String,
     #[serde(rename(deserialize = "postdate"))]
     pub post_date: String,

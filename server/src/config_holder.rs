@@ -1,7 +1,7 @@
+use crate::model::config::{Config, CrawlerConfig, MonitorConfig, NotifierConfig};
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
-use crate::model::config::{Config, CrawlerConfig, MonitorConfig, NotifierConfig};
+use std::sync::Mutex;
 
 pub struct ConfigHolder {
     config_file_path: String,
@@ -15,7 +15,7 @@ impl ConfigHolder {
 
         let origin_config: Config = serde_json::from_slice(&content)?;
         let file_lock = Mutex::new(0);
-        Ok(Self{
+        Ok(Self {
             config_file_path,
             config: origin_config,
             file_lock,
@@ -38,14 +38,21 @@ impl ConfigHolder {
         self.config.notifier.clone()
     }
 
-    pub async fn update_passport(&mut self, cid: String, uid: String) -> Result<(), Box<dyn Error>> {
+    pub async fn update_passport(
+        &mut self,
+        cid: String,
+        uid: String,
+    ) -> Result<(), Box<dyn Error>> {
         let _lock = self.file_lock.lock().unwrap();
         self.config.crawler.nga_passport_uid = uid;
         self.config.crawler.nga_passport_cid = cid;
         self.write_to_file().await
     }
 
-    pub async fn update_post_last_seen(&mut self, tid_to_post_number: &HashMap<u64, u64>) -> Result<(), Box<dyn Error>> {
+    pub async fn update_post_last_seen(
+        &mut self,
+        tid_to_post_number: &HashMap<u64, u64>,
+    ) -> Result<(), Box<dyn Error>> {
         let _lock = self.file_lock.lock().unwrap();
         for t in &mut self.config.monitor.monitored_threads {
             if tid_to_post_number.contains_key(&t.tid) {
@@ -63,5 +70,4 @@ impl ConfigHolder {
         tokio::fs::write(self.config_file_path.clone(), config_json).await?;
         Ok(())
     }
-
 }

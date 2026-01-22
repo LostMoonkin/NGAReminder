@@ -1,33 +1,50 @@
+use crate::config_holder::ConfigHolder;
+use crate::crawler::Crawler;
+use crate::model::config::MonitoredThread;
+use crate::model::nga_thread::NGAPost;
+use crate::notifier::{BarkNotifier, ConsoleNotifier, Notifier};
+use chrono::{DateTime, Datelike, Duration, Local, Weekday};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
-use chrono::{DateTime, Datelike, Local, Duration, Weekday};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use crate::config_holder::ConfigHolder;
-use crate::crawler::Crawler;
-use crate::model::config::MonitoredThread;
 
-const DEFAULT_POST_PER_PAGE:u64 = 20;
-const DEFAULT_THREAD_CHECK_INTERVAL:u64 = 300;
+const DEFAULT_POST_PER_PAGE: u64 = 20;
+const DEFAULT_THREAD_CHECK_INTERVAL: u64 = 300;
 const WEEKDAYS: [&str; 5] = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 const WEEKENDS: [&str; 2] = ["saturday", "sunday"];
 pub struct NGAMonitor {
     config_holder: ConfigHolder,
     crawler: Crawler,
     last_check_map: HashMap<u64, DateTime<Local>>,
+    notifiers: Vec<Box<dyn Notifier>>,
 }
 
 impl NGAMonitor {
     pub fn new(config_holder: ConfigHolder, crawler: Crawler) -> Self {
-        Self { config_holder, crawler, last_check_map: HashMap::new() }
+        let notifier_config = config_holder.get_notifier_config();
+        let mut notifiers: Vec<Box<dyn Notifier>> = Vec::new();
+        if let Some(bark_config) = notifier_config.bark {
+            notifiers.push(Box::new(BarkNotifier::new(bark_config)));
+        }
+        if let Some(console_config) = notifier_config.console {
+            notifiers.push(Box::new(ConsoleNotifier::new(console_config)));
+        }
+        Self {
+            config_holder,
+            crawler,
+            last_check_map: HashMap::new(),
+            notifiers,
+        }
     }
 
     pub async fn run(&mut self) {
         let config = self.config_holder.get_monitor_config();
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(config.monitor_duration));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(config.monitor_duration));
         // Define behavior if the system lags (Skip missed ticks to catch up)
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -54,7 +71,13 @@ impl NGAMonitor {
                 if need_check {
                     let res = self.check_thread(&thread).await;
                     match res {
-                        Ok(max_post_number ) => _ = tid_to_max_post_number.insert(thread.tid, max_post_number),
+                        Ok(max_post_number) => {
+                            println!(
+                                "Check thread finished, tid: {}, max_post_number: {}",
+                                thread.tid, max_post_number
+                            );
+                            _ = tid_to_max_post_number.insert(thread.tid, max_post_number)
+                        }
                         Err(err) => {
                             println!("Monitor thread failed ({}): {}", thread.tid, err);
                         }
@@ -62,21 +85,39 @@ impl NGAMonitor {
                     self.last_check_map.insert(thread.tid, Local::now());
                 }
             }
-            let res = self.config_holder.update_post_last_seen(&tid_to_max_post_number).await;
+            let res = self
+                .config_holder
+                .update_post_last_seen(&tid_to_max_post_number)
+                .await;
             if res.is_err() {
                 println!("Update post last seen failed: {}", res.err().unwrap());
             }
         }
     }
 
-    pub async fn check_thread(&self, thread_config: &MonitoredThread) -> Result<u64, Box<dyn Error>> {
+    pub async fn check_thread(
+        &self,
+        thread_config: &MonitoredThread,
+    ) -> Result<u64, Box<dyn Error>> {
         let monitor_config = self.config_holder.get_monitor_config();
-        println!("Checking thread: tid={}, last_seen_post_number={}", thread_config.tid, thread_config.last_seen_post_number);
+        println!(
+            "Checking thread: tid={}, last_seen_post_number={}",
+            thread_config.tid, thread_config.last_seen_post_number
+        );
 
         let last_seen_page = thread_config.last_seen_post_number / DEFAULT_POST_PER_PAGE + 1;
-        let cur_page = self.crawler.fetch_thread_with_page(thread_config.tid, last_seen_page, &self.config_holder.get_crawler_config()).await?;
+        let cur_page = self
+            .crawler
+            .fetch_thread_with_page(
+                thread_config.tid,
+                last_seen_page,
+                &self.config_holder.get_crawler_config(),
+            )
+            .await?;
         // Limit parallel task nums.
-        let task_semaphore = Arc::new(Semaphore::new(monitor_config.fetch_posts_parallel_limit as usize));
+        let task_semaphore = Arc::new(Semaphore::new(
+            monitor_config.fetch_posts_parallel_limit as usize,
+        ));
         // Arc crawler and config
         let crawler = Arc::new(self.crawler.clone());
         let crawler_config = Arc::new(self.config_holder.get_crawler_config());
@@ -90,13 +131,16 @@ impl NGAMonitor {
             tasks.spawn(async move {
                 let _permit = semaphore_cloned.acquire_owned().await;
                 println!("Starting fetch thread #{}", page_num);
-                let res = crawler_cloned.fetch_thread_with_page(tid, page_num, &crawler_config_cloned).await;
+                let res = crawler_cloned
+                    .fetch_thread_with_page(tid, page_num, &crawler_config_cloned)
+                    .await;
                 match res {
-                    Ok(data) => {
-                        Ok(data)
-                    }
+                    Ok(data) => Ok(data),
                     Err(err) => {
-                        println!("Error occurred during fetch thread data: tid={}, err={}", tid, err);
+                        println!(
+                            "Error occurred during fetch thread data: tid={}, err={}",
+                            tid, err
+                        );
                         Err(err.to_string())
                     }
                 }
@@ -107,13 +151,11 @@ impl NGAMonitor {
         task_results.push(cur_page);
         while let Some(res) = tasks.join_next().await {
             match res {
-                Ok(thread_res) => {
-                    match thread_res {
-                        Ok(thread_data) => {
-                            task_results.push(thread_data);
-                        }
-                        Err(_) => {}
+                Ok(thread_res) => match thread_res {
+                    Ok(thread_data) => {
+                        task_results.push(thread_data);
                     }
+                    Err(_) => {}
                 },
                 Err(err) => {
                     eprintln!("Error join fetch thread tasks: {}", err);
@@ -123,26 +165,51 @@ impl NGAMonitor {
 
         // parse thread page data
         task_results.sort_by(|a, b| a.current_page.cmp(&b.current_page));
-        let mut notify_posts = vec![];
         let mut max_post_number = 0;
         for thread in task_results {
             let posts = thread.posts;
             for post in posts {
                 max_post_number = max(max_post_number, post.post_number);
-                if thread_config.author_notification.contains(&post.author.author_uid) {
+                if thread_config
+                    .author_notification
+                    .contains(&post.author.author_uid)
+                    && post.post_number > thread_config.last_seen_post_number
+                {
                     println!("Collect notify post: tid={}, pid={}", post.tid, post.pid);
-                    notify_posts.push(post);
+                    // notify
+                    self.send_notification(post).await
                 }
             }
         }
-
-        // notify
-
         Ok(max_post_number)
     }
 
+    async fn send_notification(&self, post: NGAPost) {
+        let title = format!("New Post: {}", post.thread_title);
+        let message = format!(
+            "{} (#{}):\n{}...",
+            post.author.author_name, post.post_number, post.content
+        );
+        let extra = HashMap::from([(
+            "url".to_string(),
+            format!(
+                "https://nga.178.com/read.php?tid={}&page={}#pid{}Anchor",
+                post.tid, post.page, post.pid
+            ),
+        )]);
+        for notifier in &self.notifiers {
+            let _success = notifier
+                .send_notification(&title, &message, Some(extra.clone()))
+                .await;
+        }
+    }
+
     fn get_check_interval(&self, thread_config: &MonitoredThread) -> Duration {
-        let default_interval = if thread_config.check_interval == 0 {DEFAULT_THREAD_CHECK_INTERVAL} else {thread_config.check_interval};
+        let default_interval = if thread_config.check_interval == 0 {
+            DEFAULT_THREAD_CHECK_INTERVAL
+        } else {
+            thread_config.check_interval
+        };
         if thread_config.check_schedule.is_none() {
             return Duration::seconds(default_interval as i64);
         }
@@ -183,7 +250,7 @@ fn expand_days(tid: u64, str_weekdays: Vec<String>) -> Vec<Weekday> {
         let expand = match day_str.as_str() {
             "weekdays" => WEEKDAYS.to_vec(),
             "weekends" => WEEKENDS.to_vec(),
-            _ => [day_str.as_str()].to_vec()
+            _ => [day_str.as_str()].to_vec(),
         };
         for v in expand {
             match Weekday::from_str(v) {
