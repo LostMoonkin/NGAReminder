@@ -5,6 +5,13 @@ pub struct Config {
     pub monitor: MonitorConfig,
     pub crawler: CrawlerConfig,
     pub notifier: NotifierConfig,
+    pub web: WebConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WebConfig {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

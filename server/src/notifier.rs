@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_BARK_GROUP: &str = "NGA Reminder";
 
 #[async_trait]
-pub trait Notifier {
+pub trait Notifier: Send + Sync {
     async fn send_notification(
         &self,
         title: &String,

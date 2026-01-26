@@ -16,16 +16,17 @@ const DEFAULT_POST_PER_PAGE: u64 = 20;
 const DEFAULT_THREAD_CHECK_INTERVAL: u64 = 300;
 const WEEKDAYS: [&str; 5] = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 const WEEKENDS: [&str; 2] = ["saturday", "sunday"];
+
 pub struct NGAMonitor {
-    config_holder: ConfigHolder,
+    config_holder: Arc<ConfigHolder>,
     crawler: Crawler,
     last_check_map: HashMap<u64, DateTime<Local>>,
     notifiers: Vec<Box<dyn Notifier>>,
 }
 
 impl NGAMonitor {
-    pub fn new(config_holder: ConfigHolder, crawler: Crawler) -> Self {
-        let notifier_config = config_holder.get_notifier_config();
+    pub async fn new(config_holder: Arc<ConfigHolder>, crawler: Crawler) -> Self {
+        let notifier_config = config_holder.get_notifier_config().await;
         let mut notifiers: Vec<Box<dyn Notifier>> = Vec::new();
         if let Some(bark_config) = notifier_config.bark {
             notifiers.push(Box::new(BarkNotifier::new(bark_config)));
@@ -41,8 +42,20 @@ impl NGAMonitor {
         }
     }
 
+    async fn get_monitor_config(&self) -> crate::model::config::MonitorConfig {
+        self.config_holder.get_monitor_config().await
+    }
+
+    async fn get_crawler_config(&self) -> crate::model::config::CrawlerConfig {
+        self.config_holder.get_crawler_config().await
+    }
+
+    async fn update_post_last_seen(&self, tid_to_post_number: &HashMap<u64, u64>) -> Result<(), Box<dyn Error>> {
+        self.config_holder.update_post_last_seen(tid_to_post_number).await
+    }
+
     pub async fn run(&mut self) {
-        let config = self.config_holder.get_monitor_config();
+        let config = self.get_monitor_config().await;
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(config.monitor_duration));
         // Define behavior if the system lags (Skip missed ticks to catch up)
@@ -53,7 +66,9 @@ impl NGAMonitor {
             interval.tick().await;
             println!("Start check threads.");
             let mut tid_to_max_post_number = HashMap::new();
-            for thread in self.config_holder.get_monitor_config().monitored_threads {
+            let monitored_threads = self.get_monitor_config().await.monitored_threads;
+            
+            for thread in monitored_threads {
                 let last_check = self.last_check_map.get(&thread.tid);
                 let mut need_check = false;
                 match last_check {
@@ -85,10 +100,8 @@ impl NGAMonitor {
                     self.last_check_map.insert(thread.tid, Local::now());
                 }
             }
-            let res = self
-                .config_holder
-                .update_post_last_seen(&tid_to_max_post_number)
-                .await;
+            
+            let res = self.update_post_last_seen(&tid_to_max_post_number).await;
             if res.is_err() {
                 println!("Update post last seen failed: {}", res.err().unwrap());
             }
@@ -99,19 +112,20 @@ impl NGAMonitor {
         &self,
         thread_config: &MonitoredThread,
     ) -> Result<u64, Box<dyn Error>> {
-        let monitor_config = self.config_holder.get_monitor_config();
+        let monitor_config = self.get_monitor_config().await;
         println!(
             "Checking thread: tid={}, last_seen_post_number={}",
             thread_config.tid, thread_config.last_seen_post_number
         );
 
         let last_seen_page = thread_config.last_seen_post_number / DEFAULT_POST_PER_PAGE + 1;
+        let crawler_config = self.get_crawler_config().await;
         let cur_page = self
             .crawler
             .fetch_thread_with_page(
                 thread_config.tid,
                 last_seen_page,
-                &self.config_holder.get_crawler_config(),
+                &crawler_config,
             )
             .await?;
         // Limit parallel task nums.
@@ -120,7 +134,7 @@ impl NGAMonitor {
         ));
         // Arc crawler and config
         let crawler = Arc::new(self.crawler.clone());
-        let crawler_config = Arc::new(self.config_holder.get_crawler_config());
+        let crawler_config = Arc::new(crawler_config);
         let mut tasks = JoinSet::new();
         let tid = thread_config.tid;
         for page_num in (last_seen_page + 1)..=cur_page.total_pages {

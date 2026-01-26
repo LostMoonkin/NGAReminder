@@ -75,20 +75,22 @@ impl Crawler {
         // check code and message from untyped value
         let value: Value = serde_json::from_str(&content)?;
         let optional_code = value.get("code").unwrap().as_u64();
-        if optional_code.is_none() {
-            println!(
-                "Failed to fetch thread with page, invalid response data {}: {}",
-                tid, value
-            );
-            return Err(Box::new(ResponseContentError(content)));
+        if let Some(code) = optional_code
+            && code == 0
+        {
+            let mut thread_data: NGAThread = serde_json::from_value(value)?;
+            // set tid as tid in argument
+            thread_data.tid = tid;
+            for post in &mut thread_data.posts {
+                post.page = page;
+                post.thread_title = thread_data.title.clone();
+            }
+            return Ok(thread_data);
         }
-        let mut thread_data: NGAThread = serde_json::from_value(value)?;
-        // set tid as tid in argument
-        thread_data.tid = tid;
-        for post in &mut thread_data.posts {
-            post.page = page;
-            post.thread_title = thread_data.title.clone();
-        }
-        Ok(thread_data)
+        println!(
+            "Failed to fetch thread with page, invalid response tid=({}), response=({})",
+            tid, value
+        );
+        Err(Box::new(ResponseContentError(content)))
     }
 }

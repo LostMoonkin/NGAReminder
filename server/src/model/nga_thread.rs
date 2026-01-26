@@ -2,7 +2,6 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NGAThread {
-    pub code: u64,
     pub msg: String,
     #[serde(default)]
     pub tid: u64,
