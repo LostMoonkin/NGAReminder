@@ -33,7 +33,7 @@ Full-featured setup with data persistence.
 ### Installation
 
 #### From GitHub Releases (Easy)
-1. Download the latest `extension-standalone.zip` from [Releases](https://github.com/YOUR_USERNAME/NGAReminder/releases)
+1. Download the latest `extension-standalone.zip` from [Releases](https://github.com/LostMoonkin/NGAReminder/releases)
 2. Extract the ZIP file
 3. Open Chrome → `chrome://extensions/`
 4. Enable **Developer mode** (top right)
@@ -42,7 +42,7 @@ Full-featured setup with data persistence.
 
 #### From Source
 ```bash
-git clone https://github.com/YOUR_USERNAME/NGAReminder.git
+git clone https://github.com/LostMoonkin/NGAReminder.git
 cd NGAReminder
 ```
 
@@ -226,8 +226,8 @@ For detailed troubleshooting, see individual READMEs:
 
 ## 📮 Support
 
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/NGAReminder/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/YOUR_USERNAME/NGAReminder/discussions)
+- **Issues**: [GitHub Issues](https://github.com/LostMoonkin/NGAReminder/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/LostMoonkin/NGAReminder/discussions)
 
 ---
 

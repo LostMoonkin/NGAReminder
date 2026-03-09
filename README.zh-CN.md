@@ -31,7 +31,7 @@
 ### 安装
 
 #### 从 GitHub Releases 安装（简单）
-1. 从 [Releases](https://github.com/YOUR_USERNAME/NGAReminder/releases) 下载最新的 `extension-standalone.zip`
+1. 从 [Releases](https://github.com/LostMoonkin/NGAReminder/releases) 下载最新的 `extension-standalone.zip`
 2. 解压 ZIP 文件
 3. 打开 Chrome → `chrome://extensions/`
 4. 开启右上角的**开发者模式**
@@ -40,7 +40,7 @@
 
 #### 从源码安装
 ```bash
-git clone https://github.com/YOUR_USERNAME/NGAReminder.git
+git clone https://github.com/LostMoonkin/NGAReminder.git
 cd NGAReminder
 ```
 
@@ -224,8 +224,8 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
 
 ## 📮 支持
 
-- **问题反馈**：[GitHub Issues](https://github.com/YOUR_USERNAME/NGAReminder/issues)
-- **讨论交流**：[GitHub Discussions](https://github.com/YOUR_USERNAME/NGAReminder/discussions)
+- **问题反馈**：[GitHub Issues](https://github.com/LostMoonkin/NGAReminder/issues)
+- **讨论交流**：[GitHub Discussions](https://github.com/LostMoonkin/NGAReminder/discussions)
 
 ---
 
