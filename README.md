@@ -1,5 +1,7 @@
 # NGA Reminder
 
+[🇨🇳 中文](README.zh-CN.md)
+
 A comprehensive toolset to monitor NGA forum threads and receive real-time notifications for new posts.
 
 ## 🎯 Two Versions Available
@@ -21,7 +23,7 @@ Full-featured setup with data persistence.
 - ✅ API access for custom integrations
 - ⚠️ Requires Python server setup
 
-**[→ View Server Documentation](server/README.md)**  
+**[→ View Server Documentation](server/README.md)**
 **[→ View Server Extension Documentation](extension/README.md)**
 
 ---
