@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
     <meta charset="UTF-8">
@@ -12,60 +12,77 @@
     <div class="container">
         <header>
             <h1>🔔 NGA Reminder</h1>
-            <p class="subtitle">Standalone Edition</p>
+            <p class="subtitle" data-i18n="subtitle">独立版</p>
 
             <!-- Tab Navigation -->
             <div class="tabs" style="display: flex; gap: 10px; margin-top: 15px;">
                 <button id="tab-settings" class="tab-btn active"
-                    style="flex: 1; padding: 8px; border: none; background: #667eea; color: white; border-radius: 4px; cursor: pointer; font-weight: 600;">
-                    ⚙️ Settings
+                    style="flex: 1; padding: 8px; border: none; background: #667eea; color: white; border-radius: 4px; cursor: pointer; font-weight: 600;"
+                    data-i18n="tabSettings">
+                    ⚙️ 设置
                 </button>
                 <button id="tab-posts" class="tab-btn"
                     style="flex: 1; padding: 8px; border: 1px solid #667eea; background: white; color: #667eea; border-radius: 4px; cursor: pointer; font-weight: 600;">
-                    📬 Unseen (<span id="tab-unseen-count">0</span>)
+                    <span data-i18n="tabUnseen">📬 未读</span> (<span id="tab-unseen-count">0</span>)
                 </button>
             </div>
         </header>
 
         <!-- Settings View -->
         <div id="view-settings" class="view-content">
+
+            <!-- Language Selector -->
+            <div class="section" style="padding: 10px 20px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <label for="lang-select" style="font-weight: 600; font-size: 14px; white-space: nowrap;"
+                        data-i18n="languageLabel">🌐 语言</label>
+                    <select id="lang-select"
+                        style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; cursor: pointer;">
+                        <option value="zh" data-i18n="langZh">中文</option>
+                        <option value="en" data-i18n="langEn">English</option>
+                    </select>
+                </div>
+            </div>
+
             <!-- Cookie Status -->
             <div class="section">
                 <div class="status-box" id="cookie-status">
-                    <span class="loading">Checking cookies...</span>
+                    <span class="loading" data-i18n="checkingCookies">检查登录状态...</span>
                 </div>
-                <button id="login-btn" class="btn btn-secondary" style="display:none;">
-                    Open NGA to Login
+                <button id="login-btn" class="btn btn-secondary" style="display:none;" data-i18n="openNgaLogin">
+                    打开 NGA 登录
                 </button>
             </div>
 
             <!-- Bark Settings -->
             <div class="section">
                 <div class="section-header">
-                    <h2>🔕 Bark Settings</h2>
-                    <button id="save-bark-btn" class="btn btn-small">Save</button>
+                    <h2 data-i18n="barkSettings">🔕 Bark 推送设置</h2>
+                    <button id="save-bark-btn" class="btn btn-small" data-i18n="barkSave">保存</button>
                 </div>
                 <div class="bark-info">
-                    <p>Configure Bark to receive notifications when browser is unfocused</p>
+                    <p data-i18n="barkInfo">配置 Bark 以在浏览器未聚焦时接收推送通知</p>
                 </div>
                 <form id="bark-settings-form">
                     <div class="form-group">
-                        <label for="bark-server">Bark Server URL</label>
-                        <input type="text" id="bark-server" placeholder="https://api.day.app">
+                        <label for="bark-server" data-i18n="barkServerLabel">Bark 服务器地址</label>
+                        <input type="text" id="bark-server" data-i18n-placeholder="barkServerPlaceholder"
+                            placeholder="https://api.day.app">
                     </div>
 
                     <div class="form-group">
-                        <label for="bark-device-key">Device Key *</label>
-                        <input type="text" id="bark-device-key" placeholder="Your Bark device key">
-                        <small>Required for Bark notifications. Leave empty to disable.</small>
+                        <label for="bark-device-key" data-i18n="barkDeviceKeyLabel">设备密钥 *</label>
+                        <input type="text" id="bark-device-key" data-i18n-placeholder="barkDeviceKeyPlaceholder"
+                            placeholder="您的 Bark 设备密钥">
+                        <small data-i18n="barkDeviceKeyHint">接收 Bark 推送必填，留空则禁用。</small>
                     </div>
 
                     <div class="form-group">
-                        <label for="bark-priority">Priority</label>
+                        <label for="bark-priority" data-i18n="barkPriorityLabel">推送优先级</label>
                         <select id="bark-priority">
-                            <option value="active">Active (default)</option>
-                            <option value="timeSensitive">Time Sensitive</option>
-                            <option value="passive">Passive</option>
+                            <option value="active" data-i18n="barkPriorityActive">活跃（默认）</option>
+                            <option value="timeSensitive" data-i18n="barkPriorityTimeSensitive">时效性</option>
+                            <option value="passive" data-i18n="barkPriorityPassive">被动</option>
                         </select>
                     </div>
                 </form>
@@ -74,46 +91,49 @@
             <!-- Threads List -->
             <div class="section">
                 <div class="section-header">
-                    <h2>Monitored Threads</h2>
-                    <button id="add-thread-btn" class="btn btn-small">+ Add</button>
+                    <h2 data-i18n="monitoredThreads">监控主题</h2>
+                    <button id="add-thread-btn" class="btn btn-small" data-i18n="addThread">+ 添加</button>
                 </div>
                 <div id="threads-list" class="threads-list">
-                    <p class="empty-state">No threads configured yet</p>
+                    <p class="empty-state" data-i18n="noThreads">尚未配置任何主题</p>
                 </div>
             </div>
 
             <!-- Add/Edit Thread Form -->
             <div id="thread-form" class="section" style="display:none;">
-                <h3 id="form-title">Add Thread</h3>
+                <h3 id="form-title" data-i18n="addThreadTitle">添加主题</h3>
                 <form id="thread-config-form">
                     <div class="form-group">
-                        <label for="tid">Thread ID (TID) *</label>
-                        <input type="number" id="tid" required placeholder="e.g., 45974302">
+                        <label for="tid" data-i18n="tidLabel">主题 ID（TID）*</label>
+                        <input type="number" id="tid" required data-i18n-placeholder="tidPlaceholder"
+                            placeholder="例如：45974302">
                     </div>
 
                     <div class="form-group">
-                        <label for="author-notification">Author UIDs to Notify (comma-separated)</label>
+                        <label for="author-notification" data-i18n="authorNotificationLabel">要通知的作者 UID（逗号分隔）</label>
                         <input type="text" id="author-notification"
-                            placeholder="e.g., 150058,123456 (leave empty for all)">
-                        <small>Only send notifications for posts from these authors</small>
+                            data-i18n-placeholder="authorNotificationPlaceholder"
+                            placeholder="例如：150058,123456（留空则通知所有人）">
+                        <small data-i18n="authorNotificationHint">仅在这些作者发帖时发送通知</small>
                     </div>
 
                     <div class="form-group">
-                        <label for="last-seen">Start Monitoring From Post # (Optional)</label>
-                        <input type="number" id="last-seen" min="0" placeholder="0 (start from beginning)">
-                        <small>Set initial post number to skip earlier posts</small>
+                        <label for="last-seen" data-i18n="lastSeenLabel">从第 # 楼开始监控（可选）</label>
+                        <input type="number" id="last-seen" min="0" data-i18n-placeholder="lastSeenPlaceholder"
+                            placeholder="0（从头开始）">
+                        <small data-i18n="lastSeenHint">设置初始楼层以跳过之前的帖子</small>
                     </div>
 
                     <div class="form-group">
-                        <label for="check-interval">Check Interval (seconds)</label>
+                        <label for="check-interval" data-i18n="checkIntervalLabel">检查间隔（秒）</label>
                         <input type="number" id="check-interval" value="300" min="60">
-                        <small>How often to check for new posts (minimum 60 seconds)</small>
+                        <small data-i18n="checkIntervalHint">检查新帖的频率（最少 60 秒）</small>
                     </div>
 
                     <div class="form-group">
                         <label>
                             <input type="checkbox" id="use-schedule">
-                            Use Time-based Schedule
+                            <span data-i18n="useScheduleLabel">使用时间表</span>
                         </label>
                     </div>
 
@@ -125,12 +145,13 @@
   "interval": 300,
   "description": "Weekday business hours"
 }'></textarea>
-                        <small>JSON array format. See examples in README.</small>
+                        <small data-i18n="scheduleHint">JSON 数组格式，示例请参阅 README。</small>
                     </div>
 
                     <div class="form-actions">
-                        <button type="submit" class="btn btn-primary">Save</button>
-                        <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel</button>
+                        <button type="submit" class="btn btn-primary" data-i18n="saveBtn">保存</button>
+                        <button type="button" id="cancel-btn" class="btn btn-secondary"
+                            data-i18n="cancelBtn">取消</button>
                     </div>
                 </form>
             </div>
@@ -138,11 +159,11 @@
             <!-- Config Management -->
             <div class="section" style="padding: 10px 20px;">
                 <div style="display: flex; gap: 10px;">
-                    <button id="export-config-btn" class="btn btn-secondary" style="flex: 1;">
-                        📥 Export Config
+                    <button id="export-config-btn" class="btn btn-secondary" style="flex: 1;" data-i18n="exportConfig">
+                        📥 导出配置
                     </button>
-                    <button id="import-config-btn" class="btn btn-secondary" style="flex: 1;">
-                        📤 Import Config
+                    <button id="import-config-btn" class="btn btn-secondary" style="flex: 1;" data-i18n="importConfig">
+                        📤 导入配置
                     </button>
                 </div>
                 <input type="file" id="import-file-input" accept=".json" style="display: none;">
@@ -155,27 +176,27 @@
             <div class="posts-header"
                 style="display: flex; justify-content: space-between; align-items: flex-end; padding: 15px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; margin: -20px -20px 20px -20px;">
                 <div style="display: flex; flex-direction: column;">
-                    <h2 style="font-size: 18px; margin: 0; line-height: 1.2;">Unseen Posts</h2>
+                    <h2 style="font-size: 18px; margin: 0; line-height: 1.2;" data-i18n="unseenPosts">未读帖子</h2>
                     <div class="posts-count" id="posts-count"
-                        style="font-size: 13px; opacity: 0.9; margin-top: 4px; line-height: 1;">0 posts</div>
+                        style="font-size: 13px; opacity: 0.9; margin-top: 4px; line-height: 1;">0</div>
                 </div>
                 <button id="clear-all-btn" class="btn btn-danger"
-                    style="background: #e74c3c; border: none; padding: 8px 16px; color: white; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600;">Clear
-                    All</button>
+                    style="background: #e74c3c; border: none; padding: 8px 16px; color: white; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600;"
+                    data-i18n="clearAll">清除全部</button>
             </div>
 
             <div class="posts-list" id="posts-list" style="max-height: 400px; overflow-y: auto; padding: 0 20px;">
                 <div class="empty-state" style="text-align: center; padding: 40px 20px; color: #999;">
                     <div style="font-size: 48px; margin-bottom: 15px;">📭</div>
-                    <h3 style="font-size: 16px; margin-bottom: 8px;">No Unseen Posts</h3>
-                    <p style="font-size: 13px; color: #bbb;">You're all caught up!</p>
+                    <h3 style="font-size: 16px; margin-bottom: 8px;" data-i18n="noUnseenPosts">没有未读帖子</h3>
+                    <p style="font-size: 13px; color: #bbb;" data-i18n="allCaughtUp">您已全部阅读完毕！</p>
                 </div>
             </div>
         </div>
 
         <!-- Footer -->
         <footer>
-            <p class="version">v1.0.0 | No server required</p>
+            <p class="version" data-i18n="footer">v1.0.0 | 无需服务器</p>
         </footer>
     </div>
 

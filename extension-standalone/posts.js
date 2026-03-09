@@ -2,15 +2,19 @@
  * Unseen Posts Page Controller
  */
 
+import { initI18n, t, applyTranslations } from './i18n.js';
+
 // Load and display unseen posts on page load
 document.addEventListener('DOMContentLoaded', async () => {
+    await initI18n();
+    applyTranslations();
     await loadUnseenPosts();
     setupEventListeners();
 });
 
 function setupEventListeners() {
     document.getElementById('clear-all-btn').addEventListener('click', async () => {
-        if (confirm('Clear all unseen posts?')) {
+        if (confirm(t('clearAllConfirm'))) {
             await clearAllPosts();
         }
     });
@@ -23,14 +27,15 @@ async function loadUnseenPosts() {
 
     // Update count
     const count = unseenPosts.length;
-    postsCount.textContent = `${count} ${count === 1 ? 'post' : 'posts'}`;
+    const postsFn = t('posts');
+    postsCount.textContent = typeof postsFn === 'function' ? postsFn(count) : `${count}`;
 
     if (unseenPosts.length === 0) {
         postsList.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">📭</div>
-                <h2>No Unseen Posts</h2>
-                <p>You're all caught up!</p>
+                <h2>${t('noUnseenPosts')}</h2>
+                <p>${t('allCaughtUp')}</p>
             </div>
         `;
         return;
@@ -102,10 +107,10 @@ function formatTimestamp(date) {
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
 
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
+    if (diffMins < 1) return t('justNow');
+    if (diffMins < 60) return t('minutesAgo')(diffMins);
+    if (diffHours < 24) return t('hoursAgo')(diffHours);
+    if (diffDays < 7) return t('daysAgo')(diffDays);
 
     return date.toLocaleDateString();
 }

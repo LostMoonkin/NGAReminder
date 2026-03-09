@@ -2,16 +2,39 @@
  * Popup UI Controller
  */
 
+import { initI18n, t, applyTranslations, setLang, getCurrentLang } from './i18n.js';
+
 let currentEditIndex = null;
 
 // Initialize on load
 document.addEventListener('DOMContentLoaded', async () => {
+    await initI18n();
+    applyTranslations();
+    initLangSelector();
+
     await checkCookieStatus();
     await loadBarkSettings();
     await loadUnseenCount();
     await loadThreads();
     setupEventListeners();
 });
+
+function initLangSelector() {
+    const select = document.getElementById('lang-select');
+    select.value = getCurrentLang();
+    select.addEventListener('change', async () => {
+        await setLang(select.value);
+        applyTranslations();
+        // Re-render dynamic content that was built with t()
+        await checkCookieStatus();
+        await loadThreads();
+        await loadUnseenCount();
+        // If unseen tab is active, re-render it too
+        if (document.getElementById('view-posts').style.display !== 'none') {
+            await loadUnseenPostsList();
+        }
+    });
+}
 
 async function checkCookieStatus() {
     const statusBox = document.getElementById('cookie-status');
@@ -23,16 +46,16 @@ async function checkCookieStatus() {
 
         if (cookies.uid && cookies.cid) {
             statusBox.className = 'status-box status-ok';
-            statusBox.innerHTML = `✓ Logged in as UID ${cookies.uid}`;
+            statusBox.innerHTML = `${t('loggedInAs')} ${cookies.uid}`;
             loginBtn.style.display = 'none';
         } else {
             statusBox.className = 'status-box status-error';
-            statusBox.innerHTML = '✗ Not logged in to NGA';
+            statusBox.innerHTML = t('notLoggedIn');
             loginBtn.style.display = 'block';
         }
     } catch (error) {
         statusBox.className = 'status-box status-error';
-        statusBox.innerHTML = '✗ Error checking cookies';
+        statusBox.innerHTML = t('errorCheckingCookies');
     }
 }
 
@@ -69,7 +92,7 @@ async function saveBarkSettings() {
     // Show feedback
     const saveBtn = document.getElementById('save-bark-btn');
     const originalText = saveBtn.textContent;
-    saveBtn.textContent = '✓ Saved';
+    saveBtn.textContent = t('barkSaved');
     saveBtn.disabled = true;
 
     setTimeout(() => {
@@ -83,7 +106,7 @@ async function loadThreads() {
     const threadsList = document.getElementById('threads-list');
 
     if (!threads || threads.length === 0) {
-        threadsList.innerHTML = '<p class="empty-state">No threads configured yet</p>';
+        threadsList.innerHTML = `<p class="empty-state">${t('noThreads')}</p>`;
         return;
     }
 
@@ -98,8 +121,8 @@ function createThreadCard(thread, index) {
     const card = document.createElement('div');
     card.className = 'thread-card';
 
-    const interval = thread.checkIntervalSchedule ? 'Dynamic' : `${thread.checkInterval}s`;
-    const lastSeen = thread.lastSeenPostNumber ? `#${thread.lastSeenPostNumber}` : 'Not checked';
+    const interval = thread.checkIntervalSchedule ? t('dynamic') : `${thread.checkInterval}s`;
+    const lastSeen = thread.lastSeenPostNumber ? `#${thread.lastSeenPostNumber}` : t('notChecked');
 
     card.innerHTML = `
         <div class="thread-header">
@@ -111,15 +134,15 @@ function createThreadCard(thread, index) {
         </div>
         <div class="thread-details">
             <p><strong>TID:</strong> ${thread.tid}</p>
-            <p><strong>Interval:</strong> ${interval}</p>
-            <p><strong>Last Seen:</strong> ${lastSeen}</p>
+            <p><strong>${t('interval')}:</strong> ${interval}</p>
+            <p><strong>${t('lastSeen')}:</strong> ${lastSeen}</p>
             ${thread.authorNotification && thread.authorNotification.length > 0 ?
-            `<p><strong>Notify UIDs:</strong> ${thread.authorNotification.join(', ')}</p>` : ''}
+            `<p><strong>${t('notifyUIDs')}:</strong> ${thread.authorNotification.join(', ')}</p>` : ''}
         </div>
         <div class="thread-actions">
-            <button class="btn btn-small btn-edit" data-index="${index}">Edit</button>
-            <button class="btn btn-small btn-danger btn-delete" data-index="${index}">Delete</button>
-            <button class="btn btn-small btn-test" data-index="${index}">Test</button>
+            <button class="btn btn-small btn-edit" data-index="${index}">${t('editBtn')}</button>
+            <button class="btn btn-small btn-danger btn-delete" data-index="${index}">${t('deleteBtn')}</button>
+            <button class="btn btn-small btn-test" data-index="${index}">${t('testBtn')}</button>
         </div>
     `;
 
@@ -215,7 +238,7 @@ function showThreadForm(thread = null, index = null) {
     const formTitle = document.getElementById('form-title');
 
     if (thread) {
-        formTitle.textContent = 'Edit Thread';
+        formTitle.textContent = t('editThreadTitle');
         document.getElementById('tid').value = thread.tid;
         document.getElementById('author-notification').value =
             thread.authorNotification ? thread.authorNotification.join(',') : '';
@@ -229,7 +252,7 @@ function showThreadForm(thread = null, index = null) {
                 JSON.stringify(thread.checkIntervalSchedule, null, 2);
         }
     } else {
-        formTitle.textContent = 'Add Thread';
+        formTitle.textContent = t('addThreadTitle');
         document.getElementById('thread-config-form').reset();
         document.getElementById('schedule-config').style.display = 'none';
     }
@@ -270,7 +293,7 @@ async function saveThread() {
                 }
             }
         } catch (error) {
-            alert('Invalid schedule JSON format: ' + error.message);
+            alert(t('invalidScheduleJson') + error.message);
             return;
         }
     }
@@ -317,7 +340,7 @@ async function editThread(index) {
 }
 
 async function deleteThread(index) {
-    if (!confirm('Are you sure you want to delete this thread?')) {
+    if (!confirm(t('deleteConfirm'))) {
         return;
     }
 
@@ -331,7 +354,7 @@ async function testThread(index, btn) {
     const { threads } = await chrome.storage.local.get(['threads']);
     const thread = threads[index];
 
-    btn.textContent = 'Testing...';
+    btn.textContent = t('testingBtn');
     btn.disabled = true;
 
     try {
@@ -341,14 +364,14 @@ async function testThread(index, btn) {
         });
 
         if (response.success) {
-            alert('Test completed! Check console for details.');
+            alert(t('testSuccess'));
         } else {
-            alert('Test failed: ' + response.error);
+            alert(t('testFailed') + response.error);
         }
     } catch (error) {
-        alert('Test error: ' + error.message);
+        alert(t('testError') + error.message);
     } finally {
-        btn.textContent = 'Test';
+        btn.textContent = t('testBtn');
         btn.disabled = false;
     }
 }
@@ -376,9 +399,9 @@ async function exportConfig() {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        alert('Configuration exported successfully!');
+        alert(t('exportSuccess'));
     } catch (error) {
-        alert('Error exporting configuration: ' + error.message);
+        alert(t('exportError') + error.message);
     }
 }
 
@@ -389,14 +412,12 @@ async function importConfig(file) {
 
         // Validate config structure
         if (!config.version || !Array.isArray(config.threads)) {
-            throw new Error('Invalid configuration file format');
+            throw new Error(t('importInvalidFormat'));
         }
 
         // Confirm before importing
         const threadCount = config.threads.length;
-        const message = `Import configuration with ${threadCount} thread(s)?\n\nThis will replace your current configuration.`;
-
-        if (!confirm(message)) {
+        if (!confirm(t('importConfirm')(threadCount))) {
             return;
         }
 
@@ -416,9 +437,9 @@ async function importConfig(file) {
         await loadThreads();
         await loadUnseenCount();
 
-        alert(`Configuration imported successfully!\n${threadCount} thread(s) loaded.`);
+        alert(t('importSuccess')(threadCount));
     } catch (error) {
-        alert('Error importing configuration: ' + error.message);
+        alert(t('importError') + error.message);
     }
 }
 
@@ -449,15 +470,16 @@ async function loadUnseenPostsList() {
     const postsCount = document.getElementById('posts-count');
 
     const count = unseenPosts.length;
-    postsCount.textContent = `${count} ${count === 1 ? 'post' : 'posts'}`;
+    const postsFn = t('posts');
+    postsCount.textContent = typeof postsFn === 'function' ? postsFn(count) : `${count}`;
     document.getElementById('tab-unseen-count').textContent = count;
 
     if (unseenPosts.length === 0) {
         postsList.innerHTML = `
             <div class="empty-state" style="text-align: center; padding: 40px 20px; color: #999;">
                 <div style="font-size: 48px; margin-bottom: 15px;">📭</div>
-                <h3 style="font-size: 16px; margin-bottom: 8px;">No Unseen Posts</h3>
-                <p style="font-size: 13px; color: #bbb;">You're all caught up!</p>
+                <h3 style="font-size: 16px; margin-bottom: 8px;">${t('noUnseenPosts')}</h3>
+                <p style="font-size: 13px; color: #bbb;">${t('allCaughtUp')}</p>
             </div>
         `;
         return;
@@ -472,7 +494,7 @@ async function loadUnseenPostsList() {
     });
 
     document.getElementById('clear-all-btn').onclick = async () => {
-        if (confirm('Clear all unseen posts?')) {
+        if (confirm(t('clearAllConfirm'))) {
             await chrome.storage.local.set({ unseenPosts: [] });
             await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
             await loadUnseenPostsList();
@@ -484,7 +506,7 @@ async function loadUnseenPostsList() {
 function createPostCard(post, index) {
     const card = document.createElement('div');
     card.style.cssText = 'background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin-bottom: 12px; cursor: pointer; transition: all 0.2s;';
-    
+
     card.onmouseenter = () => {
         card.style.background = '#e9ecef';
         card.style.borderColor = '#667eea';
@@ -513,12 +535,12 @@ function createPostCard(post, index) {
 
     card.onclick = async () => {
         chrome.tabs.create({ url: post.url });
-        
+
         const { unseenPosts = [] } = await chrome.storage.local.get(['unseenPosts']);
         unseenPosts.splice(index, 1);
         await chrome.storage.local.set({ unseenPosts });
         await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
-        
+
         await loadUnseenPostsList();
         await loadUnseenCount();
     };
@@ -533,10 +555,10 @@ function formatTimestamp(date) {
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
 
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    
+    if (diffMins < 1) return t('justNow');
+    if (diffMins < 60) return t('minutesAgo')(diffMins);
+    if (diffHours < 24) return t('hoursAgo')(diffHours);
+    if (diffDays < 7) return t('daysAgo')(diffDays);
+
     return date.toLocaleDateString();
 }
