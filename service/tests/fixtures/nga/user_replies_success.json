@@ -1,0 +1,29 @@
+{
+  "code": 0,
+  "result": {
+    "__ROWS": "1",
+    "__R__ROWS_PAGE": 20,
+    "__T__ROWS": 1,
+    "__T": [
+      {
+        "tid": 1003,
+        "fid": 3003,
+        "author": "[redacted topic author]",
+        "authorid": 2003,
+        "subject": "[redacted subject 3]",
+        "postdate": 1767052800,
+        "lastpost": 1767225720,
+        "replies": 2,
+        "__P": {
+          "tid": 1003,
+          "pid": 4002,
+          "authorid": 2001,
+          "postdate": 1767225720,
+          "subject": "",
+          "content": "[redacted watched-user reply]",
+          "type": 0
+        }
+      }
+    ]
+  }
+}

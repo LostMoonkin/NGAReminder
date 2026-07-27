@@ -26,6 +26,11 @@ wheels/
 # Database
 *.db
 *.sqlite
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+service/data/
 server/data/*.db
 server/nga_data.db
 
@@ -47,6 +52,9 @@ server/config/config.json
 # Logs
 *.log
 logs/
+
+# Rust
+service/target/
 
 # Docker
 docker-compose.override.yml

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NGA Reminder 管理</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 680px; margin: 3rem auto; padding: 0 1rem; }
+    form { display: grid; gap: .75rem; margin: 1.5rem 0; }
+    input, button { font: inherit; padding: .65rem; }
+    button { cursor: pointer; }
+    #account[hidden], #login[hidden] { display: none; }
+    #message { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>NGA Reminder</h1>
+  <section id="login">
+    <h2>管理员登录</h2>
+    <form id="login-form">
+      <input id="password" type="password" autocomplete="current-password" placeholder="管理员密码" required>
+      <button>登录</button>
+    </form>
+  </section>
+  <section id="account" hidden>
+    <h2>NGA Passport</h2>
+    <p id="status">尚未配置</p>
+    <form id="account-form">
+      <textarea id="cookie" rows="4" autocomplete="off" placeholder="粘贴完整 Cookie；服务端只提取两个 Passport 字段"></textarea>
+      <input id="uid" inputmode="numeric" autocomplete="off" placeholder="或单独输入 ngaPassportUid">
+      <input id="cid" type="password" autocomplete="off" placeholder="或单独输入 ngaPassportCid">
+      <button>加密保存</button>
+    </form>
+    <button id="test" type="button">测试 NGA 连接</button>
+  </section>
+  <p id="message" role="status"></p>
+  <script>
+    const message = document.querySelector("#message");
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json", ...(options.headers || {})},
+        ...options
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return body;
+    }
+    async function refresh() {
+      try {
+        const account = await api("/api/v1/settings/nga-account");
+        document.querySelector("#login").hidden = true;
+        document.querySelector("#account").hidden = false;
+        document.querySelector("#status").textContent = account.configured
+          ? `已配置 UID ${account.passport_uid_masked}，状态：${account.status}`
+          : "尚未配置";
+      } catch (error) {
+        if (error.message !== "unauthorized") message.textContent = error.message;
+      }
+    }
+    document.querySelector("#login-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      try {
+        await api("/admin/login", {
+          method: "POST",
+          body: JSON.stringify({password: document.querySelector("#password").value})
+        });
+        document.querySelector("#password").value = "";
+        await refresh();
+      } catch (error) { message.textContent = error.message; }
+    });
+    document.querySelector("#account-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      try {
+        await api("/api/v1/settings/nga-account", {
+          method: "PUT",
+          body: JSON.stringify({
+            passport_uid: document.querySelector("#uid").value,
+            passport_cid: document.querySelector("#cid").value,
+            cookie: document.querySelector("#cookie").value || null
+          })
+        });
+        document.querySelector("#cid").value = "";
+        document.querySelector("#cookie").value = "";
+        message.textContent = "凭据已加密保存";
+        await refresh();
+      } catch (error) { message.textContent = error.message; }
+    });
+    document.querySelector("#test").addEventListener("click", async () => {
+      try {
+        const result = await api("/api/v1/settings/nga-account/test", {method: "POST"});
+        message.textContent = result.valid ? `连接成功，UID ${result.uid}` : "连接失败";
+        await refresh();
+      } catch (error) { message.textContent = error.message; }
+    });
+    refresh();
+  </script>
+</body>
+</html>

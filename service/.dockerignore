@@ -1,0 +1,6 @@
+target
+data
+.env
+.env.*
+!.env.example
+tests/fixtures/nga/*.raw

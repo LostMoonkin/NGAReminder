@@ -1,0 +1,10 @@
+bind_addr = "127.0.0.1:8080"
+database_backend = "postgres"
+database_url = "postgres://nga_reminder:nga_reminder@127.0.0.1:5432/nga_reminder"
+sqlite_path = "./data/nga-reminder.db"
+database_max_connections = 10
+run_migrations = true
+
+[observability]
+log_filter = "info,sqlx=warn"
+log_json = false
