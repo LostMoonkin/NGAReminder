@@ -167,13 +167,14 @@ async function sendNotification(thread, post) {
 async function checkBrowserFocus() {
     try {
         const window = await chrome.windows.getLastFocused();
-        const isFocused = window.focused === true;
+        // Consider browser focused only if the window is actually focused AND not minimized
+        const isFocused = window.focused === true && window.state !== 'minimized';
         console.log(`[Focus Check] Browser focused: ${isFocused}, window state: ${window.state}`);
         return isFocused;
     } catch (error) {
         console.error('[Focus Check] Error checking browser focus:', error);
-        // Default to true (show Chrome notification) on error
-        return true;
+        // Default to false (use Bark/system notification) on error
+        return false;
     }
 }
 
