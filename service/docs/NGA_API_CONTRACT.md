@@ -110,6 +110,13 @@ thumb, dscp, hash, url_utf8_org_name
 A HEAD probe of the constructed sample URL returned HTTP 200 with `image/jpeg`. Asset download still
 validates scheme, host policy, response size, and content type before writing locally.
 
+Resource binaries are never stored in PostgreSQL `BYTEA` or SQLite `BLOB`. The database stores the
+source URL, SHA-256, MIME type, byte size, download status, and a safe path relative to the configured
+asset root. Ready files use a content-addressed layout such as
+`<sha256-prefix>/<sha256>.<safe-extension>`, allowing identical content from multiple URLs to share one
+file. Downloads are streamed to a temporary file, validated and atomically renamed before metadata is
+upserted. Database and asset-directory backups must be taken and restored as one logical dataset.
+
 ## User topics
 
 Successful responses use:

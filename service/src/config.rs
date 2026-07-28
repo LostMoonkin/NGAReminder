@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use config::{Config, Environment, File};
 use secrecy::SecretString;
 use serde::Deserialize;
+use time::UtcOffset;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub credential_encryption_key: SecretString,
     pub nga_user_agent: String,
     pub run_migrations: bool,
+    pub persistence: PersistenceConfig,
+    pub scheduler: SchedulerConfig,
     pub observability: ObservabilityConfig,
 }
 
@@ -32,6 +35,17 @@ pub struct ObservabilityConfig {
     pub log_json: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct PersistenceConfig {
+    pub store_raw_payload: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SchedulerConfig {
+    pub default_interval_seconds: i32,
+    pub timezone_offset: UtcOffset,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     bind_addr: SocketAddr,
@@ -44,7 +58,15 @@ struct RawConfig {
     credential_encryption_key: String,
     nga_user_agent: String,
     run_migrations: bool,
+    persistence: PersistenceConfig,
+    scheduler: RawSchedulerConfig,
     observability: ObservabilityConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSchedulerConfig {
+    default_interval_seconds: i32,
+    timezone_offset: String,
 }
 
 impl AppConfig {
@@ -59,6 +81,9 @@ impl AppConfig {
             .set_default("sqlite_path", "./data/nga-reminder.db")?
             .set_default("database_max_connections", 10)?
             .set_default("run_migrations", true)?
+            .set_default("persistence.store_raw_payload", false)?
+            .set_default("scheduler.default_interval_seconds", 60)?
+            .set_default("scheduler.timezone_offset", "+08:00")?
             .set_default(
                 "nga_user_agent",
                 "Mozilla/5.0 (compatible; NGA-Reminder/0.1)",
@@ -100,6 +125,12 @@ impl AppConfig {
                 "NGA_REMINDER__SQLITE_PATH must not be empty for SQLite".to_owned(),
             ));
         }
+        if !crate::schedule::validate_interval(raw.scheduler.default_interval_seconds) {
+            return Err(config::ConfigError::Message(
+                "scheduler.default_interval_seconds must be between 30 and 86400".to_owned(),
+            ));
+        }
+        let timezone_offset = parse_timezone_offset(&raw.scheduler.timezone_offset)?;
 
         Ok(Self {
             bind_addr: raw.bind_addr,
@@ -112,7 +143,34 @@ impl AppConfig {
             credential_encryption_key: SecretString::from(raw.credential_encryption_key),
             nga_user_agent: raw.nga_user_agent,
             run_migrations: raw.run_migrations,
+            persistence: raw.persistence,
+            scheduler: SchedulerConfig {
+                default_interval_seconds: raw.scheduler.default_interval_seconds,
+                timezone_offset,
+            },
             observability: raw.observability,
         })
     }
+}
+
+fn parse_timezone_offset(value: &str) -> Result<UtcOffset, config::ConfigError> {
+    if value == "Z" || value == "+00:00" {
+        return Ok(UtcOffset::UTC);
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() != 6 || (bytes[0] != b'+' && bytes[0] != b'-') || bytes[3] != b':' {
+        return Err(config::ConfigError::Message(
+            "scheduler.timezone_offset must use +HH:MM format".to_owned(),
+        ));
+    }
+    let hours = value[1..3].parse::<i32>().map_err(|_| {
+        config::ConfigError::Message("invalid scheduler.timezone_offset".to_owned())
+    })?;
+    let minutes = value[4..6].parse::<i32>().map_err(|_| {
+        config::ConfigError::Message("invalid scheduler.timezone_offset".to_owned())
+    })?;
+    let seconds = (hours * 3_600 + minutes * 60) * if bytes[0] == b'-' { -1 } else { 1 };
+    UtcOffset::from_whole_seconds(seconds).map_err(|_| {
+        config::ConfigError::Message("scheduler.timezone_offset is out of range".to_owned())
+    })
 }

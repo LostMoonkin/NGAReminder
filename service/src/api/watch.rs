@@ -7,21 +7,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppState,
-    collector::thread::{self, CrawlSummary, ThreadCollectorError},
+    collector::{
+        thread::{self, ThreadCollectorError},
+        user::{self, UserCollectorError},
+    },
     repository::watch::{self, CreateWatchError, WatchTarget},
+    schedule::{self, Schedule},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct CreateThreadWatchRequest {
     tid: i64,
-    #[serde(default = "default_interval")]
-    interval_seconds: i32,
+    interval_seconds: Option<i32>,
+    #[serde(default)]
+    schedule: Option<Schedule>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserWatchRequest {
+    uid: i64,
+    interval_seconds: Option<i32>,
+    #[serde(default)]
+    schedule: Option<Schedule>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWatchRequest {
     enabled: Option<bool>,
     interval_seconds: Option<i32>,
+    #[serde(default)]
+    schedule: Option<Schedule>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +46,7 @@ pub struct WatchResponse {
     target_id: i64,
     enabled: bool,
     interval_seconds: i32,
+    schedule: Option<Schedule>,
     status: String,
     baseline_completed: bool,
     next_run_at: String,
@@ -61,12 +77,55 @@ pub async fn create_thread(
     State(state): State<AppState>,
     Json(request): Json<CreateThreadWatchRequest>,
 ) -> Result<(StatusCode, Json<WatchResponse>), (StatusCode, Json<ApiError>)> {
-    if request.tid <= 0 || !valid_interval(request.interval_seconds) {
+    let interval_seconds = request
+        .interval_seconds
+        .unwrap_or(state.config.scheduler.default_interval_seconds);
+    if request.tid <= 0
+        || !valid_interval(interval_seconds)
+        || !valid_schedule(request.schedule.as_ref())
+    {
         return Err(bad_request());
     }
-    let watch =
-        watch::create_thread_watch(&state.pool, request.tid, request.interval_seconds).await;
+    let watch = watch::create_thread_watch_with_schedule(
+        &state.pool,
+        request.tid,
+        interval_seconds,
+        request.schedule.as_ref(),
+    )
+    .await;
     match watch {
+        Ok(watch) => Ok((StatusCode::CREATED, Json(watch.into()))),
+        Err(CreateWatchError::Conflict) => Err((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "watch_already_exists",
+            }),
+        )),
+        Err(CreateWatchError::Database(error)) => Err(internal_error(error)),
+    }
+}
+
+pub async fn create_user(
+    State(state): State<AppState>,
+    Json(request): Json<CreateUserWatchRequest>,
+) -> Result<(StatusCode, Json<WatchResponse>), (StatusCode, Json<ApiError>)> {
+    let interval_seconds = request
+        .interval_seconds
+        .unwrap_or(state.config.scheduler.default_interval_seconds);
+    if request.uid <= 0
+        || !valid_interval(interval_seconds)
+        || !valid_schedule(request.schedule.as_ref())
+    {
+        return Err(bad_request());
+    }
+    match watch::create_user_watch_with_schedule(
+        &state.pool,
+        request.uid,
+        interval_seconds,
+        request.schedule.as_ref(),
+    )
+    .await
+    {
         Ok(watch) => Ok((StatusCode::CREATED, Json(watch.into()))),
         Err(CreateWatchError::Conflict) => Err((
             StatusCode::CONFLICT,
@@ -83,19 +142,28 @@ pub async fn update(
     Path(id): Path<String>,
     Json(request): Json<UpdateWatchRequest>,
 ) -> ApiResult<WatchResponse> {
-    if request.enabled.is_none() && request.interval_seconds.is_none() {
+    if request.enabled.is_none() && request.interval_seconds.is_none() && request.schedule.is_none()
+    {
         return Err(bad_request());
     }
     if request
         .interval_seconds
         .is_some_and(|interval| !valid_interval(interval))
+        || !valid_schedule(request.schedule.as_ref())
     {
         return Err(bad_request());
     }
-    let watch = watch::update(&state.pool, &id, request.enabled, request.interval_seconds)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
+    let schedule_update = request.schedule.as_ref().map(Some);
+    let watch = watch::update_with_schedule(
+        &state.pool,
+        &id,
+        request.enabled,
+        request.interval_seconds,
+        schedule_update,
+    )
+    .await
+    .map_err(internal_error)?
+    .ok_or_else(not_found)?;
     Ok(Json(watch.into()))
 }
 
@@ -113,14 +181,14 @@ pub async fn delete(
     }
 }
 
-pub async fn run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<CrawlSummary> {
-    let watch = watch::find(&state.pool, &id)
+pub async fn run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let _watch = watch::find(&state.pool, &id)
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
-    if watch.target_type != "thread" {
-        return Err(bad_request());
-    }
     let claimed = watch::claim_by_id(&state.pool, state.config.database_backend, &id)
         .await
         .map_err(internal_error)?
@@ -131,38 +199,69 @@ pub async fn run(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
             }),
         ))?;
 
-    thread::run(&state, claimed)
-        .await
-        .map(Json)
-        .map_err(|error| {
-            let (status, kind) = match error {
-                ThreadCollectorError::Credentials => (
-                    StatusCode::PRECONDITION_FAILED,
-                    "nga_account_not_configured",
-                ),
-                ThreadCollectorError::Nga(crate::nga::NgaRequestError::NotFound) => {
-                    (StatusCode::NOT_FOUND, "nga_thread_not_found")
-                }
-                ThreadCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
-                    (StatusCode::UNAUTHORIZED, "nga_unauthorized")
-                }
-                ThreadCollectorError::Nga(_) | ThreadCollectorError::Parse(_) => {
-                    (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
-                }
-                ThreadCollectorError::Database(_) | ThreadCollectorError::InvalidWatch => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                }
-            };
-            (status, Json(ApiError { error: kind }))
-        })
-}
-
-fn default_interval() -> i32 {
-    60
+    match claimed.target_type.as_str() {
+        "thread" => thread::run(&state, claimed)
+            .await
+            .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
+            .map_err(|error| {
+                let (status, kind) = match error {
+                    ThreadCollectorError::Credentials => (
+                        StatusCode::PRECONDITION_FAILED,
+                        "nga_account_not_configured",
+                    ),
+                    ThreadCollectorError::Nga(crate::nga::NgaRequestError::NotFound) => {
+                        (StatusCode::NOT_FOUND, "nga_thread_not_found")
+                    }
+                    ThreadCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
+                        (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+                    }
+                    ThreadCollectorError::Nga(_) | ThreadCollectorError::Parse(_) => {
+                        (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
+                    }
+                    ThreadCollectorError::Database(_) | ThreadCollectorError::InvalidWatch => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+                    }
+                };
+                (status, Json(ApiError { error: kind }))
+            }),
+        "user" => user::run(&state, claimed)
+            .await
+            .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
+            .map_err(|error| {
+                let (status, kind) = match error {
+                    UserCollectorError::Credentials => (
+                        StatusCode::PRECONDITION_FAILED,
+                        "nga_account_not_configured",
+                    ),
+                    UserCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
+                        (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+                    }
+                    UserCollectorError::UserParse(
+                        crate::nga::user_parser::UserParseError::ProfileNotFound
+                        | crate::nga::user_parser::UserParseError::UidMismatch,
+                    ) => (StatusCode::NOT_FOUND, "nga_user_not_found"),
+                    UserCollectorError::Nga(_)
+                    | UserCollectorError::ThreadParse(_)
+                    | UserCollectorError::UserParse(_)
+                    | UserCollectorError::InvalidDetail => {
+                        (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
+                    }
+                    UserCollectorError::Database(_) | UserCollectorError::InvalidWatch => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+                    }
+                };
+                (status, Json(ApiError { error: kind }))
+            }),
+        _ => Err(bad_request()),
+    }
 }
 
 fn valid_interval(value: i32) -> bool {
-    (30..=86_400).contains(&value)
+    schedule::validate_interval(value)
+}
+
+fn valid_schedule(schedule: Option<&Schedule>) -> bool {
+    schedule.is_none_or(|items| schedule::validate_schedule(items).is_ok())
 }
 
 fn bad_request() -> (StatusCode, Json<ApiError>) {
@@ -200,6 +299,7 @@ impl From<WatchTarget> for WatchResponse {
             target_id: value.target_id,
             enabled: value.enabled,
             interval_seconds: value.interval_seconds,
+            schedule: value.schedule,
             status: value.status,
             baseline_completed: value.baseline_completed,
             next_run_at: value.next_run_at,

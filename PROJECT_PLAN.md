@@ -15,7 +15,7 @@ Rust 工程开始建设。服务端与 `extension-standalone` 是两个相互独
 1. 按 TID 监控 NGA 主题，持久化主题、主楼、全部回复和可获取的楼中楼评论。
 2. 按 UID 监控 NGA 用户，只持久化该用户自己的新主题、单条回复和可获取的楼中楼评论，
    不因该用户参与某个主题而回溯或持续保存主题内其他内容。
-3. 新内容入库后按 TID、UID 或其组合匹配通知规则，并发送到 Bark、飞书国内版自定义
+3. 新内容入库后按 TID、UID 或其组合匹配通知规则，并发送到 Bark、飞书国内版企业应用
    机器人。
 4. 将持久化内容导出为 Markdown，支持单文件及带资源的 ZIP。
 5. 提供独立 Web 管理页面，用于录入 NGA Cookie、管理监控目标、通知渠道和导出，并查看
@@ -50,7 +50,7 @@ Rust 工程开始建设。服务端与 `extension-standalone` 是两个相互独
 
 - 首次添加 TID 时回溯全部可访问页面。
 - 持续抓取服务运行期间出现的新回复。
-- 保存 NGA 原始内容、标准化字段和原始响应。
+- 始终保存标准化字段；仅在 `persistence.store_raw_payload=true` 时额外保存原始响应。
 - 已入库回复视为不可变历史记录，后续同步只 append 新发现的回复。
 - 不主动重新抓取、更新或删除已持久化的回复。
 
@@ -236,13 +236,14 @@ service/
 | `watch_cursors` | 不同目标类型的增量游标 |
 | `crawl_runs` | 抓取运行、耗时、请求数和错误 |
 | `post_events` | 基线完成后新增主题/回复的入库事件 |
-| `notification_channels` | Bark、飞书自定义机器人配置 |
+| `notification_channels` | Bark、飞书企业应用机器人配置 |
 | `notification_rules` | TID/UID/事件类型匹配条件 |
 | `post_event_matches` | 一个新增事件命中的 watch/rule 来源，用于解释去重后的通知 |
 | `notification_outbox` | 待发送通知 |
 | `notification_deliveries` | 每次投递和重试结果 |
 | `export_jobs` | Markdown/ZIP 导出任务 |
-| `assets` | 图片、音频、视频等资源元数据 |
+| `assets` | 图片、音频、视频等资源的 URL、hash、MIME、大小、本地路径和下载状态 |
+| `post_assets` | 帖子与资源的多对多关联、正文出现顺序和用途 |
 
 ### 6.2 Post 建议字段
 
@@ -258,7 +259,7 @@ author_name         TEXT
 content_raw         TEXT
 content_markdown    TEXT
 published_at        TIMESTAMPTZ
-raw_payload         JSONB
+raw_payload         TEXT NOT NULL DEFAULT '' # 仅配置开启时保存原始 JSON
 first_seen_at       TIMESTAMPTZ
 ```
 
@@ -273,9 +274,71 @@ first_seen_at       TIMESTAMPTZ
 - `notification_outbox` 按 `(post_event_id, channel_id)` 唯一，不包含 `rule_id`。
 - `post_event_matches` 可记录多个 watch/rule 命中，但只关联到同一 outbox 投递。
 
-### 6.3 Secret
+原始响应存储由服务参数控制：
 
-- NGA Cookie、Bark device key、飞书 webhook/secret 不以明文出现在 API 响应或日志中。
+```text
+persistence.store_raw_payload = false # 默认值
+```
+
+- `false`：`posts.raw_payload` 写入空字符串，只保存已标准化字段，减少数据库、WAL 和备份
+  体积。
+- `true`：保存该帖子对应的完整原始 JSON，主要用于接口诊断和 parser 兼容性分析。
+- 环境变量为 `NGA_REMINDER__PERSISTENCE__STORE_RAW_PAYLOAD=true|false`。
+- 参数只影响启用后的新插入记录；不会自动清空或回填历史 `raw_payload`。
+- 无论是否保存原始 payload，附件元数据都应由 asset parser 写入结构化 `assets` /
+  `post_assets`，不能依赖长期保留 `raw_payload`。
+
+### 6.3 Asset 建议字段与存储边界
+
+附件、正文图片、音频和视频的二进制内容不写入 PostgreSQL `BYTEA` 或 SQLite `BLOB`。
+数据库只保存资源元数据、帖子关联和本地相对路径，二进制文件保存到
+`assets.storage_path`。
+
+```text
+id                  UUID PRIMARY KEY
+source_url          TEXT NOT NULL
+content_hash        TEXT                 # SHA-256，下载并校验后写入
+mime_type           TEXT
+size_bytes          BIGINT
+original_name       TEXT
+local_relative_path TEXT                 # 只允许相对 assets.storage_path 的安全路径
+download_status     pending | downloading | ready | failed | remote_only
+http_status         INTEGER
+last_error_kind     TEXT
+first_seen_at       TIMESTAMPTZ
+downloaded_at       TIMESTAMPTZ
+```
+
+存储约定：
+
+- `assets.download_enabled=false` 时只保存 URL 和元数据，状态为 `remote_only`。
+- `assets.download_enabled=true` 时下载到本地内容寻址目录，推荐布局为
+  `<storage_path>/<sha256前2位>/<完整sha256>.<安全扩展名>`。
+- `content_hash` 唯一；相同内容即使来自不同 URL 也只保存一份本地文件。
+- `local_relative_path` 不保存绝对路径，不能包含 `..`，原始文件名不得直接作为磁盘路径。
+- 下载必须限制协议、目标主机、重定向次数、响应大小和允许的 MIME 类型，防止 SSRF、
+  路径穿越和磁盘耗尽。
+- PostgreSQL 与 SQLite 使用相同资源模型和目录布局；切换数据库后端不改变资源文件。
+- 极小的表情或缩略图也不做 BLOB 特例，保持备份、导出和存储行为一致。
+
+文件落盘与数据库提交顺序：
+
+1. 下载到 `assets.storage_path` 内的临时文件。
+2. 流式计算 SHA-256，并校验响应大小、实际 MIME 和配置上限。
+3. 使用同文件系统原子 rename 移动到内容寻址的最终路径；目标已存在时复用现有文件。
+4. 在数据库事务中 upsert `assets` 和 `post_assets`。
+5. 定期清理超时临时文件，并根据数据库引用计数清理孤儿文件。
+
+数据库事务不能与文件系统组成真正的原子事务，因此 worker 必须允许幂等重试：文件已存在
+但数据库未提交时重新 upsert；数据库为 `pending/downloading` 但文件缺失时重新下载。
+
+备份和恢复必须同时覆盖数据库与整个 `assets.storage_path`。推荐先暂停资源下载 worker
+或取得一致性快照，再备份数据库和资源目录；恢复后运行资源一致性检查，报告缺失文件和
+孤儿文件。ZIP 导出只读取状态为 `ready` 且 hash/路径校验通过的本地资源。
+
+### 6.4 Secret
+
+- NGA Cookie、Bark device key、飞书 `app_secret` 不以明文出现在 API 响应或日志中。
 - 数据库存储使用应用级加密，密钥仅由环境变量或 Secret Manager 注入。
 - 配置导出不包含 Secret。
 - NGA Cookie 通过 Web 管理页面录入；页面只显示是否已配置和脱敏摘要，不回显原值。
@@ -375,7 +438,7 @@ Referer: https://bbs.nga.cn/
 | 用户主题列表 | `GET /thread.php?authorid={uid}&__output=12&page={page}` | 已验证成功响应、相邻页分页和不可访问占位项 |
 | 用户回复列表 | `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}` | 已验证分页、字段和 `code=2048` 忙碌响应 |
 | 用户资料 | `GET /nuke.php?func=ucp&uid={uid}` | 已验证为 GBK HTML；资料位于 `__UCPUSER` JSON 对象 |
-| 附件资源 | 使用主题响应的 `attachPrefix`、帖子 `attches` 或正文资源 URL | 字段已确认，非空附件 fixture 待补 |
+| 附件资源 | 使用主题响应的 `attachPrefix`、帖子 `attches` 或正文资源 URL | 字段已确认，非空附件 fixture 已保存 |
 
 主题分页成功响应的顶层关键字段：
 
@@ -452,7 +515,8 @@ result.__GLOBAL          # 页面级全局数据
   不重复插入帖子或事件。
 - 服务启动参数 `assets.download_enabled` 控制是否将附件和正文图片保存到本地：
   - `false`：只保存资源元数据和远程 URL，Markdown 引用远程资源。
-  - `true`：下载到 `assets.storage_path`，记录内容 hash、本地相对路径、下载状态和错误。
+  - `true`：二进制下载到 `assets.storage_path` 的内容寻址目录；数据库仍只记录 URL、
+    SHA-256、MIME、大小、本地相对路径、下载状态和错误，不保存 BLOB。
 - `assets.download_enabled` 和 `assets.storage_path` 由配置文件或环境变量提供，管理页面
   只读展示当前生效值；从 `false` 切换为 `true` 并重启后，只保证新发现资源进入下载
   队列，历史资源回填通过独立维护任务显式触发。
@@ -490,8 +554,10 @@ trait NotificationSender {
 实现：
 
 - Bark：使用 V2 `POST /push`，提供 title、body、group、level 和跳转 URL。
-- 飞书：使用飞书国内版自定义机器人 webhook，发送 text 或 interactive card；如启用签名
-  校验则同时保存机器人 secret。
+- 飞书：使用企业自建应用的 `app_id`、`app_secret` 获取 `tenant_access_token`，再通过
+  `im/v1/messages` 向指定 `chat_id`、`open_id` 或 `user_id` 发送 interactive card。
+- 飞书 token 按接口返回的有效期缓存在服务内存中并提前刷新；业务响应拒绝 token 时清除
+  缓存并重新鉴权一次。token 不写入数据库。
 - 后续渠道只新增 adapter，不修改规则引擎。
 
 ### 8.3 投递保证
@@ -540,6 +606,8 @@ content_raw
 - User 导出：只导出该 UID 自己的主题主楼和单条回复，可按时间或所属主题分组。
 - `assets.download_enabled=false` 时 Markdown 引用原始资源 URL。
 - `assets.download_enabled=true` 时优先引用本地资源，并可生成包含资源的 `.zip`。
+- 导出器不得直接信任数据库路径；读取前必须确认规范化路径仍位于
+  `assets.storage_path` 内，并可按 SHA-256 选择性校验文件。
 - 附带 `metadata.json`，记录 TID、UID、导出时间和游标。
 
 ## 10. REST API 草案
@@ -599,7 +667,7 @@ HTTPS、反向代理和请求体大小等入口限制。
 - NGA Cookie 录入、脱敏状态展示和连通性测试。
 - TID/UID watch 的创建、暂停、立即运行和运行状态。
 - 用户 watch 保存的新主题和单条回复列表。
-- Bark、飞书国内版自定义机器人 webhook 和通知规则管理。
+- Bark、飞书国内版企业应用机器人和通知规则管理。
 - 主题、用户、回复和未读事件查询。
 - Markdown/ZIP 导出任务及下载。
 - 只读展示 `assets.download_enabled`、`assets.storage_path` 等服务启动参数。
@@ -787,6 +855,34 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 ### M3：User 监控
 
+状态：完成。
+
+已实现并验证：
+
+- PostgreSQL/SQLite 同步新增 `nga_users` 和独立 `user_watch_cursors` migration。
+- 用户主题、用户回复列表强类型 parser；页数始终按 `__ROWS/page_size` 计算，
+  `denied=true` 占位项和非目标 UID 条目不会成为候选。
+- GBK 用户资料安全解码，只截取并解析 `__UCPUSER` JSON，不执行页面脚本。
+- 用户主题候选仅补全并保存作者 UID 匹配的主楼；用户回复候选按 TID/PID 补全并二次
+  校验详情作者，只保存该单条回复及其可获取楼中楼。
+- user watch 基线完整遍历当前可检索列表但不产生事件；增量列表遇到已保存时间/PID/TID
+  边界后停止，详情只请求新候选。
+- 用户列表 `code=2048 + 服务器忙` 固定每秒重试，总次数 10；全部失败将 crawl 标记为
+  `skipped_busy`，释放 lease，但不完成基线、不写帖子且不推进用户游标。
+- thread/user 使用同一 `insert_post`、`insert_event` 和数据库自然唯一约束；用户发现的
+  主题标记为 `coverage=partial`，不会启动整帖抓取。
+- worker 可调度 thread/user 两类 watch；新增 user watch API，并复用修改、删除和立即
+  运行接口。
+
+验证结果：
+
+- fixture tests 覆盖用户主题页数、不可访问项过滤、目标 UID 回复过滤和 GBK 资料解析。
+- SQLite 事务测试覆盖“用户基线 → 实时单条回复 → 重复发现”：基线 0 事件，实时回复
+  1 个事件，重复发现 0 插入/0 事件，主题保持 `coverage=partial`。
+- 在 `nga_reminder_dev` 实际执行 M3 migration，并验证 user watch create/list/delete；
+  临时 watch 已清理。
+- `cargo test --all-targets` 25 项测试、严格 Clippy 和 release build 均通过。
+
 任务：
 
 - 用户主题和回复列表解析。
@@ -812,12 +908,48 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 ### M4：通知规则、Bark 与飞书
 
+状态：实现完成；飞书企业应用 OpenAPI 已完成真实投递验证，Bark 等待真实凭据验收。
+
+已实现并验证：
+
+- PostgreSQL/SQLite 同步新增渠道、规则、事件匹配来源、outbox 和 delivery migration。
+- 渠道配置使用现有 AES-256-GCM 加密后入库，列表 API 不返回 device key、`app_id`、
+  `app_secret` 或接收目标。
+- 新 `post_event` 在原数据库事务中匹配 TID、UID、TID+UID 规则，同时写入
+  `post_event_matches` 和 transactional outbox。
+- `(post_event_id, rule_id)` 保留全部匹配来源，`(post_event_id, channel_id)` 唯一约束
+  保证多条规则命中同一渠道时只投递一次。
+- Bark V2 POST adapter 支持标题、正文、group 和帖子跳转 URL。
+- 飞书国内版企业应用机器人 adapter 使用 `tenant_access_token` 和
+  `im/v1/messages` 发送 interactive card，支持群聊和单聊接收 ID。
+- 飞书 tenant token 依据服务端有效期在内存缓存并提前刷新，API 拒绝 token 时自动重新
+  鉴权一次；持久化层只保存加密后的应用配置，不保存 token。
+- 飞书卡片从完整回复中提取 `[img]`，最多下载并内嵌 3 张可信 NGA 图片；下载限制为
+  10 MB，`image_key` 按应用与源 URL 缓存。下载、上传或域名校验失败时降级为原图链接，
+  不阻塞文字通知。
+- 回复跳转链接使用持久化页码生成
+  `read.php?tid={tid}&page={page}#pid{pid}Anchor`，在完整主题页内定位目标回复。
+- 通知 worker 使用 lease 领取 outbox；网络错误、429、5xx 最多重试 5 次，采用
+  30 秒、2 分钟、10 分钟、30 分钟退避；4xx/配置错误直接进入 dead。
+- 每次尝试记录 HTTP 状态、截断后的响应摘要和错误类型；成功记录 delivered 时间。
+- 已提供渠道、规则的创建/列表/启停/删除 API，以及渠道测试通知 API。
+
+验证结果：
+
+- SQLite 幂等测试中，同一事件同时命中 TID 和 UID 两条规则：保留 2 条 match，但同一
+  渠道只有 1 条 outbox；重复匹配仍保持 1 条 outbox。
+- Bark 默认配置、飞书配置/卡片编码和 429/5xx/4xx/API 限流重试分类具备单元测试。
+- 在 `nga_reminder_dev` 实际执行 M4 migration，验证加密渠道与规则
+  create/list/cascade-delete；临时记录已清理。
+- 已使用企业应用 `app_id`、`app_secret` 和目标群 `chat_id` 调用真实飞书 OpenAPI，
+  获取 tenant token 并成功发送群消息；测试 secret 随后应轮换。
+
 任务：
 
 - notification rules。
 - transactional outbox。
 - Bark adapter。
-- 飞书国内版自定义机器人 webhook adapter。
+- 飞书国内版企业应用机器人 OpenAPI adapter。
 - 投递重试、幂等、测试通知。
 
 验收：
@@ -839,6 +971,8 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 - Markdown renderer。
 - thread/user 导出。
 - `assets.download_enabled` 和本地资源下载队列。
+- SHA-256 内容寻址落盘、跨 URL 去重、临时文件原子 rename 和失败幂等恢复。
+- `assets`/`post_assets` 元数据、缺失文件检查及临时/孤儿资源清理任务。
 - 远程资源 Markdown 与本地资源 ZIP 两种输出。
 - `ngapost2md` 行为 fixture/golden tests。
 
@@ -846,6 +980,8 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 - 中文、引用、URL、图片、表情和楼中楼正确渲染。
 - 关闭附件保存时不产生本地资源文件；开启时新资源进入下载队列并可打包导出。
+- 附件二进制不进入 PostgreSQL/SQLite；重复内容只产生一个本地文件。
+- 下载中断后可安全重试，资源检查可报告缺失文件并清理超过保留期的临时/孤儿文件。
 - 大主题以流式方式导出，不把全部内容加载到内存。
 - 相同数据库快照可重复生成一致结果。
 
@@ -858,7 +994,7 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 - 单管理员登录页。
 - NGA Cookie 录入、脱敏展示和连通性测试。
 - thread/user watch、用户自身发帖回复和运行状态 UI。
-- Bark、飞书 webhook 和通知规则 UI。
+- Bark、飞书企业应用机器人和通知规则 UI。
 - 主题、回复、未读事件和导出 UI。
 - 附件本地保存参数和其他服务配置的只读状态 UI。
 
@@ -878,6 +1014,7 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 - 指标、结构化日志和告警。
 - 数据备份/恢复说明。
+- 数据库与 `assets.storage_path` 的一致性备份、恢复后缺失/孤儿资源检查。
 - Secret 加密与轮换。
 - 限流、超时和压力测试。
 - PG 索引与慢查询检查。
@@ -919,6 +1056,7 @@ M2 + M3 + M4 + M5 → M6 → M7
 - HTTP 层错误、空响应体、5xx 退避和恢复后继续原游标。
 - `__UCPUSER` GBK 转码和无脚本执行的 JSON 提取。
 - 内嵌 `comments` 和 `attches` 非空 fixture。
+- asset URL 规范化、内容 hash 去重、安全相对路径和大小/MIME 限制。
 - 通知规则组合。
 - NGA markup → Markdown golden tests。
 
@@ -926,6 +1064,7 @@ M2 + M3 + M4 + M5 → M6 → M7
 
 - PostgreSQL/SQLite migrations 及两套 schema 语义一致性。
 - append-only insert、游标和事件事务。
+- asset/post_assets upsert、同 hash 去重及下载状态幂等恢复。
 - thread/user 并发插入同一自然键时仅一个事务创建 `post_event`。
 - user-only `coverage=partial` 在 TID 全量回溯完成后升级为 `full`，已有帖子不重复。
 - `SKIP LOCKED` 多 worker 领取。
@@ -968,7 +1107,7 @@ export_jobs_total
 ```
 
 日志必须包含 `crawl_run_id`、`watch_id`、`tid`、`uid` 和 `event_id`，但不得包含 Cookie、
-device key、webhook 和 API token。
+device key、飞书 `app_secret`、tenant token 和 API token。
 
 ## 16. 风险与应对
 
@@ -990,7 +1129,7 @@ device key、webhook 和 API token。
 - migration、代码和 API 文档同步。
 - 新增逻辑具备单元或集成测试。
 - `cargo fmt --check`、`cargo clippy`、`cargo test` 通过。
-- 不提交真实 Cookie、Bark key、飞书 webhook 或 API token。
+- 不提交真实 Cookie、Bark key、飞书 `app_secret` 或 API token。
 - 错误具备可诊断上下文，但不泄漏 Secret。
 - README 更新启动、配置、升级和验证步骤。
 - 对外 API 变更记录在 changelog。
@@ -1002,16 +1141,17 @@ device key、webhook 和 API token。
 3. 由服务端配置文件或环境变量中的全局参数控制是否将附件和正文图片保存到本地。
 4. UID watch 只保存目标用户自己的主题主楼和单条回复，不扩展为参与主题监控。
 5. `extension-standalone` 与 Rust 服务是两个相互独立的工程，不做接入、迁移或合并发布。
-6. 飞书渠道使用飞书国内版自定义机器人 webhook。
+6. 飞书渠道使用飞书国内版企业应用机器人，通过 `app_id`、`app_secret` 鉴权并向指定
+   `chat_id`/用户 ID 发送消息。
 7. 持久化支持 PostgreSQL 和 SQLite；SQLite 文件位置由服务配置指定。
+8. 资源二进制统一保存在 `assets.storage_path`，数据库只保存元数据和相对路径；不使用
+   PostgreSQL `BYTEA` 或 SQLite `BLOB` 保存附件内容。
 
 ## 19. 下一步
 
-进入 M3：
+完成 M4 外部渠道验收后进入 M5：
 
-1. 实现用户主题、用户回复和 GBK 用户资料的强类型 parser。
-2. 实现用户列表 `code=2048` 每秒最多 10 次重试，以及不推进游标的
-   `skipped_busy` 结果。
-3. 实现 user watch 基线和增量游标，只补全目标 UID 自己的主题主楼与单条回复。
-4. 抽取 thread/user 共用的 post insert/event 事务，验证两条发现路径的全局去重。
-5. 实现 user watch API、fixture 集成测试和 PostgreSQL/SQLite 双后端验证。
+1. 由用户提供测试 Bark device key，通过渠道测试 API 验证真实投递。
+2. 验证一次真实新回复事件的规则匹配、跳转 URL、outbox 和 delivery 结果。
+3. 开始 NGA markup tokenizer/AST、Markdown renderer 与 thread/user 导出。
+4. 实现资源元数据、内容寻址下载队列及 Markdown/ZIP 两种资源模式。

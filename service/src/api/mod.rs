@@ -2,6 +2,7 @@ mod account;
 mod admin;
 mod auth;
 mod health;
+mod notification;
 mod watch;
 
 use axum::{
@@ -30,9 +31,34 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/settings/nga-account/test", post(account::test))
         .route("/api/v1/watches", get(watch::list))
         .route("/api/v1/watches/threads", post(watch::create_thread))
+        .route("/api/v1/watches/users", post(watch::create_user))
         .route("/api/v1/watches/{id}", patch(watch::update))
         .route("/api/v1/watches/{id}", delete(watch::delete))
         .route("/api/v1/watches/{id}/run", post(watch::run))
+        .route("/api/v1/channels", get(notification::list_channels))
+        .route("/api/v1/channels", post(notification::create_channel))
+        .route("/api/v1/channels/{id}", patch(notification::update_channel))
+        .route(
+            "/api/v1/channels/{id}",
+            delete(notification::delete_channel),
+        )
+        .route(
+            "/api/v1/channels/{id}/test",
+            post(notification::test_channel),
+        )
+        .route("/api/v1/notification-rules", get(notification::list_rules))
+        .route(
+            "/api/v1/notification-rules",
+            post(notification::create_rule),
+        )
+        .route(
+            "/api/v1/notification-rules/{id}",
+            patch(notification::update_rule),
+        )
+        .route(
+            "/api/v1/notification-rules/{id}",
+            delete(notification::delete_rule),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_token,
@@ -76,7 +102,9 @@ mod tests {
     use super::router;
     use crate::{
         app::AppState,
-        config::{AppConfig, DatabaseBackend, ObservabilityConfig},
+        config::{
+            AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
+        },
         crypto::CredentialCipher,
         nga::NgaClient,
     };
@@ -99,6 +127,13 @@ mod tests {
             credential_encryption_key: SecretString::from(STANDARD.encode([7_u8; 32])),
             nga_user_agent: "test".to_owned(),
             run_migrations: false,
+            persistence: PersistenceConfig {
+                store_raw_payload: false,
+            },
+            scheduler: SchedulerConfig {
+                default_interval_seconds: 60,
+                timezone_offset: time::UtcOffset::UTC,
+            },
             observability: ObservabilityConfig {
                 log_filter: "info".to_owned(),
                 log_json: false,

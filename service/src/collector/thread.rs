@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use secrecy::ExposeSecret;
 use sqlx::{Any, Row, Transaction};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -11,7 +12,9 @@ use crate::{
     config::DatabaseBackend,
     domain::thread::{ParsedPost, PostKind, ThreadMetadata, ThreadPage},
     nga::{NgaRequestError, thread_parser},
+    notification,
     repository::watch::{self, ThreadCursor, WatchTarget},
+    schedule,
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -54,7 +57,7 @@ pub async fn run(
 
     let result = collect(state, &run_id, &watch_target, baseline).await;
     if let Err(error) = &result {
-        record_failure(state, &run_id, &watch_target.id, error).await;
+        record_failure(state, &run_id, &watch_target, error).await;
     }
     result
 }
@@ -172,7 +175,13 @@ async fn persist_pages(
         .iter()
         .filter(|post| post.kind != PostKind::Comment)
     {
-        let (id, inserted) = insert_post(&mut tx, post, None).await?;
+        let (id, inserted) = insert_post(
+            &mut tx,
+            post,
+            None,
+            state.config.persistence.store_raw_payload,
+        )
+        .await?;
         canonical_ids.insert(natural_key(post), id.clone());
         if inserted {
             inserted_count += 1;
@@ -199,7 +208,13 @@ async fn persist_pages(
         } else {
             find_post_id(&mut tx, post.tid, post.parent_pid, post.parent_is_topic).await?
         };
-        let (id, inserted) = insert_post(&mut tx, post, Some(&parent_id)).await?;
+        let (id, inserted) = insert_post(
+            &mut tx,
+            post,
+            Some(&parent_id),
+            state.config.persistence.store_raw_payload,
+        )
+        .await?;
         if inserted {
             inserted_count += 1;
             if !baseline && insert_event(&mut tx, &id, post, &watch_target.id).await? {
@@ -218,6 +233,7 @@ async fn persist_pages(
         pages_requested,
         inserted_count,
         event_count,
+        state.config.scheduler.timezone_offset,
     )
     .await?;
     tx.commit().await?;
@@ -287,7 +303,7 @@ fn natural_key(post: &ParsedPost) -> String {
     }
 }
 
-async fn load_credentials(
+pub(crate) async fn load_credentials(
     state: &AppState,
 ) -> Result<(secrecy::SecretString, secrecy::SecretString), ThreadCollectorError> {
     let row = sqlx::query(
@@ -369,10 +385,40 @@ async fn upsert_thread(
     Ok(())
 }
 
-async fn insert_post(
+pub(crate) async fn upsert_thread_partial(
+    tx: &mut Transaction<'_, Any>,
+    metadata: &ThreadMetadata,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO threads
+            (tid, fid, title, forum_name, author_uid, author_name, coverage,
+             remote_total_pages, remote_vrows)
+         VALUES ($1, $2, $3, $4, $5, $6, 'partial', 0, 0)
+         ON CONFLICT (tid) DO UPDATE SET
+            fid = EXCLUDED.fid,
+            title = CASE WHEN threads.title = '' THEN EXCLUDED.title ELSE threads.title END,
+            forum_name = CASE WHEN threads.forum_name = '' THEN EXCLUDED.forum_name
+                              ELSE threads.forum_name END,
+            author_uid = EXCLUDED.author_uid,
+            author_name = EXCLUDED.author_name,
+            last_seen_at = CURRENT_TIMESTAMP",
+    )
+    .bind(metadata.tid)
+    .bind(metadata.fid)
+    .bind(&metadata.title)
+    .bind(&metadata.forum_name)
+    .bind(metadata.author_uid)
+    .bind(&metadata.author_name)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_post(
     tx: &mut Transaction<'_, Any>,
     post: &ParsedPost,
     parent_post_id: Option<&str>,
+    store_raw_payload: bool,
 ) -> Result<(String, bool), sqlx::Error> {
     let id = Uuid::new_v4().to_string();
     let result = sqlx::query(
@@ -394,7 +440,7 @@ async fn insert_post(
     .bind(&post.content_raw)
     .bind(post.published_at_unix)
     .bind(post.page_number)
-    .bind(&post.raw_payload)
+    .bind(raw_payload_for_storage(post, store_raw_payload))
     .execute(&mut **tx)
     .await?;
 
@@ -405,7 +451,15 @@ async fn insert_post(
     Ok((existing, false))
 }
 
-async fn find_post_id(
+fn raw_payload_for_storage(post: &ParsedPost, store_raw_payload: bool) -> &str {
+    if store_raw_payload {
+        &post.raw_payload
+    } else {
+        ""
+    }
+}
+
+pub(crate) async fn find_post_id(
     tx: &mut Transaction<'_, Any>,
     tid: i64,
     pid: Option<i64>,
@@ -429,24 +483,28 @@ async fn find_post_id(
     Ok(row.get("id"))
 }
 
-async fn insert_event(
+pub(crate) async fn insert_event(
     tx: &mut Transaction<'_, Any>,
     post_id: &str,
     post: &ParsedPost,
     watch_id: &str,
 ) -> Result<bool, sqlx::Error> {
+    let event_id = Uuid::new_v4().to_string();
     let result = sqlx::query(
         "INSERT INTO post_events
             (id, post_id, event_type, discovered_by_watch_id)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT DO NOTHING",
     )
-    .bind(Uuid::new_v4().to_string())
+    .bind(&event_id)
     .bind(post_id)
     .bind(post.kind.event_type())
     .bind(watch_id)
     .execute(&mut **tx)
     .await?;
+    if result.rows_affected() == 1 {
+        notification::enqueue_matches(tx, &event_id, post).await?;
+    }
     Ok(result.rows_affected() == 1)
 }
 
@@ -461,6 +519,7 @@ async fn update_cursor_and_finish(
     pages_requested: i32,
     posts_inserted: i32,
     events_created: i32,
+    timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE watch_cursors SET last_floor = $1, remote_vrows = $2,
@@ -475,11 +534,15 @@ async fn update_cursor_and_finish(
     .await?;
 
     let next_run = match backend {
-        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + (interval_seconds * INTERVAL '1 second')",
-        DatabaseBackend::Sqlite => {
-            "datetime(CURRENT_TIMESTAMP, '+' || interval_seconds || ' seconds')"
-        }
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($2 * INTERVAL '1 second')",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $2 || ' seconds')",
     };
+    let delay = schedule::next_delay_seconds(
+        watch_target.schedule.as_ref(),
+        watch_target.interval_seconds,
+        OffsetDateTime::now_utc(),
+        timezone_offset,
+    );
     let query = format!(
         "UPDATE watch_targets SET status = 'active', baseline_completed = 1,
          next_run_at = {next_run}, lease_until = NULL,
@@ -488,6 +551,7 @@ async fn update_cursor_and_finish(
     );
     sqlx::query(&query)
         .bind(&watch_target.id)
+        .bind(delay)
         .execute(&mut **tx)
         .await?;
 
@@ -509,7 +573,7 @@ async fn update_cursor_and_finish(
 async fn record_failure(
     state: &AppState,
     run_id: &str,
-    watch_id: &str,
+    watch_target: &WatchTarget,
     error: &ThreadCollectorError,
 ) {
     let (kind, status) = match error {
@@ -522,6 +586,7 @@ async fn record_failure(
         ThreadCollectorError::Nga(NgaRequestError::Business { .. }) => {
             ("nga_business_error", "error")
         }
+        ThreadCollectorError::Nga(NgaRequestError::Busy) => ("nga_busy", "error"),
         ThreadCollectorError::Parse(_) => ("nga_parse_error", "error"),
         ThreadCollectorError::Database(_) => ("database_error", "error"),
         ThreadCollectorError::InvalidWatch => ("invalid_watch", "error"),
@@ -529,11 +594,15 @@ async fn record_failure(
     let safe_message = kind;
 
     let next_run = match state.config.database_backend {
-        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + (interval_seconds * INTERVAL '1 second')",
-        DatabaseBackend::Sqlite => {
-            "datetime(CURRENT_TIMESTAMP, '+' || interval_seconds || ' seconds')"
-        }
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second')",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $5 || ' seconds')",
     };
+    let delay = schedule::next_delay_seconds(
+        watch_target.schedule.as_ref(),
+        watch_target.interval_seconds,
+        OffsetDateTime::now_utc(),
+        state.config.scheduler.timezone_offset,
+    );
     let watch_query = format!(
         "UPDATE watch_targets SET status = $1,
          enabled = CASE WHEN $1 IN ('paused', 'not_found') THEN 0 ELSE enabled END,
@@ -545,11 +614,12 @@ async fn record_failure(
         .bind(status)
         .bind(kind)
         .bind(safe_message)
-        .bind(watch_id)
+        .bind(&watch_target.id)
+        .bind(delay)
         .execute(&state.pool)
         .await
     {
-        warn!(watch_id, error = %db_error, "failed to record watch failure");
+        warn!(watch_id = %watch_target.id, error = %db_error, "failed to record watch failure");
     }
     if let Err(db_error) = sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = $1,
@@ -586,10 +656,12 @@ mod tests {
     use sqlx::{Row, any::AnyPoolOptions};
     use tokio::sync::RwLock;
 
-    use super::{create_crawl_run, persist_pages, select_posts};
+    use super::{create_crawl_run, persist_pages, raw_payload_for_storage, select_posts};
     use crate::{
         app::AppState,
-        config::{AppConfig, DatabaseBackend, ObservabilityConfig},
+        config::{
+            AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
+        },
         crypto::CredentialCipher,
         domain::thread::PostKind,
         nga::{NgaClient, thread_parser::parse_thread_page},
@@ -626,6 +698,15 @@ mod tests {
         assert!(select_posts(&[page], 1, false).is_empty());
     }
 
+    #[test]
+    fn raw_payload_storage_is_controlled_by_configuration() {
+        let page = parse_thread_page(&fixture("thread_attachments.json"), 1004)
+            .expect("fixture must parse");
+        let post = &page.posts[0];
+        assert_eq!(raw_payload_for_storage(post, false), "");
+        assert!(raw_payload_for_storage(post, true).contains("asset-1.jpg"));
+    }
+
     #[tokio::test]
     async fn baseline_then_increment_is_append_only_and_deduplicated() {
         sqlx::any::install_default_drivers();
@@ -658,6 +739,13 @@ mod tests {
             credential_encryption_key: SecretString::from(key),
             nga_user_agent: "test-agent".to_owned(),
             run_migrations: false,
+            persistence: PersistenceConfig {
+                store_raw_payload: false,
+            },
+            scheduler: SchedulerConfig {
+                default_interval_seconds: 60,
+                timezone_offset: time::UtcOffset::UTC,
+            },
             observability: ObservabilityConfig {
                 log_filter: "info".to_owned(),
                 log_json: false,
@@ -781,6 +869,12 @@ mod tests {
             .expect("events must count");
         assert_eq!(post_count, 3);
         assert_eq!(event_count, 1);
+        let payload_bytes: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(LENGTH(raw_payload)), 0) FROM posts")
+                .fetch_one(&pool)
+                .await
+                .expect("payload bytes must count");
+        assert_eq!(payload_bytes, 0);
     }
 
     fn fixture(name: &str) -> Value {

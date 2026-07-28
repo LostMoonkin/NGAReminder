@@ -5,6 +5,13 @@ sqlite_path = "./data/nga-reminder.db"
 database_max_connections = 10
 run_migrations = true
 
+[scheduler]
+default_interval_seconds = 60
+timezone_offset = "+08:00"
+
+[persistence]
+store_raw_payload = false
+
 [observability]
 log_filter = "info,sqlx=warn"
 log_json = false

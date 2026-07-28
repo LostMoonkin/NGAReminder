@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Design
+
+- Frozen asset persistence as database metadata plus SHA-256 content-addressed local files. Asset
+  binaries will not be stored in PostgreSQL `BYTEA` or SQLite `BLOB`.
+- Added `persistence.store_raw_payload`, disabled by default, so new posts retain normalized fields
+  without storing full source JSON unless explicitly enabled.
+
+### M3
+
+- Added PostgreSQL/SQLite user metadata and independent topic/reply cursors.
+- Added typed user-topic, user-reply, and GBK profile parsing with inaccessible-entry and author
+  filtering.
+- Added user baselines and incremental discovery that persist only the watched UID's topic posts,
+  individual replies, and available nested comments.
+- Added the ten-attempt NGA busy policy with `skipped_busy` cursor preservation.
+- Added user watch API/scheduling and shared post/event insertion deduplication with thread watches.
+
+### M4
+
+- Added encrypted Bark/Feishu channels, TID/UID rules, transactional event matching, and a
+  channel-deduplicated outbox.
+- Added Bark V2 and Feishu enterprise-application interactive-card adapters.
+- Feishu obtains and caches `tenant_access_token` from `app_id`/`app_secret`, refreshes rejected
+  tokens once, and sends through `im/v1/messages` to configured chat or user IDs.
+- Feishu cards now extract NGA image markup, upload up to three trusted images with bounded
+  streaming downloads, cache `image_key` values, and fall back to source links without blocking
+  text delivery.
+- Notification links now open the stored thread page at `#pid{pid}Anchor` instead of opening NGA's
+  isolated-reply view.
+- Added leased delivery processing, retry/dead-letter classification, delivery history, channel
+  test sends, and channel/rule management APIs.
+
 ### M2
 
 - Added PostgreSQL and SQLite schemas for threads, append-only posts, watches, cursors, crawl runs,

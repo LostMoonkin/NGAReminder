@@ -131,7 +131,9 @@ mod tests {
     use secrecy::SecretString;
 
     use super::Application;
-    use crate::config::{AppConfig, DatabaseBackend, ObservabilityConfig};
+    use crate::config::{
+        AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
+    };
 
     #[tokio::test]
     async fn sqlite_creates_parent_file_and_runs_migrations() {
@@ -150,6 +152,13 @@ mod tests {
             credential_encryption_key: SecretString::from(STANDARD.encode([7_u8; 32])),
             nga_user_agent: "test".to_owned(),
             run_migrations: true,
+            persistence: PersistenceConfig {
+                store_raw_payload: false,
+            },
+            scheduler: SchedulerConfig {
+                default_interval_seconds: 60,
+                timezone_offset: time::UtcOffset::UTC,
+            },
             observability: ObservabilityConfig {
                 log_filter: "info".to_owned(),
                 log_json: false,

@@ -1,4 +1,5 @@
 pub mod thread_parser;
+pub mod user_parser;
 
 use std::{sync::Arc, time::Duration};
 
@@ -14,6 +15,8 @@ use tokio::time::Instant;
 
 const BASE_URL: &str = "https://bbs.nga.cn";
 const REQUEST_INTERVAL: Duration = Duration::from_millis(500);
+const USER_BUSY_ATTEMPTS: usize = 10;
+const USER_BUSY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct NgaClient {
@@ -43,6 +46,8 @@ pub enum NgaRequestError {
     Http(StatusCode),
     #[error("NGA credentials were rejected")]
     Unauthorized,
+    #[error("NGA remained busy after retries")]
+    Busy,
     #[error("NGA thread was not found")]
     NotFound,
     #[error("NGA returned business error {code}")]
@@ -90,7 +95,7 @@ impl NgaClient {
             .parse::<i64>()
             .map_err(|_| AuthCheckError::Unauthorized)?;
 
-        for attempt in 0..10 {
+        for attempt in 0..USER_BUSY_ATTEMPTS {
             self.wait_for_request_slot().await;
             let request = self.client.get(format!(
                 "{}/thread.php?searchpost=1&authorid={uid}&__output=12",
@@ -147,6 +152,105 @@ impl NgaClient {
         unreachable!("thread request retry loop always returns")
     }
 
+    pub async fn fetch_post_by_pid(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        tid: i64,
+        pid: i64,
+    ) -> Result<Value, NgaRequestError> {
+        for attempt in 0_u64..3 {
+            self.wait_for_request_slot().await;
+            let request = self
+                .client
+                .post(format!(
+                    "{}/app_api.php?__lib=post&__act=list",
+                    self.base_url
+                ))
+                .form(&[("tid", tid.to_string()), ("pid", pid.to_string())]);
+            let result = self.send_json(request, passport_uid, passport_cid).await;
+            let retryable = retryable_data_error(&result);
+            if !retryable || attempt == 2 {
+                return result;
+            }
+            self.retry_delay(tid, attempt).await;
+        }
+        unreachable!("post request retry loop always returns")
+    }
+
+    pub async fn fetch_user_topics(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        uid: i64,
+        page: i32,
+    ) -> Result<Value, NgaRequestError> {
+        self.fetch_user_list(passport_uid, passport_cid, uid, page, false)
+            .await
+    }
+
+    pub async fn fetch_user_replies(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        uid: i64,
+        page: i32,
+    ) -> Result<Value, NgaRequestError> {
+        self.fetch_user_list(passport_uid, passport_cid, uid, page, true)
+            .await
+    }
+
+    pub async fn fetch_user_profile(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        uid: i64,
+    ) -> Result<Vec<u8>, NgaRequestError> {
+        self.wait_for_request_slot().await;
+        let request = self
+            .client
+            .get(format!("{}/nuke.php?func=ucp&uid={uid}", self.base_url));
+        let response = self
+            .common_headers(request, passport_uid, passport_cid)
+            .send()
+            .await
+            .map_err(NgaRequestError::Request)?;
+        if response.status() != StatusCode::OK {
+            return Err(NgaRequestError::Http(response.status()));
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(NgaRequestError::Request)
+    }
+
+    async fn fetch_user_list(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        uid: i64,
+        page: i32,
+        replies: bool,
+    ) -> Result<Value, NgaRequestError> {
+        for attempt in 0..10 {
+            self.wait_for_request_slot().await;
+            let search = if replies { "searchpost=1&" } else { "" };
+            let request = self.client.get(format!(
+                "{}/thread.php?{search}authorid={uid}&__output=12&page={page}",
+                self.base_url
+            ));
+            let result = self.send_json(request, passport_uid, passport_cid).await;
+            match result {
+                Err(NgaRequestError::Busy) if attempt + 1 < USER_BUSY_ATTEMPTS => {
+                    tokio::time::sleep(USER_BUSY_DELAY).await;
+                }
+                result => return result,
+            }
+        }
+        Err(NgaRequestError::Busy)
+    }
+
     async fn fetch_thread_page_once(
         &self,
         passport_uid: &str,
@@ -162,12 +266,20 @@ impl NgaClient {
                 self.base_url
             ))
             .form(&[("tid", tid.to_string()), ("page", page.to_string())]);
+        self.send_json(request, passport_uid, passport_cid).await
+    }
+
+    async fn send_json(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid: &str,
+    ) -> Result<Value, NgaRequestError> {
         let response = self
             .common_headers(request, passport_uid, passport_cid)
             .send()
             .await
             .map_err(NgaRequestError::Request)?;
-
         if response.status() != StatusCode::OK {
             return Err(NgaRequestError::Http(response.status()));
         }
@@ -204,6 +316,22 @@ impl NgaClient {
         }
         *last_request = Instant::now();
     }
+
+    async fn retry_delay(&self, seed: i64, attempt: u64) {
+        let jitter_ms = (seed.unsigned_abs() + attempt * 17) % 250;
+        tokio::time::sleep(Duration::from_millis(
+            500 * 2_u64.pow(attempt as u32) + jitter_ms,
+        ))
+        .await;
+    }
+}
+
+fn retryable_data_error(result: &Result<Value, NgaRequestError>) -> bool {
+    matches!(
+        result,
+        Err(NgaRequestError::Request(_))
+            | Err(NgaRequestError::Http(StatusCode::TOO_MANY_REQUESTS))
+    ) || matches!(result, Err(NgaRequestError::Http(status)) if status.is_server_error())
 }
 
 fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, NgaRequestError> {
@@ -218,10 +346,15 @@ fn classify_data_envelope(value: &Value) -> Result<(), NgaRequestError> {
                 .or_else(|| code.as_str().and_then(|code| code.parse().ok()))
         })
         .ok_or(NgaRequestError::Business { code: -1 })?;
+    let message = value.get("msg").and_then(Value::as_str).unwrap_or_default();
     match code {
         0 => Ok(()),
         14 => Err(NgaRequestError::NotFound),
         46 => Err(NgaRequestError::Unauthorized),
+        2048 if message.contains("服务器忙") => Err(NgaRequestError::Busy),
+        2048 if message.contains("必须登录") || message.contains("请登录") => {
+            Err(NgaRequestError::Unauthorized)
+        }
         code => Err(NgaRequestError::Business { code }),
     }
 }
@@ -247,7 +380,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        AuthCheckError, NgaEnvelope, NgaRequestError, classify_data_envelope, classify_envelope,
+        AuthCheckError, NgaEnvelope, NgaRequestError, USER_BUSY_ATTEMPTS, classify_data_envelope,
+        classify_envelope,
     };
 
     #[test]
@@ -284,6 +418,21 @@ mod tests {
             classify_data_envelope(&unauthorized),
             Err(NgaRequestError::Unauthorized)
         ));
+
+        let busy: Value = fixture("busy_2048.json");
+        assert!(matches!(
+            classify_data_envelope(&busy),
+            Err(NgaRequestError::Busy)
+        ));
+    }
+
+    #[test]
+    fn user_busy_policy_has_ten_total_attempts() {
+        let retry_attempts = (0..USER_BUSY_ATTEMPTS)
+            .filter(|attempt| attempt + 1 < USER_BUSY_ATTEMPTS)
+            .count();
+        assert_eq!(retry_attempts, 9);
+        assert_eq!(USER_BUSY_ATTEMPTS, 10);
     }
 
     #[test]

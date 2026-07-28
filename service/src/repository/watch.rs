@@ -3,6 +3,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::config::DatabaseBackend;
+use crate::schedule::Schedule;
 
 #[derive(Clone, Debug)]
 pub struct WatchTarget {
@@ -11,6 +12,7 @@ pub struct WatchTarget {
     pub target_id: i64,
     pub enabled: bool,
     pub interval_seconds: i32,
+    pub schedule: Option<Schedule>,
     pub status: String,
     pub baseline_completed: bool,
     pub next_run_at: String,
@@ -22,6 +24,14 @@ pub struct WatchTarget {
 pub struct ThreadCursor {
     pub last_floor: i32,
     pub remote_vrows: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct UserCursor {
+    pub newest_topic_at_unix: i64,
+    pub newest_topic_tid: i64,
+    pub newest_reply_at_unix: i64,
+    pub newest_reply_pid: i64,
 }
 
 #[derive(Debug, Error)]
@@ -37,16 +47,26 @@ pub async fn create_thread_watch(
     tid: i64,
     interval_seconds: i32,
 ) -> Result<WatchTarget, CreateWatchError> {
+    create_thread_watch_with_schedule(pool, tid, interval_seconds, None).await
+}
+
+pub async fn create_thread_watch_with_schedule(
+    pool: &AnyPool,
+    tid: i64,
+    interval_seconds: i32,
+    schedule: Option<&Schedule>,
+) -> Result<WatchTarget, CreateWatchError> {
     let id = Uuid::new_v4().to_string();
     let mut tx = pool.begin().await.map_err(CreateWatchError::Database)?;
     let result = sqlx::query(
         "INSERT INTO watch_targets
-            (id, target_type, target_id, interval_seconds)
-         VALUES ($1, 'thread', $2, $3)",
+            (id, target_type, target_id, interval_seconds, schedule_json)
+         VALUES ($1, 'thread', $2, $3, $4)",
     )
     .bind(&id)
     .bind(tid)
     .bind(interval_seconds)
+    .bind(schedule_json(schedule))
     .execute(&mut *tx)
     .await;
 
@@ -72,9 +92,56 @@ pub async fn create_thread_watch(
         .ok_or_else(|| CreateWatchError::Database(sqlx::Error::RowNotFound))
 }
 
+pub async fn create_user_watch(
+    pool: &AnyPool,
+    uid: i64,
+    interval_seconds: i32,
+) -> Result<WatchTarget, CreateWatchError> {
+    create_user_watch_with_schedule(pool, uid, interval_seconds, None).await
+}
+
+pub async fn create_user_watch_with_schedule(
+    pool: &AnyPool,
+    uid: i64,
+    interval_seconds: i32,
+    schedule: Option<&Schedule>,
+) -> Result<WatchTarget, CreateWatchError> {
+    let id = Uuid::new_v4().to_string();
+    let mut tx = pool.begin().await.map_err(CreateWatchError::Database)?;
+    let result = sqlx::query(
+        "INSERT INTO watch_targets
+            (id, target_type, target_id, interval_seconds, schedule_json)
+         VALUES ($1, 'user', $2, $3, $4)",
+    )
+    .bind(&id)
+    .bind(uid)
+    .bind(interval_seconds)
+    .bind(schedule_json(schedule))
+    .execute(&mut *tx)
+    .await;
+    match result {
+        Ok(_) => {}
+        Err(error) if is_unique_violation(&error) => return Err(CreateWatchError::Conflict),
+        Err(error) => return Err(CreateWatchError::Database(error)),
+    }
+    sqlx::query(
+        "INSERT INTO user_watch_cursors (watch_id)
+         VALUES ($1)",
+    )
+    .bind(&id)
+    .execute(&mut *tx)
+    .await
+    .map_err(CreateWatchError::Database)?;
+    tx.commit().await.map_err(CreateWatchError::Database)?;
+    find(pool, &id)
+        .await
+        .map_err(CreateWatchError::Database)?
+        .ok_or_else(|| CreateWatchError::Database(sqlx::Error::RowNotFound))
+}
+
 pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, target_type, target_id, enabled, interval_seconds, status,
+        "SELECT id, target_type, target_id, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets
@@ -87,7 +154,7 @@ pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
 
 pub async fn find(pool: &AnyPool, id: &str) -> Result<Option<WatchTarget>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, target_type, target_id, enabled, interval_seconds, status,
+        "SELECT id, target_type, target_id, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets WHERE id = $1",
@@ -112,11 +179,38 @@ pub async fn thread_cursor(pool: &AnyPool, watch_id: &str) -> Result<ThreadCurso
     })
 }
 
+pub async fn user_cursor(pool: &AnyPool, watch_id: &str) -> Result<UserCursor, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT newest_topic_at_unix, newest_topic_tid,
+         newest_reply_at_unix, newest_reply_pid
+         FROM user_watch_cursors WHERE watch_id = $1",
+    )
+    .bind(watch_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(UserCursor {
+        newest_topic_at_unix: row.get("newest_topic_at_unix"),
+        newest_topic_tid: row.get("newest_topic_tid"),
+        newest_reply_at_unix: row.get("newest_reply_at_unix"),
+        newest_reply_pid: row.get("newest_reply_pid"),
+    })
+}
+
 pub async fn update(
     pool: &AnyPool,
     id: &str,
     enabled: Option<bool>,
     interval_seconds: Option<i32>,
+) -> Result<Option<WatchTarget>, sqlx::Error> {
+    update_with_schedule(pool, id, enabled, interval_seconds, None).await
+}
+
+pub async fn update_with_schedule(
+    pool: &AnyPool,
+    id: &str,
+    enabled: Option<bool>,
+    interval_seconds: Option<i32>,
+    schedule: Option<Option<&Schedule>>,
 ) -> Result<Option<WatchTarget>, sqlx::Error> {
     if let Some(enabled) = enabled {
         sqlx::query(
@@ -133,10 +227,24 @@ pub async fn update(
     }
     if let Some(interval_seconds) = interval_seconds {
         sqlx::query(
-            "UPDATE watch_targets SET interval_seconds = $1, updated_at = CURRENT_TIMESTAMP
+            "UPDATE watch_targets SET interval_seconds = $1,
+             next_run_at = CASE WHEN enabled = 1 THEN CURRENT_TIMESTAMP ELSE next_run_at END,
+             updated_at = CURRENT_TIMESTAMP
              WHERE id = $2",
         )
         .bind(interval_seconds)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    if let Some(schedule) = schedule {
+        sqlx::query(
+            "UPDATE watch_targets SET schedule_json = $1,
+             next_run_at = CASE WHEN enabled = 1 THEN CURRENT_TIMESTAMP ELSE next_run_at END,
+             updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2",
+        )
+        .bind(schedule.map(|value| schedule_json(Some(value))))
         .bind(id)
         .execute(pool)
         .await?;
@@ -167,7 +275,7 @@ pub async fn claim_due(
              last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE id = (
              SELECT id FROM watch_targets
-             WHERE target_type = 'thread' AND enabled = 1
+             WHERE enabled = 1
                AND next_run_at <= CURRENT_TIMESTAMP
                AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
              ORDER BY next_run_at, created_at LIMIT 1
@@ -196,7 +304,7 @@ pub async fn claim_by_id(
         "UPDATE watch_targets
          SET status = 'running', lease_until = {lease_expression},
              last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND target_type = 'thread'
+         WHERE id = $1
            AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
          RETURNING id"
     );
@@ -208,18 +316,26 @@ pub async fn claim_by_id(
 }
 
 fn map_watch(row: &sqlx::any::AnyRow) -> WatchTarget {
+    let schedule_json: Option<String> = row.get("schedule_json");
     WatchTarget {
         id: row.get("id"),
         target_type: row.get("target_type"),
         target_id: row.get("target_id"),
         enabled: row.get::<i32, _>("enabled") == 1,
         interval_seconds: row.get("interval_seconds"),
+        schedule: schedule_json.and_then(|value| serde_json::from_str(&value).ok()),
         status: row.get("status"),
         baseline_completed: row.get::<i32, _>("baseline_completed") == 1,
         next_run_at: row.get("next_run_at"),
         last_completed_at: row.get("last_completed_at"),
         last_error_kind: row.get("last_error_kind"),
     }
+}
+
+fn schedule_json(schedule: Option<&Schedule>) -> Option<String> {
+    schedule
+        .filter(|items| !items.is_empty())
+        .map(|items| serde_json::to_string(items).expect("schedule must serialize"))
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -233,7 +349,11 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 mod tests {
     use sqlx::any::AnyPoolOptions;
 
-    use super::{CreateWatchError, create_thread_watch, delete, list, update};
+    use super::{
+        CreateWatchError, create_thread_watch, create_user_watch_with_schedule, delete, list,
+        update, user_cursor,
+    };
+    use crate::schedule::ScheduleRule;
 
     #[tokio::test]
     async fn thread_watch_crud_and_conflict() {
@@ -280,5 +400,30 @@ mod tests {
 
         assert!(delete(&pool, &created.id).await.expect("watch must delete"));
         assert!(list(&pool).await.expect("watches must list").is_empty());
+
+        let user = create_user_watch_with_schedule(
+            &pool,
+            2001,
+            60,
+            Some(&vec![ScheduleRule {
+                days: vec!["weekdays".to_owned()],
+                description: Some("business hours".to_owned()),
+                end_time: "16:00".to_owned(),
+                interval: 120,
+                start_time: "09:00".to_owned(),
+            }]),
+        )
+        .await
+        .expect("user watch must create");
+        assert_eq!(user.target_type, "user");
+        assert_eq!(
+            user.schedule.as_ref().expect("schedule must persist").len(),
+            1
+        );
+        let cursor = user_cursor(&pool, &user.id)
+            .await
+            .expect("user cursor must exist");
+        assert_eq!(cursor.newest_topic_at_unix, 0);
+        assert_eq!(cursor.newest_reply_pid, 0);
     }
 }
