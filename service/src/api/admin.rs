@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
@@ -69,4 +69,23 @@ pub async fn login(
         }),
     )
         .into_response())
+}
+
+pub async fn logout(State(state): State<AppState>, request: Request) -> StatusCode {
+    let session = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                cookie
+                    .trim()
+                    .strip_prefix("nga_reminder_session=")
+                    .map(str::to_owned)
+            })
+        });
+    if let Some(session) = session {
+        state.admin_sessions.write().await.remove(&session);
+    }
+    StatusCode::NO_CONTENT
 }

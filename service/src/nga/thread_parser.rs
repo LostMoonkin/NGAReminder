@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::domain::thread::{ParsedPost, PostKind, ThreadMetadata, ThreadPage};
+use crate::domain::thread::{ParsedPost, PostAssetReference, PostKind, ThreadMetadata, ThreadPage};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ThreadParseError {
@@ -67,10 +67,11 @@ pub fn parse_thread_page(
         per_page,
         vrows,
     };
+    let attach_prefix = object.get("attachPrefix").and_then(Value::as_str);
 
     let mut posts = Vec::new();
     for raw_post in raw_posts {
-        let post = parse_post(raw_post, requested_tid, current_page, None)?;
+        let post = parse_post(raw_post, requested_tid, current_page, None, attach_prefix)?;
         let parent_pid = post.pid;
         let parent_is_topic = post.kind == PostKind::Topic;
         posts.push(post);
@@ -82,6 +83,7 @@ pub fn parse_thread_page(
                     requested_tid,
                     current_page,
                     Some((parent_pid, parent_is_topic)),
+                    attach_prefix,
                 )?);
             }
         }
@@ -99,6 +101,7 @@ fn parse_post(
     requested_tid: i64,
     page_number: i32,
     parent: Option<(Option<i64>, bool)>,
+    attach_prefix: Option<&str>,
 ) -> Result<ParsedPost, ThreadParseError> {
     let object = value
         .as_object()
@@ -152,7 +155,73 @@ fn parse_post(
         published_at_unix: optional_i64(object, "postdatetimestamp")?,
         page_number,
         raw_payload: serde_json::to_string(value).map_err(|_| ThreadParseError::RawJson)?,
+        asset_refs: parse_attachment_refs(object, attach_prefix),
     })
+}
+
+fn parse_attachment_refs(
+    object: &Map<String, Value>,
+    attach_prefix: Option<&str>,
+) -> Vec<PostAssetReference> {
+    let Some(attachments) = object.get("attches").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut refs = Vec::new();
+    for attachment in attachments {
+        let Some(attachment) = attachment.as_object() else {
+            continue;
+        };
+        let raw_url = attachment
+            .get("attachurl")
+            .and_then(Value::as_str)
+            .or_else(|| attachment.get("path").and_then(Value::as_str));
+        let Some(source_url) =
+            raw_url.and_then(|value| resolve_attachment_url(value, attach_prefix))
+        else {
+            continue;
+        };
+        if refs
+            .iter()
+            .any(|item: &PostAssetReference| item.source_url == source_url)
+        {
+            continue;
+        }
+        let original_name = attachment
+            .get("url_utf8_org_name")
+            .and_then(Value::as_str)
+            .or_else(|| attachment.get("name").and_then(Value::as_str))
+            .map(ToOwned::to_owned);
+        let mime_type =
+            attachment
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(|kind| match kind {
+                    "img" => Some("image/*".to_owned()),
+                    "audio" => Some("audio/*".to_owned()),
+                    "video" => Some("video/*".to_owned()),
+                    _ => None,
+                });
+        refs.push(PostAssetReference {
+            source_url,
+            original_name,
+            mime_type,
+            size_bytes: optional_i64(attachment, "size").ok().flatten(),
+            usage: "attachment".to_owned(),
+        });
+    }
+    refs
+}
+
+fn resolve_attachment_url(value: &str, attach_prefix: Option<&str>) -> Option<String> {
+    if value.starts_with("https://") || value.starts_with("http://") {
+        return Some(value.to_owned());
+    }
+    let prefix = attach_prefix?;
+    reqwest::Url::parse(prefix)
+        .ok()?
+        .join(value)
+        .ok()
+        .map(|url| url.to_string())
 }
 
 fn required_i32(object: &Map<String, Value>, field: &'static str) -> Result<i32, ThreadParseError> {
@@ -231,6 +300,11 @@ mod tests {
         let page = parse_thread_page(&fixture("thread_attachments.json"), 1004)
             .expect("fixture must parse");
         assert!(page.posts[0].raw_payload.contains("asset-1.jpg"));
+        assert_eq!(page.posts[0].asset_refs.len(), 2);
+        assert_eq!(
+            page.posts[0].asset_refs[0].source_url,
+            "https://example.invalid/attachments/synthetic/asset-1.jpg"
+        );
     }
 
     fn fixture(name: &str) -> Value {

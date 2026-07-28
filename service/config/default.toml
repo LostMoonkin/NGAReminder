@@ -12,6 +12,11 @@ timezone_offset = "+08:00"
 [persistence]
 store_raw_payload = false
 
+[assets]
+download_enabled = false
+storage_path = "./data/assets"
+max_download_bytes = 10485760
+
 [observability]
 log_filter = "info,sqlx=warn"
 log_json = false

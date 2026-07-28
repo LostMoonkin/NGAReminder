@@ -9,6 +9,18 @@
 - Added `persistence.store_raw_payload`, disabled by default, so new posts retain normalized fields
   without storing full source JSON unless explicitly enabled.
 
+### M5 (in progress)
+
+- Added SQLite/PostgreSQL asset metadata and post-to-asset association tables.
+- Added bounded inline-image discovery, HTTPS NGA host validation, pending download processing, and
+  SHA-256 content-addressed local storage.
+- Added `attachPrefix`/`attches` parsing so NGA attachment metadata enters the same local resource
+  queue as inline images.
+- Added NGA markup parsing/rendering for Markdown, including links, images, quotes, formatting,
+  code blocks, line breaks, and unsafe-link rejection.
+- Added protected thread/user Markdown and ZIP export endpoints with metadata and ready local assets.
+- Added export, asset safety, renderer, ZIP, and idempotency tests.
+
 ### M3
 
 - Added PostgreSQL/SQLite user metadata and independent topic/reply cursors.
@@ -50,3 +62,11 @@
 
 - Added the Rust/Axum service skeleton, PostgreSQL and SQLite support, API/admin authentication, and
   encrypted NGA Passport credential management.
+## Unreleased
+
+- Added the first responsive `/admin` management console with session login, overview cards,
+  watch controls, notification channel/rule forms, content browsing, and export downloads.
+- Added protected overview, thread/post query, event inbox, and event read-state APIs.
+- Added persistent `post_events.read_at` state for marking one or all events as read.
+- Account decryption failures now return a recoverable configuration state instead of a generic
+  internal error; the management page guides the administrator to re-enter the NGA Cookie.

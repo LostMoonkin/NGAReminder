@@ -18,6 +18,6 @@ WORKDIR /app
 
 COPY --from=builder /build/target/release/nga-reminder /usr/local/bin/nga-reminder
 
-EXPOSE 8080
+EXPOSE 12888
 ENTRYPOINT ["nga-reminder"]
 CMD ["all"]

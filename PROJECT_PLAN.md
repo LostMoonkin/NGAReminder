@@ -965,6 +965,25 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 ### M5：Markdown 导出
 
+状态：首版实现进行中。
+
+已实现并验证：
+
+- PostgreSQL/SQLite 新增 `assets`、`post_assets` migration，正文 `[img]` 以及 NGA
+  `attachPrefix`/`attches` 附件进入结构化元数据。
+- `assets.download_enabled`、内容大小限制和 `assets.storage_path` 配置已接入；受信任 HTTPS
+  NGA 图片进入 pending 队列，下载后按 SHA-256 内容寻址落盘。
+- 实现 NGA markup AST/Markdown renderer，覆盖加粗、斜体、下划线、删除线、引用、链接、
+  图片、代码块和换行，并拒绝不安全链接。
+- 新增 thread/user Markdown 与 ZIP 导出 API；ZIP 包含 Markdown、`metadata.json` 和已就绪
+  的本地资源，数据库路径经过相对路径安全校验。
+- 已通过资源幂等、路径穿越、渲染、Markdown/ZIP 导出和全量回归测试。
+
+待完成：
+
+- 从 NGA `attches` 原始结构完整提取附件、音频、视频元数据并接入同一资源队列。
+- 大主题流式导出、资源缺失/孤儿清理任务和完整 golden fixtures。
+
 任务：
 
 - NGA markup tokenizer/AST。
@@ -989,6 +1008,8 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 
 ### M6：Web 管理页面
 
+状态：首版管理台已接入，核心流程进行中。
+
 任务：
 
 - 单管理员登录页。
@@ -997,6 +1018,25 @@ NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加�
 - Bark、飞书企业应用机器人和通知规则 UI。
 - 主题、回复、未读事件和导出 UI。
 - 附件本地保存参数和其他服务配置的只读状态 UI。
+
+已实现：
+
+- `/admin` 已替换为响应式单页管理台，采用零构建依赖的原生 HTML/CSS/JavaScript，随 Axum
+  服务一起发布。
+- 已接入管理员会话登录、凭据脱敏展示、Cookie 加密保存和 NGA 连通性测试。
+- 已接入 thread/user watch 的新增、启停、删除和立即运行，以及运行状态展示。
+- 已接入 Bark/飞书渠道的新增、启停、测试、删除和通知规则的新增、启停、删除。
+- 已接入主题列表、帖子预览、Markdown/ZIP 下载、事件收件箱和事件已读状态。
+- 新增 `/api/v1/overview`、主题/帖子查询和事件读状态 API；事件已读状态由 0007 migration
+  持久化。
+- 服务参数、附件本地保存开关、资源目录和已就绪资源数量以只读方式展示。
+- NGA 账号缺失或凭据解密失败时，首页显示可恢复的重新配置提示，不再直接显示通用 500。
+
+剩余工作：
+
+- 增加用户 watch 结果的独立用户/回复视图及主题详情的完整富文本渲染。
+- 将 schedule 编辑、用户导出和更细的事件筛选补齐到管理台。
+- 完成生产环境浏览器级验收和 M6 最终验收记录。
 
 验收：
 

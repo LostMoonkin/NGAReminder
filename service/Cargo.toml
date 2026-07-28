@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive", "env"] }
 config = "0.15"
 encoding_rs = "0.8"
 futures-util = "0.3"
+sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,7 @@ tower-http = { version = "0.6", features = ["request-id", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

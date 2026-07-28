@@ -19,19 +19,17 @@ services:
     build:
       context: .
     command: ["all"]
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      NGA_REMINDER__API_TOKEN: ${NGA_REMINDER__API_TOKEN:-change-me-for-local-development}
-      NGA_REMINDER__ADMIN_PASSWORD: ${NGA_REMINDER__ADMIN_PASSWORD:-change-me-for-local-development}
-      NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY: ${NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
-      NGA_REMINDER__DATABASE_URL: postgres://nga_reminder:nga_reminder@postgres:5432/nga_reminder
-      NGA_REMINDER__DATABASE_BACKEND: postgres
-      NGA_REMINDER__BIND_ADDR: 0.0.0.0:8080
-      NGA_REMINDER__OBSERVABILITY__LOG_JSON: "true"
+      NGA_REMINDER__DATABASE_URL: ${NGA_REMINDER__DATABASE_URL}
+      NGA_REMINDER__DATABASE_BACKEND: ${NGA_REMINDER__DATABASE_BACKEND:-postgres}
+      NGA_REMINDER__BIND_ADDR: ${NGA_REMINDER__BIND_ADDR:-0.0.0.0:12888}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "12888:12888"
 
 volumes:
   postgres-data:

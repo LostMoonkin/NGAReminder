@@ -42,6 +42,7 @@ pub enum CreateWatchError {
     Database(#[source] sqlx::Error),
 }
 
+#[cfg(test)]
 pub async fn create_thread_watch(
     pool: &AnyPool,
     tid: i64,
@@ -92,6 +93,7 @@ pub async fn create_thread_watch_with_schedule(
         .ok_or_else(|| CreateWatchError::Database(sqlx::Error::RowNotFound))
 }
 
+#[cfg(test)]
 pub async fn create_user_watch(
     pool: &AnyPool,
     uid: i64,
@@ -196,6 +198,7 @@ pub async fn user_cursor(pool: &AnyPool, watch_id: &str) -> Result<UserCursor, s
     })
 }
 
+#[cfg(test)]
 pub async fn update(
     pool: &AnyPool,
     id: &str,

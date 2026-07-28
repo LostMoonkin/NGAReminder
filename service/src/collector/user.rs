@@ -315,6 +315,7 @@ async fn persist(
             parent,
             None,
             state.config.persistence.store_raw_payload,
+            state.config.assets.download_enabled,
         )
         .await?;
         if inserted {
@@ -335,6 +336,7 @@ async fn persist(
                 comment,
                 Some(&parent_id),
                 state.config.persistence.store_raw_payload,
+                state.config.assets.download_enabled,
             )
             .await?;
             if inserted {
@@ -700,6 +702,11 @@ mod tests {
                 run_migrations: false,
                 persistence: PersistenceConfig {
                     store_raw_payload: false,
+                },
+                assets: crate::config::AssetsConfig {
+                    download_enabled: false,
+                    storage_path: "./data/test-assets".into(),
+                    max_download_bytes: 10 * 1024 * 1024,
                 },
                 scheduler: SchedulerConfig {
                     default_interval_seconds: 60,

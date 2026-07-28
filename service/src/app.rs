@@ -132,7 +132,8 @@ mod tests {
 
     use super::Application;
     use crate::config::{
-        AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
+        AppConfig, AssetsConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig,
+        SchedulerConfig,
     };
 
     #[tokio::test]
@@ -154,6 +155,11 @@ mod tests {
             run_migrations: true,
             persistence: PersistenceConfig {
                 store_raw_payload: false,
+            },
+            assets: AssetsConfig {
+                download_enabled: false,
+                storage_path: root.join("assets"),
+                max_download_bytes: 10 * 1024 * 1024,
             },
             scheduler: SchedulerConfig {
                 default_interval_seconds: 60,

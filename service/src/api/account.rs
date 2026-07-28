@@ -38,7 +38,7 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
     let row = sqlx::query(
-        "SELECT passport_uid_encrypted, status,
+        "SELECT passport_uid_encrypted, passport_cid_encrypted, status,
          CAST(last_auth_checked_at AS TEXT) AS last_auth_checked_at, last_auth_error_kind
          FROM nga_accounts WHERE label = 'default'",
     )
@@ -56,9 +56,13 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
         }));
     };
     let encrypted: Vec<u8> = row.get("passport_uid_encrypted");
-    let uid = state.credential_cipher.decrypt(&encrypted).map_err(|_| {
-        internal_error(sqlx::Error::Protocol("credential decryption failed".into()))
-    })?;
+    let cid_encrypted: Vec<u8> = row.get("passport_cid_encrypted");
+    let Ok(uid) = state.credential_cipher.decrypt(&encrypted) else {
+        return Ok(Json(needs_configuration_response()));
+    };
+    if state.credential_cipher.decrypt(&cid_encrypted).is_err() {
+        return Ok(Json(needs_configuration_response()));
+    }
 
     Ok(Json(AccountResponse {
         configured: true,
@@ -137,9 +141,9 @@ pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountRespons
     .map_err(internal_error)?
     .ok_or({
         (
-            StatusCode::NOT_FOUND,
+            StatusCode::PRECONDITION_FAILED,
             Json(ApiError {
-                error: "nga_account_not_configured",
+                error: "nga_account_needs_configuration",
             }),
         )
     })?;
@@ -175,10 +179,24 @@ fn decrypt_column(
     state: &AppState,
     value: Vec<u8>,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
-    state
-        .credential_cipher
-        .decrypt(&value)
-        .map_err(|_| internal_api_error())
+    state.credential_cipher.decrypt(&value).map_err(|_| {
+        (
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiError {
+                error: "nga_account_needs_configuration",
+            }),
+        )
+    })
+}
+
+fn needs_configuration_response() -> AccountResponse {
+    AccountResponse {
+        configured: false,
+        passport_uid_masked: None,
+        status: "needs_configuration".to_owned(),
+        last_auth_checked_at: None,
+        last_auth_error_kind: Some("credential_decryption_failed".to_owned()),
+    }
 }
 
 async fn update_auth_status(

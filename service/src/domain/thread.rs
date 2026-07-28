@@ -37,6 +37,15 @@ impl PostKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostAssetReference {
+    pub source_url: String,
+    pub original_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub usage: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ParsedPost {
     pub tid: i64,
@@ -52,6 +61,7 @@ pub struct ParsedPost {
     pub published_at_unix: Option<i64>,
     pub page_number: i32,
     pub raw_payload: String,
+    pub asset_refs: Vec<PostAssetReference>,
 }
 
 #[derive(Clone, Debug)]

@@ -180,6 +180,7 @@ async fn persist_pages(
             post,
             None,
             state.config.persistence.store_raw_payload,
+            state.config.assets.download_enabled,
         )
         .await?;
         canonical_ids.insert(natural_key(post), id.clone());
@@ -213,6 +214,7 @@ async fn persist_pages(
             post,
             Some(&parent_id),
             state.config.persistence.store_raw_payload,
+            state.config.assets.download_enabled,
         )
         .await?;
         if inserted {
@@ -419,6 +421,7 @@ pub(crate) async fn insert_post(
     post: &ParsedPost,
     parent_post_id: Option<&str>,
     store_raw_payload: bool,
+    download_assets: bool,
 ) -> Result<(String, bool), sqlx::Error> {
     let id = Uuid::new_v4().to_string();
     let result = sqlx::query(
@@ -445,6 +448,7 @@ pub(crate) async fn insert_post(
     .await?;
 
     if result.rows_affected() == 1 {
+        crate::assets::record_post_assets(tx, &id, post, download_assets).await?;
         return Ok((id, true));
     }
     let existing = find_post_id(tx, post.tid, post.pid, post.kind == PostKind::Topic).await?;
@@ -741,6 +745,11 @@ mod tests {
             run_migrations: false,
             persistence: PersistenceConfig {
                 store_raw_payload: false,
+            },
+            assets: crate::config::AssetsConfig {
+                download_enabled: false,
+                storage_path: "./data/test-assets".into(),
+                max_download_bytes: 10 * 1024 * 1024,
             },
             scheduler: SchedulerConfig {
                 default_interval_seconds: 60,

@@ -1,9 +1,12 @@
 mod api;
 mod app;
+mod assets;
 mod collector;
 mod config;
 mod crypto;
 mod domain;
+mod export;
+mod markup;
 mod nga;
 mod notification;
 mod observability;

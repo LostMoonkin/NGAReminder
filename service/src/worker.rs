@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::{
     app::AppState,
+    assets,
     collector::{thread, user},
     notification,
     repository::watch,
@@ -24,6 +25,7 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                 return Ok(());
             }
             _ = scheduler.tick() => {
+                while assets::process_one(&state).await? {}
                 while notification::worker::process_one(&state).await? {}
                 let claimed = watch::claim_due(&state.pool, state.config.database_backend).await?;
                 if let Some(watch_target) = claimed {

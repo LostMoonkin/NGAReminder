@@ -1,8 +1,10 @@
 mod account;
 mod admin;
 mod auth;
+mod export;
 mod health;
 mod notification;
+mod query;
 mod watch;
 
 use axum::{
@@ -23,9 +25,11 @@ pub fn router(state: AppState) -> Router {
         .route("/ready", get(health::ready))
         .route("/admin", get(admin::page))
         .route("/admin/login", post(admin::login));
+    let public = public.route("/admin/logout", post(admin::logout));
 
     let protected = Router::new()
         .route("/api/v1/status", get(status))
+        .route("/api/v1/overview", get(query::overview))
         .route("/api/v1/settings/nga-account", get(account::get))
         .route("/api/v1/settings/nga-account", put(account::save))
         .route("/api/v1/settings/nga-account/test", post(account::test))
@@ -35,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/watches/{id}", patch(watch::update))
         .route("/api/v1/watches/{id}", delete(watch::delete))
         .route("/api/v1/watches/{id}/run", post(watch::run))
+        .route("/api/v1/threads", get(query::threads))
+        .route("/api/v1/threads/{tid}/posts", get(query::posts))
         .route("/api/v1/channels", get(notification::list_channels))
         .route("/api/v1/channels", post(notification::create_channel))
         .route("/api/v1/channels/{id}", patch(notification::update_channel))
@@ -59,6 +65,11 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/notification-rules/{id}",
             delete(notification::delete_rule),
         )
+        .route("/api/v1/events", get(query::events))
+        .route("/api/v1/events/{id}/read", post(query::mark_event_read))
+        .route("/api/v1/events/read-all", post(query::mark_all_events_read))
+        .route("/api/v1/exports/threads/{tid}", get(export::thread))
+        .route("/api/v1/exports/users/{uid}", get(export::user))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_token,
@@ -103,7 +114,8 @@ mod tests {
     use crate::{
         app::AppState,
         config::{
-            AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
+            AppConfig, AssetsConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig,
+            SchedulerConfig,
         },
         crypto::CredentialCipher,
         nga::NgaClient,
@@ -129,6 +141,11 @@ mod tests {
             run_migrations: false,
             persistence: PersistenceConfig {
                 store_raw_payload: false,
+            },
+            assets: AssetsConfig {
+                download_enabled: false,
+                storage_path: "./data/test-assets".into(),
+                max_download_bytes: 10 * 1024 * 1024,
             },
             scheduler: SchedulerConfig {
                 default_interval_seconds: 60,

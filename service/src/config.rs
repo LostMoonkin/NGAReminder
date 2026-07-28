@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub nga_user_agent: String,
     pub run_migrations: bool,
     pub persistence: PersistenceConfig,
+    pub assets: AssetsConfig,
     pub scheduler: SchedulerConfig,
     pub observability: ObservabilityConfig,
 }
@@ -40,6 +41,13 @@ pub struct PersistenceConfig {
     pub store_raw_payload: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct AssetsConfig {
+    pub download_enabled: bool,
+    pub storage_path: PathBuf,
+    pub max_download_bytes: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct SchedulerConfig {
     pub default_interval_seconds: i32,
@@ -59,6 +67,7 @@ struct RawConfig {
     nga_user_agent: String,
     run_migrations: bool,
     persistence: PersistenceConfig,
+    assets: AssetsConfig,
     scheduler: RawSchedulerConfig,
     observability: ObservabilityConfig,
 }
@@ -82,6 +91,9 @@ impl AppConfig {
             .set_default("database_max_connections", 10)?
             .set_default("run_migrations", true)?
             .set_default("persistence.store_raw_payload", false)?
+            .set_default("assets.download_enabled", false)?
+            .set_default("assets.storage_path", "./data/assets")?
+            .set_default("assets.max_download_bytes", 10485760_u64)?
             .set_default("scheduler.default_interval_seconds", 60)?
             .set_default("scheduler.timezone_offset", "+08:00")?
             .set_default(
@@ -131,6 +143,11 @@ impl AppConfig {
             ));
         }
         let timezone_offset = parse_timezone_offset(&raw.scheduler.timezone_offset)?;
+        if raw.assets.max_download_bytes == 0 {
+            return Err(config::ConfigError::Message(
+                "assets.max_download_bytes must be greater than zero".to_owned(),
+            ));
+        }
 
         Ok(Self {
             bind_addr: raw.bind_addr,
@@ -144,6 +161,7 @@ impl AppConfig {
             nga_user_agent: raw.nga_user_agent,
             run_migrations: raw.run_migrations,
             persistence: raw.persistence,
+            assets: raw.assets,
             scheduler: SchedulerConfig {
                 default_interval_seconds: raw.scheduler.default_interval_seconds,
                 timezone_offset,

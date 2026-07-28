@@ -37,6 +37,19 @@ When disabled, new `posts.raw_payload` values are stored as an empty string whil
 fields remain available. Set it to `true` only when full NGA payloads are needed for parser
 diagnostics. Changing the option does not erase or backfill existing rows.
 
+Asset persistence is configured independently:
+
+```text
+NGA_REMINDER__ASSETS__DOWNLOAD_ENABLED=false
+NGA_REMINDER__ASSETS__STORAGE_PATH=./data/assets
+NGA_REMINDER__ASSETS__MAX_DOWNLOAD_BYTES=10485760
+```
+
+Inline NGA `[img]` resources are recorded in the database even when downloads are disabled. With
+downloads disabled, exports keep the remote URL. With downloads enabled, trusted HTTPS NGA image
+hosts are queued for bounded download and stored under a SHA-256 content-addressed path. The
+database and `assets.storage_path` must be backed up together.
+
 Configure the service:
 
 ```bash
@@ -44,6 +57,14 @@ cp .env.example .env
 export NGA_REMINDER__API_TOKEN='replace-with-a-long-random-token'
 export NGA_REMINDER__ADMIN_PASSWORD='replace-with-a-long-random-password'
 export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+```
+
+When using a populated `.env` file directly with Cargo, load it into the shell first:
+
+```bash
+set -a
+. ./.env
+set +a
 ```
 
 Run API and workers:
@@ -211,6 +232,22 @@ Reply actions use the persisted page number and NGA's in-thread anchor format:
 `read.php?tid={tid}&page={page}#pid{pid}Anchor`. Opening a notification therefore shows the full
 thread page positioned at the matching reply instead of NGA's isolated-reply view.
 
+## Markdown and ZIP exports
+
+Protected export endpoints default to Markdown and accept `?format=markdown` or `?format=zip`:
+
+```text
+GET /api/v1/exports/threads/{tid}?format=markdown
+GET /api/v1/exports/threads/{tid}?format=zip
+GET /api/v1/exports/users/{uid}?format=markdown
+GET /api/v1/exports/users/{uid}?format=zip
+```
+
+Thread exports include all persisted posts for the TID. User exports include persisted posts
+authored by the UID and group them by TID. ZIP exports contain the Markdown file, `metadata.json`,
+and local assets whose download status is `ready`; missing or remote-only resources remain remote
+links.
+
 ## Asset persistence design
 
 The planned asset worker stores attachment/image/audio/video metadata in the selected database and
@@ -225,8 +262,8 @@ Downloaded files use SHA-256 content-addressed paths:
 
 This allows content deduplication and keeps database/WAL/backup size under control. The database and
 asset directory form one logical backup unit and must be backed up and restored together. This
-section describes the frozen design; the asset downloader and its configuration are scheduled for
-M5.
+section describes the frozen design; the first asset downloader and export path are implemented in
+M5. Full attachment payload extraction and resource cleanup remain scheduled M5 follow-up work.
 
 Production deployment should bind the application to an internal interface and use the example
 [`deploy/nginx.conf`](deploy/nginx.conf) as the starting point for TLS termination.
