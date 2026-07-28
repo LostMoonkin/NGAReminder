@@ -21,6 +21,7 @@ use crate::{
 pub struct CrawlSummary {
     pub crawl_run_id: String,
     pub tid: i64,
+    pub status: &'static str,
     pub baseline: bool,
     pub pages_requested: i32,
     pub posts_inserted: i32,
@@ -55,11 +56,34 @@ pub async fn run(
     let run_id = Uuid::new_v4().to_string();
     create_crawl_run(state, &run_id, &watch_target.id, baseline).await?;
 
-    let result = collect(state, &run_id, &watch_target, baseline).await;
-    if let Err(error) = &result {
-        record_failure(state, &run_id, &watch_target, error).await;
+    match collect(state, &run_id, &watch_target, baseline).await {
+        Ok(summary) => Ok(summary),
+        Err(ThreadCollectorError::Nga(NgaRequestError::PendingReview)) => {
+            mark_skipped_pending_review(state, &run_id, &watch_target).await?;
+            info!(
+                crawl_run_id = run_id,
+                watch_id = watch_target.id,
+                tid = watch_target.target_id,
+                baseline,
+                "thread crawl skipped because the thread is pending review"
+            );
+            Ok(CrawlSummary {
+                crawl_run_id: run_id,
+                tid: watch_target.target_id,
+                status: "skipped_pending_review",
+                baseline,
+                pages_requested: 0,
+                posts_inserted: 0,
+                events_created: 0,
+                remote_vrows: 0,
+                last_floor: -1,
+            })
+        }
+        Err(error) => {
+            record_failure(state, &run_id, &watch_target, &error).await;
+            Err(error)
+        }
     }
-    result
 }
 
 async fn collect(
@@ -254,6 +278,7 @@ async fn persist_pages(
     Ok(CrawlSummary {
         crawl_run_id: run_id.to_owned(),
         tid: watch_target.target_id,
+        status: "succeeded",
         baseline,
         pages_requested,
         posts_inserted: inserted_count,
@@ -350,6 +375,62 @@ async fn create_crawl_run(
     .bind(watch_id)
     .bind(i32::from(baseline))
     .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_skipped_pending_review(
+    state: &AppState,
+    run_id: &str,
+    watch_target: &WatchTarget,
+) -> Result<(), ThreadCollectorError> {
+    let mut tx = state.pool.begin().await?;
+    finish_skipped(
+        &mut tx,
+        state.config.database_backend,
+        run_id,
+        watch_target,
+        state.config.scheduler.timezone_offset,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn finish_skipped(
+    tx: &mut Transaction<'_, Any>,
+    backend: DatabaseBackend,
+    run_id: &str,
+    watch_target: &WatchTarget,
+    timezone_offset: time::UtcOffset,
+) -> Result<(), sqlx::Error> {
+    let next_run = match backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($2 * INTERVAL '1 second')",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $2 || ' seconds')",
+    };
+    let delay = schedule::next_delay_seconds(
+        watch_target.schedule.as_ref(),
+        watch_target.interval_seconds,
+        OffsetDateTime::now_utc(),
+        timezone_offset,
+    );
+    let query = format!(
+        "UPDATE watch_targets SET status = 'active',
+         next_run_at = {next_run}, lease_until = NULL,
+         last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
+         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP WHERE id = $1"
+    );
+    sqlx::query(&query)
+        .bind(&watch_target.id)
+        .bind(delay)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE crawl_runs SET status = 'skipped', error_kind = 'nga_pending_review',
+         error_message = 'nga_pending_review', completed_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -582,6 +663,9 @@ async fn record_failure(
 ) {
     let (kind, status) = match error {
         ThreadCollectorError::Nga(NgaRequestError::NotFound) => ("not_found", "not_found"),
+        ThreadCollectorError::Nga(NgaRequestError::PendingReview) => {
+            ("nga_pending_review", "error")
+        }
         ThreadCollectorError::Nga(NgaRequestError::Unauthorized)
         | ThreadCollectorError::Credentials => ("unauthorized", "paused"),
         ThreadCollectorError::Nga(NgaRequestError::Http(_)) => ("nga_http_error", "error"),
@@ -666,7 +750,10 @@ mod tests {
     use sqlx::{Row, any::AnyPoolOptions};
     use tokio::sync::RwLock;
 
-    use super::{create_crawl_run, persist_pages, raw_payload_for_storage, select_posts};
+    use super::{
+        create_crawl_run, mark_skipped_pending_review, persist_pages, raw_payload_for_storage,
+        select_posts,
+    };
     use crate::{
         app::AppState,
         config::{
@@ -884,6 +971,29 @@ mod tests {
             .expect("events must count");
         assert_eq!(post_count, 3);
         assert_eq!(event_count, 1);
+
+        create_crawl_run(&state, "pending-review-run", &created.id, false)
+            .await
+            .expect("pending-review crawl run must create");
+        mark_skipped_pending_review(&state, "pending-review-run", &current_watch)
+            .await
+            .expect("pending-review crawl must be skipped");
+        let pending_status: (String, String) = sqlx::query_as(
+            "SELECT status, error_kind FROM crawl_runs WHERE id = 'pending-review-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("pending-review crawl status must exist");
+        assert_eq!(
+            pending_status,
+            ("skipped".to_owned(), "nga_pending_review".to_owned())
+        );
+        let preserved_cursor = watch::thread_cursor(&pool, &created.id)
+            .await
+            .expect("cursor must remain readable");
+        assert_eq!(preserved_cursor.last_floor, 2);
+        assert_eq!(preserved_cursor.remote_vrows, 3);
+
         let payload_bytes: i64 =
             sqlx::query_scalar("SELECT COALESCE(SUM(LENGTH(raw_payload)), 0) FROM posts")
                 .fetch_one(&pool)

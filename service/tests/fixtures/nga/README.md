@@ -24,6 +24,7 @@ Current fixtures:
 | `user_topics_page_2.json` | Final user-topic page |
 | `user_replies_success.json` | Topic summary with watched reply in `__P` |
 | `busy_2048.json` | HTTP-success NGA busy response |
+| `thread_pending_review_51.json` | Thread pending-review business error |
 | `invalid_tid_14.json` | Unknown TID business error |
 | `missing_auth_46.json` | Missing Passport-cookie business error |
 | `user_profile_gbk.html` | Synthetic GBK profile page with `__UCPUSER` |

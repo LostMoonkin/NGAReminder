@@ -45,6 +45,12 @@ HTTP success does not imply NGA business success.
 | User replies | `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}` | `user_replies_success.json` |
 | User profile | `GET /nuke.php?func=ucp&uid={uid}` | `user_profile_gbk.html` |
 
+The Thread endpoint can return HTTP 200 with `code=51` and a message such as `帖子正等待审核` while
+the target post is pending review. This is a temporary unavailable state, not a missing thread or an
+authentication failure. The current crawl is recorded as `skipped` with error kind
+`nga_pending_review`; no posts, events, or cursor updates are committed, and the next scheduled run
+tries again.
+
 ## Thread page
 
 Successful thread responses are UTF-8 JSON with `code=0`. Important top-level fields:

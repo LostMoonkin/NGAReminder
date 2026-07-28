@@ -50,6 +50,8 @@ pub enum NgaRequestError {
     Busy,
     #[error("NGA thread was not found")]
     NotFound,
+    #[error("NGA thread is pending review")]
+    PendingReview,
     #[error("NGA returned business error {code}")]
     Business { code: i64 },
     #[error("NGA response could not be decoded")]
@@ -350,6 +352,7 @@ fn classify_data_envelope(value: &Value) -> Result<(), NgaRequestError> {
     match code {
         0 => Ok(()),
         14 => Err(NgaRequestError::NotFound),
+        51 => Err(NgaRequestError::PendingReview),
         46 => Err(NgaRequestError::Unauthorized),
         2048 if message.contains("服务器忙") => Err(NgaRequestError::Busy),
         2048 if message.contains("必须登录") || message.contains("请登录") => {
@@ -411,6 +414,12 @@ mod tests {
         assert!(matches!(
             classify_data_envelope(&missing),
             Err(NgaRequestError::NotFound)
+        ));
+
+        let pending_review: Value = fixture("thread_pending_review_51.json");
+        assert!(matches!(
+            classify_data_envelope(&pending_review),
+            Err(NgaRequestError::PendingReview)
         ));
 
         let unauthorized: Value = fixture("missing_auth_46.json");

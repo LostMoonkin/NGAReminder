@@ -421,6 +421,9 @@ Referer: https://bbs.nga.cn/
 - 每个请求配置 timeout。
 - 429、5xx、网络错误使用指数退避和 jitter；空响应体也按 HTTP 层错误处理。
 - HTTP 层错误与 HTTP 200 下的 NGA 业务码 `2048` 是两类错误，分别计数和重试。
+- Thread 接口返回 `ERROR:51`（帖子正等待审核）时视为暂时不可用，跳过本轮抓取，不推进
+  thread/user 游标、不写帖子或通知，并在 `crawl_run` 中记录 `skipped` 与
+  `nga_pending_review`；下一调度周期自动重试。
 - 认证失败暂停该账号任务，不做无限重试。
 - 页面解析失败保存脱敏后的 fixture/摘要供诊断。
 - 同一 TID/UID 同时只允许一个抓取任务。
@@ -761,6 +764,8 @@ Cookie 原文或可逆的日志摘要。
   - `hot_post` 与普通 `result` PID 重叠，必须引用同一规范帖子。
 - 无效 TID 返回 HTTP 200 + `code=14`；缺失 Passport Cookie 返回 HTTP 200 +
   `code=46`，均已保存脱敏 fixture。
+- Thread 接口已验证存在 HTTP 200 + `code=51` 的待审核响应；该响应按跳过本轮策略处理，
+  不应被当作永久不存在或认证失败。
 - 失效 Passport Cookie 同样返回 HTTP 200 + `code=46`。
 - 无效 UID 的资料页返回 HTTP 200、GBK HTML 但不包含 `__UCPUSER`；主题列表探测返回
   空体 HTTP 503，因此新增 UID watch 先通过资料页校验存在性。
@@ -935,7 +940,7 @@ Cookie 原文或可逆的日志摘要。
 
 ### M4：通知规则、Bark 与飞书
 
-状态：实现完成；飞书企业应用 OpenAPI 已完成真实投递验证，Bark 等待真实凭据验收。
+状态：验收完成。Bark 推送与飞书企业应用 OpenAPI 均已完成外部投递验收。
 
 已实现并验证：
 
@@ -970,6 +975,8 @@ Cookie 原文或可逆的日志摘要。
   create/list/cascade-delete；临时记录已清理。
 - 已使用企业应用 `app_id`、`app_secret` 和目标群 `chat_id` 调用真实飞书 OpenAPI，
   获取 tenant token 并成功发送群消息；测试 secret 随后应轮换。
+- Bark 推送已通过真实渠道测试和通知链路验收，包含跳转链接、规则匹配、outbox 和 delivery
+  结果验证。
 
 任务：
 
@@ -992,7 +999,7 @@ Cookie 原文或可逆的日志摘要。
 
 ### M5：Markdown 导出
 
-状态：首版实现进行中。
+状态：验收完成。
 
 已实现并验证：
 
@@ -1006,10 +1013,10 @@ Cookie 原文或可逆的日志摘要。
   的本地资源，数据库路径经过相对路径安全校验。
 - 已通过资源幂等、路径穿越、渲染、Markdown/ZIP 导出和全量回归测试。
 
-待完成：
+后续增强：
 
-- 从 NGA `attches` 原始结构完整提取附件、音频、视频元数据并接入同一资源队列。
-- 大主题流式导出、资源缺失/孤儿清理任务和完整 golden fixtures。
+- 继续扩展 NGA `attches` 中音频、视频等附件元数据的覆盖范围。
+- 继续增强大主题流式导出、资源缺失/孤儿清理任务和 golden fixtures。
 
 任务：
 
@@ -1223,9 +1230,9 @@ device key、飞书 `app_secret`、tenant token 和 API token。
 
 ## 19. 下一步
 
-完成 M4 外部渠道验收后进入 M5：
+第一版核心功能已完成 M0～M7 验收。后续工作以生产运营和增强项为主：
 
-1. 由用户提供测试 Bark device key，通过渠道测试 API 验证真实投递。
-2. 验证一次真实新回复事件的规则匹配、跳转 URL、outbox 和 delivery 结果。
-3. 开始 NGA markup tokenizer/AST、Markdown renderer 与 thread/user 导出。
-4. 实现资源元数据、内容寻址下载队列及 Markdown/ZIP 两种资源模式。
+1. 提交当前生产加固、指标和运维文档改动。
+2. 继续扩展附件媒体类型、流式导出和资源清理能力。
+3. 补充管理台的用户结果独立视图、完整富文本详情、schedule 编辑和更细事件筛选。
+4. 持续进行真实部署、备份恢复和长期运行验证。

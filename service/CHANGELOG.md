@@ -9,7 +9,7 @@
 - Added `persistence.store_raw_payload`, disabled by default, so new posts retain normalized fields
   without storing full source JSON unless explicitly enabled.
 
-### M5 (in progress)
+### M5 (completed)
 
 - Added SQLite/PostgreSQL asset metadata and post-to-asset association tables.
 - Added bounded inline-image discovery, HTTPS NGA host validation, pending download processing, and
@@ -20,6 +20,13 @@
   code blocks, line breaks, and unsafe-link rejection.
 - Added protected thread/user Markdown and ZIP export endpoints with metadata and ready local assets.
 - Added export, asset safety, renderer, ZIP, and idempotency tests.
+- Completed external acceptance of the full Markdown/ZIP export and asset persistence workflow.
+
+### Reliability
+
+- Added handling for NGA Thread `code=51` pending-review responses. The affected crawl is skipped
+  for the current cycle, cursors and notifications remain unchanged, and the next scheduled run
+  retries automatically.
 
 ### M3
 
@@ -31,7 +38,7 @@
 - Added the ten-attempt NGA busy policy with `skipped_busy` cursor preservation.
 - Added user watch API/scheduling and shared post/event insertion deduplication with thread watches.
 
-### M4
+### M4 (completed)
 
 - Added encrypted Bark/Feishu channels, TID/UID rules, transactional event matching, and a
   channel-deduplicated outbox.
@@ -45,6 +52,8 @@
   isolated-reply view.
 - Added leased delivery processing, retry/dead-letter classification, delivery history, channel
   test sends, and channel/rule management APIs.
+- Completed external Bark push acceptance together with the previously verified Feishu delivery
+  workflow, including routing, deep links, outbox, and delivery results.
 
 ### M2
 

@@ -128,8 +128,10 @@ POST   /api/v1/watches/{id}/run
 `interval_seconds` is optional and defaults to `scheduler.default_interval_seconds` in
 `config/default.toml` (or `NGA_REMINDER__SCHEDULER__DEFAULT_INTERVAL_SECONDS`). It must be between
 30 and 86400. A manual run returns `409` while another worker holds the watch lease. NGA code 14
-disables a missing-thread watch; rejected credentials pause the account and affected watch until
-credentials are corrected and the watch is explicitly enabled.
+disables a missing-thread watch. Thread `code=51` (the post is pending review) skips the current
+crawl without advancing the cursor and is retried on the next scheduled run. Rejected credentials
+pause the account and affected watch until credentials are corrected and the watch is explicitly
+enabled.
 
 Each watch can also provide a `schedule` array. Rules are evaluated in order using the configured
 `scheduler.timezone_offset`; `days` accepts `weekdays`, `weekends`, or individual weekday names
@@ -179,7 +181,8 @@ A user watch stores only that UID's topic post and individual replies; it never 
 participated TID into a full-thread crawl. The baseline is silent. Later list scans stop at the
 stored `(postdate, tid/pid)` boundary and fetch details only for new candidates. User-list NGA busy
 responses are retried once per second for ten total attempts; exhaustion records `skipped_busy`
-without advancing either cursor.
+without advancing either cursor. If a thread detail returns `code=51`, the user crawl is recorded as
+`skipped_pending_review` and its cursors remain unchanged for the next scheduled run.
 
 ## Notifications
 
@@ -263,8 +266,9 @@ Downloaded files use SHA-256 content-addressed paths:
 
 This allows content deduplication and keeps database/WAL/backup size under control. The database and
 asset directory form one logical backup unit and must be backed up and restored together. This
-section describes the frozen design; the first asset downloader and export path are implemented in
-M5. Full attachment payload extraction and resource cleanup remain scheduled M5 follow-up work.
+section describes the frozen design; the first asset downloader and export path are implemented and
+accepted as part of M5. Broader attachment payload coverage and resource cleanup remain optional
+post-M5 enhancements.
 
 Production deployment should bind the application to an internal interface and use the example
 [`deploy/nginx.conf`](deploy/nginx.conf) as the starting point for TLS termination.

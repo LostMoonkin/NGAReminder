@@ -86,6 +86,18 @@ pub async fn run(
                 events_created: 0,
             })
         }
+        Err(UserCollectorError::Nga(NgaRequestError::PendingReview)) => {
+            mark_skipped_pending_review(state, &run_id, &watch_target).await?;
+            Ok(UserCrawlSummary {
+                crawl_run_id: run_id,
+                uid: watch_target.target_id,
+                status: "skipped_pending_review",
+                baseline,
+                pages_requested: 0,
+                posts_inserted: 0,
+                events_created: 0,
+            })
+        }
         Err(error) => {
             record_failure(state, &run_id, &watch_target, &error).await;
             Err(error)
@@ -521,6 +533,44 @@ async fn mark_skipped_busy(
     Ok(())
 }
 
+async fn mark_skipped_pending_review(
+    state: &AppState,
+    run_id: &str,
+    watch_target: &WatchTarget,
+) -> Result<(), UserCollectorError> {
+    let mut tx = state.pool.begin().await?;
+    let next_run = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($2 * INTERVAL '1 second')",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $2 || ' seconds')",
+    };
+    let delay = schedule::next_delay_seconds(
+        watch_target.schedule.as_ref(),
+        watch_target.interval_seconds,
+        OffsetDateTime::now_utc(),
+        state.config.scheduler.timezone_offset,
+    );
+    let watch_query = format!(
+        "UPDATE watch_targets SET status = 'active',
+         next_run_at = {next_run}, lease_until = NULL,
+         last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
+         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP WHERE id = $1"
+    );
+    sqlx::query(&watch_query)
+        .bind(&watch_target.id)
+        .bind(delay)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE crawl_runs SET status = 'skipped', error_kind = 'nga_pending_review',
+         error_message = 'nga_pending_review', completed_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn finish_watch(
     tx: &mut Transaction<'_, Any>,
@@ -598,6 +648,9 @@ async fn record_failure(
         | UserCollectorError::UserParse(_) => ("nga_parse_error", "error", false),
         UserCollectorError::Nga(NgaRequestError::NotFound) | UserCollectorError::InvalidDetail => {
             ("post_not_found", "error", false)
+        }
+        UserCollectorError::Nga(NgaRequestError::PendingReview) => {
+            ("nga_pending_review", "error", false)
         }
         UserCollectorError::Nga(NgaRequestError::Business { .. })
         | UserCollectorError::Nga(NgaRequestError::Busy) => ("nga_business_error", "error", false),
