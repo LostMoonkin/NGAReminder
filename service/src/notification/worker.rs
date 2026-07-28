@@ -4,10 +4,123 @@ use uuid::Uuid;
 use crate::{
     app::AppState,
     config::DatabaseBackend,
+    notification::alerts,
     notification::sender::{Notification, SendError, send_configured},
 };
 
 pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
+    if process_system_alert_one(state).await? {
+        return Ok(true);
+    }
+    process_post_one(state).await
+}
+
+async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
+    alerts::enqueue_open_alert_channels(state).await?;
+    let lease = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '2 minutes'",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+2 minutes')",
+    };
+    let claim = format!(
+        "UPDATE system_alert_outbox SET status = 'sending',
+         attempt_count = attempt_count + 1, lease_until = {lease}
+         WHERE id = (
+           SELECT o.id FROM system_alert_outbox o
+           JOIN system_alerts a ON a.id = o.alert_id
+           JOIN notification_channels c ON c.id = o.channel_id
+           WHERE a.resolved_at IS NULL AND c.enabled = 1
+             AND o.status IN ('pending', 'failed')
+             AND o.next_attempt_at <= CURRENT_TIMESTAMP
+             AND (o.lease_until IS NULL OR o.lease_until <= CURRENT_TIMESTAMP)
+           ORDER BY o.next_attempt_at, o.created_at LIMIT 1
+         )
+         AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
+         RETURNING id"
+    );
+    let Some(row) = sqlx::query(&claim).fetch_optional(&state.pool).await? else {
+        return Ok(false);
+    };
+    let outbox_id: String = row.get("id");
+    let row = sqlx::query(
+        "SELECT o.attempt_count, c.channel_type, c.config_encrypted,
+                a.title, a.body, a.url
+         FROM system_alert_outbox o
+         JOIN system_alerts a ON a.id = o.alert_id
+         JOIN notification_channels c ON c.id = o.channel_id
+         WHERE o.id = $1",
+    )
+    .bind(&outbox_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let attempt: i32 = row.get("attempt_count");
+    let encrypted: Vec<u8> = row.get("config_encrypted");
+    let config = state
+        .credential_cipher
+        .decrypt(&encrypted)
+        .map_err(|_| anyhow::anyhow!("notification config decryption failed"))?;
+    let notification = Notification {
+        title: row.get("title"),
+        body: row.get("body"),
+        url: row.get("url"),
+    };
+    let channel_type: String = row.get("channel_type");
+    match send_configured(&channel_type, &config, &notification).await {
+        Ok(receipt) => {
+            record_system_alert_delivery(
+                state,
+                &outbox_id,
+                attempt,
+                true,
+                Some(receipt.http_status as i32),
+                Some(&receipt.response_summary),
+                None,
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE system_alert_outbox SET status = 'delivered', lease_until = NULL,
+                 delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL WHERE id = $1",
+            )
+            .bind(&outbox_id)
+            .execute(&state.pool)
+            .await?;
+        }
+        Err(error) => {
+            let retryable = error.retryable() && attempt < 5;
+            let (status, summary) = error_details(&error);
+            record_system_alert_delivery(
+                state,
+                &outbox_id,
+                attempt,
+                false,
+                status,
+                summary,
+                Some(error.kind()),
+            )
+            .await?;
+            let next = match state.config.database_backend {
+                DatabaseBackend::Postgres => {
+                    "CURRENT_TIMESTAMP + (CASE attempt_count WHEN 1 THEN 30 WHEN 2 THEN 120 WHEN 3 THEN 600 ELSE 1800 END * INTERVAL '1 second')"
+                }
+                DatabaseBackend::Sqlite => {
+                    "datetime(CURRENT_TIMESTAMP, '+' || CASE attempt_count WHEN 1 THEN 30 WHEN 2 THEN 120 WHEN 3 THEN 600 ELSE 1800 END || ' seconds')"
+                }
+            };
+            let query = format!(
+                "UPDATE system_alert_outbox SET status = $1, lease_until = NULL,
+                 next_attempt_at = {next}, last_error_kind = $2 WHERE id = $3"
+            );
+            sqlx::query(&query)
+                .bind(if retryable { "failed" } else { "dead" })
+                .bind(error.kind())
+                .bind(&outbox_id)
+                .execute(&state.pool)
+                .await?;
+        }
+    }
+    Ok(true)
+}
+
+async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     let lease = match state.config.database_backend {
         DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '2 minutes'",
         DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+2 minutes')",
@@ -115,6 +228,32 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
         }
     }
     Ok(true)
+}
+
+async fn record_system_alert_delivery(
+    state: &AppState,
+    outbox_id: &str,
+    attempt: i32,
+    success: bool,
+    http_status: Option<i32>,
+    summary: Option<&str>,
+    error_kind: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO system_alert_deliveries
+         (id, outbox_id, attempt, success, http_status, response_summary, error_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(outbox_id)
+    .bind(attempt)
+    .bind(i32::from(success))
+    .bind(http_status)
+    .bind(summary)
+    .bind(error_kind)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 async fn record_delivery(

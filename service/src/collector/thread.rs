@@ -648,6 +648,12 @@ async fn record_failure(
     {
         warn!(error = %db_error, "failed to pause rejected NGA account");
     }
+    if kind == "unauthorized"
+        && let Err(db_error) =
+            notification::alerts::ensure_nga_credentials_invalid_alert(state).await
+    {
+        warn!(error = %db_error, "failed to enqueue NGA credential alert");
+    }
 }
 
 #[cfg(test)]

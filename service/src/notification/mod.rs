@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod sender;
 pub mod worker;
 

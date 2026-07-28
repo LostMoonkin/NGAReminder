@@ -2,7 +2,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use crate::{app::AppState, nga::AuthCheckError};
+use crate::{app::AppState, nga::AuthCheckError, notification};
 
 #[derive(Debug, Deserialize)]
 pub struct SaveAccountRequest {
@@ -153,6 +153,9 @@ pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountRespons
     match state.nga_client.check_credentials(&uid, &cid).await {
         Ok(check) => {
             update_auth_status(&state, "valid", None).await?;
+            notification::alerts::resolve_nga_credentials_invalid_alert(&state)
+                .await
+                .map_err(internal_error)?;
             Ok(Json(TestAccountResponse {
                 valid: check.valid,
                 uid: check.uid,

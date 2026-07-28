@@ -643,6 +643,23 @@ async fn record_failure(
     {
         warn!(crawl_run_id = run_id, error = %db_error, "failed to record user crawl failure");
     }
+    if kind == "unauthorized" {
+        if let Err(db_error) = sqlx::query(
+            "UPDATE nga_accounts SET status = 'paused', last_auth_error_kind = 'unauthorized',
+             last_auth_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE label = 'default'",
+        )
+        .execute(&state.pool)
+        .await
+        {
+            warn!(error = %db_error, "failed to pause rejected NGA account");
+        }
+        if let Err(db_error) =
+            crate::notification::alerts::ensure_nga_credentials_invalid_alert(state).await
+        {
+            warn!(error = %db_error, "failed to enqueue NGA credential alert");
+        }
+    }
 }
 
 #[cfg(test)]
