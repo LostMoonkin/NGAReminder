@@ -1,0 +1,115 @@
+# NGA Reminder 生产部署模板（SQLite 单进程模式）
+#
+# 本模板只部署服务端，不部署 PostgreSQL。SQLite 适合单个 all 进程；如果需要多个 worker
+# 或横向扩展，请改用 service/compose.yml 的 PostgreSQL 模式。
+#
+# 启动前至少设置三个敏感变量：
+#   export NGA_REMINDER__API_TOKEN="$(openssl rand -hex 32)"
+#   export NGA_REMINDER__ADMIN_PASSWORD="$(openssl rand -base64 32)"
+#   export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+#
+# 也可以将这些变量写入 service/.env。不要提交真实 .env、Cookie 或通知渠道密钥。
+
+services:
+  app:
+    # GHCR 镜像地址。升级时可通过 NGA_REMINDER_IMAGE 指定不可变版本或回滚版本。
+    image: ${NGA_REMINDER_IMAGE:-ghcr.io/lostmoonkin/ngareminder:latest}
+
+    # 容器名称，便于查看日志和执行备份；SQLite 单实例部署不应横向扩容此服务。
+    container_name: nga-reminder
+
+    # 应用异常退出或主机重启后自动恢复；手动停止容器时不会无限重启。
+    restart: unless-stopped
+
+    # 使用 Docker init 进程转发信号，确保服务能够优雅退出并完成 SQLite/WAL 收尾。
+    init: true
+
+    # 启动 API 和抓取/通知 worker。生产单机模式必须使用 all。
+    command: ["all"]
+
+    # latest 镜像每次启动前拉取；使用固定版本标签时也可以改为 missing 以避免重复拉取。
+    pull_policy: always
+
+    # 只绑定宿主机回环地址，推荐由宿主机 Nginx 负责公网 TLS 和反向代理。
+    # 如果没有 Nginx 且需要直接访问，请改为 "12888:12888"，并自行配置 HTTPS 和访问控制。
+    ports:
+      - "127.0.0.1:12888:12888"
+
+    # SQLite 数据库和资源文件必须放在同一个卷中，保证备份/恢复的一致性。
+    # 不要使用 docker compose down -v，否则会删除业务数据卷。
+    volumes:
+      - nga-reminder-data:/data
+
+    # 只读根文件系统可减少容器被利用后的写入范围；数据库、资源和临时目录仍可写。
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+
+    # 容器内服务已使用非 root 用户运行；禁止进程通过 setuid 等方式提升权限。
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    environment:
+      # API Bearer token，用于脚本或客户端访问 /api/v1/*；必须使用随机长字符串。
+      NGA_REMINDER__API_TOKEN: ${NGA_REMINDER__API_TOKEN:?Set NGA_REMINDER__API_TOKEN before starting}
+
+      # 管理台 /admin 的管理员密码；首次登录后请妥善保管，不要与 API token 共用。
+      NGA_REMINDER__ADMIN_PASSWORD: ${NGA_REMINDER__ADMIN_PASSWORD:?Set NGA_REMINDER__ADMIN_PASSWORD before starting}
+
+      # AES-256-GCM 密钥，用于加密 NGA Passport Cookie 和通知渠道密钥；必须是 base64 编码的 32 字节。
+      # 该密钥丢失后，数据库中的凭据无法恢复，只能重新录入。
+      NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY: ${NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY:?Set NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY before starting}
+
+      # 固定使用 SQLite，不需要同时部署 PostgreSQL；不要在 .env 中覆盖此值。
+      NGA_REMINDER__DATABASE_BACKEND: sqlite
+
+      # PostgreSQL 连接串；SQLite 模式不会使用此参数，保留默认值仅为完整展示配置项。
+      NGA_REMINDER__DATABASE_URL: ${NGA_REMINDER__DATABASE_URL:-postgres://unused}
+
+      # SQLite 数据库文件路径；固定在 /data 卷内，WAL/SHM 文件也会在此目录生成。
+      # 不要改为相对路径，否则只读根文件系统可能导致数据库无法写入。
+      NGA_REMINDER__SQLITE_PATH: /data/nga-reminder.db
+
+      # 数据库最大连接数；SQLite 单进程固定使用 1，避免无意义的写入竞争。
+      NGA_REMINDER__DATABASE_MAX_CONNECTIONS: "1"
+
+      # 容器内监听地址；固定为 12888，与 ports 和 Nginx 示例配置保持一致。
+      NGA_REMINDER__BIND_ADDR: 0.0.0.0:12888
+
+      # 服务启动时自动执行 SQLx migrations；生产环境应保持 true。
+      NGA_REMINDER__RUN_MIGRATIONS: ${NGA_REMINDER__RUN_MIGRATIONS:-true}
+
+      # 发往 NGA 的 User-Agent；建议保留服务标识，便于问题排查。
+      NGA_REMINDER__NGA_USER_AGENT: ${NGA_REMINDER__NGA_USER_AGENT:-Mozilla/5.0 (compatible; NGA-Reminder/0.1)}
+
+      # 是否保存 NGA 原始帖子 JSON；关闭可减少敏感数据和磁盘占用，解析后的字段仍会保存。
+      NGA_REMINDER__PERSISTENCE__STORE_RAW_PAYLOAD: ${NGA_REMINDER__PERSISTENCE__STORE_RAW_PAYLOAD:-false}
+
+      # 是否下载图片/附件到本地；关闭时只保存资源元数据和远程 URL。
+      NGA_REMINDER__ASSETS__DOWNLOAD_ENABLED: ${NGA_REMINDER__ASSETS__DOWNLOAD_ENABLED:-false}
+
+      # 本地资源目录；固定位于 /data 卷内，并与 SQLite 数据库一起备份。
+      NGA_REMINDER__ASSETS__STORAGE_PATH: /data/assets
+
+      # 单个资源允许下载的最大字节数；10 MiB 是默认值，可按磁盘和带宽调整。
+      NGA_REMINDER__ASSETS__MAX_DOWNLOAD_BYTES: ${NGA_REMINDER__ASSETS__MAX_DOWNLOAD_BYTES:-10485760}
+
+      # 未指定 schedule 时的默认抓取间隔，单位为秒，允许范围为 30～86400。
+      NGA_REMINDER__SCHEDULER__DEFAULT_INTERVAL_SECONDS: ${NGA_REMINDER__SCHEDULER__DEFAULT_INTERVAL_SECONDS:-60}
+
+      # schedule 使用的本地时区；中国大陆通常使用 +08:00。
+      NGA_REMINDER__SCHEDULER__TIMEZONE_OFFSET: ${NGA_REMINDER__SCHEDULER__TIMEZONE_OFFSET:-+08:00}
+
+      # tracing 日志过滤器；生产默认压低 sqlx 日志，避免输出过多 SQL 细节。
+      NGA_REMINDER__OBSERVABILITY__LOG_FILTER: ${NGA_REMINDER__OBSERVABILITY__LOG_FILTER:-info,sqlx=warn}
+
+      # 是否输出 JSON 结构化日志；接入 Loki、ELK 等日志系统时建议设为 true。
+      NGA_REMINDER__OBSERVABILITY__LOG_JSON: ${NGA_REMINDER__OBSERVABILITY__LOG_JSON:-true}
+
+volumes:
+  # Docker 管理的持久化卷，包含 nga-reminder.db、SQLite WAL/SHM 和 assets/。
+  # 备份前先停止 app，恢复时也必须先停止 app。
+  nga-reminder-data:
+    name: nga-reminder-data

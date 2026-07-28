@@ -77,6 +77,18 @@ GET http://127.0.0.1:8080/admin
 
 生产环境建议使用 Nginx 终止 TLS，并让 Rust 服务只监听内部地址。详细备份、恢复、升级、回滚和反向代理说明见 [`service/docs/OPERATIONS.md`](service/docs/OPERATIONS.md)。
 
+不需要 PostgreSQL 的单机生产部署可直接使用 [`service/compose.production.yml`](service/compose.production.yml)。该模板只启动一个 SQLite `all` 容器，并将数据库与资源保存在同一个 Docker volume 中。
+
+## Docker 镜像发布
+
+[`service-image.yml`](.github/workflows/service-image.yml) 会在推送到 `main`、推送 `v*` 版本 tag，或手动触发时构建服务端镜像并发布到 GHCR：
+
+```text
+ghcr.io/<owner>/<repository>
+```
+
+镜像会生成分支/tag、语义化版本、commit SHA 标签；默认分支额外生成 `latest`。Workflow 使用 GitHub Actions 内置 `GITHUB_TOKEN`，不需要额外配置 Docker Hub 凭据。
+
 ## 常用 API
 
 受保护 API 使用：

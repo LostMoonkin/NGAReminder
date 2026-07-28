@@ -97,6 +97,24 @@ tar --xattrs --same-owner -czf ./backups/20260728-020000/sqlite-data.tar.gz \
 
 ## Docker 发布、升级与回滚
 
+### SQLite 单容器生产模板
+
+不需要单独部署 PostgreSQL 时，使用 [`../compose.production.yml`](../compose.production.yml)。该模板
+只启动一个 `all` 容器，数据库和资源统一保存在 `nga-reminder-data` named volume 中：
+
+```bash
+cd service
+export NGA_REMINDER__API_TOKEN="$(openssl rand -hex 32)"
+export NGA_REMINDER__ADMIN_PASSWORD="$(openssl rand -base64 32)"
+export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+docker compose -f compose.production.yml up -d
+curl -fsS http://127.0.0.1:12888/ready
+```
+
+模板默认只绑定宿主机 `127.0.0.1:12888`，由 Nginx 对外提供 HTTPS。SQLite 只支持单个 `all`
+进程，不要通过启动多个容器来扩容。备份前先停止 app，且不要使用 `docker compose down -v`，
+否则会删除包含数据库和资源文件的 named volume。
+
 首次启动：
 
 ```bash

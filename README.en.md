@@ -35,6 +35,10 @@ GET /admin
 
 For PostgreSQL, Docker Compose, Nginx TLS termination, backups, upgrades, and rollback, see the [Chinese documentation](README.md) and [`service/docs/OPERATIONS.md`](service/docs/OPERATIONS.md).
 
+## Docker image publishing
+
+[`service-image.yml`](.github/workflows/service-image.yml) builds and publishes the service image to `ghcr.io/<owner>/<repository>` on pushes to `main`, `v*` tags, or manual dispatch. It publishes branch/tag, semantic-version, commit-SHA, and `latest` (default branch) tags using the built-in GitHub Actions token.
+
 ## Current status
 
 The first server release has completed acceptance for milestones M0 through M7, including Bark push delivery and the M5 Markdown/ZIP and asset workflow. Remaining work is limited to optional production exercises and enhancements such as broader media attachment extraction, streaming exports, orphan cleanup, and richer admin views.

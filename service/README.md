@@ -73,6 +73,26 @@ Run API and workers:
 cargo run -- all
 ```
 
+## Production deployment without PostgreSQL
+
+For a single-server deployment, use [`compose.production.yml`](compose.production.yml). It runs one
+`all` container with SQLite and stores both the database and downloaded assets in the
+`nga-reminder-data` Docker volume. It does not start PostgreSQL.
+
+Set the three required secrets before starting:
+
+```bash
+export NGA_REMINDER__API_TOKEN="$(openssl rand -hex 32)"
+export NGA_REMINDER__ADMIN_PASSWORD="$(openssl rand -base64 32)"
+export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+docker compose -f compose.production.yml up -d
+```
+
+The template binds `127.0.0.1:12888` and is intended to sit behind Nginx. To upgrade or roll back,
+set `NGA_REMINDER_IMAGE` to an immutable GHCR tag before running `docker compose ... up -d`; do not
+run `docker compose down -v`, because that removes the SQLite data volume. See
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the backup and restore procedure.
+
 Roles:
 
 ```text
