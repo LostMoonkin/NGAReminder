@@ -18,11 +18,13 @@ use tower_http::{
 };
 
 use crate::app::AppState;
+use crate::metrics;
 
 pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(health::ready))
+        .route("/metrics", get(metrics::endpoint))
         .route("/admin", get(admin::page))
         .route("/admin/login", post(admin::login));
     let public = public.route("/admin/logout", post(admin::logout));
@@ -78,6 +80,7 @@ pub fn router(state: AppState) -> Router {
     public
         .merge(protected)
         .with_state(state)
+        .layer(middleware::from_fn(metrics::record_http))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -182,6 +185,28 @@ mod tests {
             .expect("router must respond");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_is_public() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .expect("router must respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
   app:
+    image: ${NGA_REMINDER_IMAGE:-nga-reminder:local}
     build:
       context: .
     command: ["all"]

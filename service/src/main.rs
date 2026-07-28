@@ -7,6 +7,7 @@ mod crypto;
 mod domain;
 mod export;
 mod markup;
+mod metrics;
 mod nga;
 mod notification;
 mod observability;
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Arc::new(AppConfig::load().context("failed to load configuration")?);
     init_tracing(&config.observability)?;
+    metrics::init();
 
     let application = Application::build(config).await?;
     let cancellation = CancellationToken::new();

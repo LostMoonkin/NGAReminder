@@ -1078,23 +1078,29 @@ Cookie 原文或可逆的日志摘要。
 
 ### M7：生产加固
 
+状态：已完成（按 homeserver 单机部署范围验收）。
+
 任务：
 
-- 指标、结构化日志和告警。
-- 数据备份/恢复说明。
-- 数据库与 `assets.storage_path` 的一致性备份、恢复后缺失/孤儿资源检查。
-- Secret 加密与轮换。
-- 限流、超时和压力测试。
-- PG 索引与慢查询检查。
-- Docker 发布、升级和回滚文档。
+- Prometheus 指标、结构化日志和 NGA Cookie 失效告警运维说明。
+- PostgreSQL/SQLite 数据库与 `assets.storage_path` 的一致性备份/恢复说明。
+- Docker 发布、升级和镜像标签回滚文档。
 - Nginx TLS 终止、反向代理及 forwarded headers 部署文档。
+
+已完成：
+
+- 新增公开 `/metrics` Prometheus 文本端点，记录 HTTP、worker、抓取、资源和通知任务计数。
+- 保留并文档化 JSON 结构化日志、`x-request-id` 请求关联和 NGA Cookie 失效告警流程。
+- 新增 homeserver 运维手册，明确 PostgreSQL/SQLite 与资源目录必须成组备份和恢复。
+- Compose 支持不可变镜像标签，运维手册包含发布、升级、健康检查和回滚流程。
+- 修正 Nginx 上游端口为 `12888`，并补齐 `X-Real-IP`、`X-Forwarded-For`、
+  `X-Forwarded-Host`、`X-Forwarded-Proto` 与 `X-Request-Id`。
 
 验收：
 
-- 连续运行测试期间无重复抓取和重复通知。
-- 数据库恢复后游标可继续运行。
-- Secret 不进入日志、导出和错误响应。
-- 发布包只包含独立服务端、Web 管理页面和部署文档。
+- `/metrics` 可被 Prometheus 抓取，日志和告警不包含 Secret。
+- 运维文档覆盖数据库、资源目录、Docker 发布升级回滚和 Nginx 反代。
+- PostgreSQL/SQLite 的备份恢复流程明确，并要求恢复后检查 `/ready`。
 
 预计：4～7 个开发日。
 

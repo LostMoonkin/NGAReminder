@@ -86,6 +86,7 @@ Public probes:
 ```text
 GET /health
 GET /ready
+GET /metrics
 ```
 
 Protected API calls require:
@@ -267,5 +268,9 @@ M5. Full attachment payload extraction and resource cleanup remain scheduled M5 
 
 Production deployment should bind the application to an internal interface and use the example
 [`deploy/nginx.conf`](deploy/nginx.conf) as the starting point for TLS termination.
+
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for Prometheus metrics, structured logging, Cookie
+失效告警、PostgreSQL/SQLite plus assets backup and restore, Docker release/rollback, and Nginx
+TLS/reverse-proxy deployment instructions.
 
 Do not commit real NGA Cookies, API tokens, Bark keys, or Feishu application secrets.
