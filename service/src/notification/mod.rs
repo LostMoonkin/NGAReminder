@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod receiver;
 pub mod sender;
 pub mod worker;
 

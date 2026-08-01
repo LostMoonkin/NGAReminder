@@ -859,6 +859,7 @@ mod tests {
             credential_cipher: cipher,
             nga_client: NgaClient::new("test-agent".to_owned()).expect("test client must build"),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
+            feishu_channel_updates: tokio::sync::watch::channel(()).0,
         };
 
         let created = watch::create_thread_watch(&pool, 1001, 60)

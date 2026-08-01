@@ -169,6 +169,7 @@ mod tests {
             ),
             nga_client: NgaClient::new("test".to_owned()).expect("test client must build"),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
+            feishu_channel_updates: tokio::sync::watch::channel(()).0,
         }
     }
 

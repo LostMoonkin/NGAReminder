@@ -792,6 +792,7 @@ mod tests {
             ),
             nga_client: NgaClient::new("test-agent".to_owned()).expect("client must build"),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
+            feishu_channel_updates: tokio::sync::watch::channel(()).0,
         };
         let watch = watch::create_user_watch(&pool, 2001, 60)
             .await

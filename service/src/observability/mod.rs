@@ -5,7 +5,12 @@ use crate::config::ObservabilityConfig;
 
 pub fn init_tracing(config: &ObservabilityConfig) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(&config.log_filter)
-        .with_context(|| format!("invalid log filter: {}", config.log_filter))?;
+        .with_context(|| format!("invalid log filter: {}", config.log_filter))?
+        .add_directive(
+            "openlark_client::ws_client::client=warn"
+                .parse()
+                .context("invalid OpenLark log filter")?,
+        );
 
     if config.log_json {
         tracing_subscriber::registry()

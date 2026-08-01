@@ -106,6 +106,7 @@ pub async fn create_channel(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
+    let _ = state.feishu_channel_updates.send(());
     Ok((
         StatusCode::CREATED,
         Json(ChannelView {
@@ -139,6 +140,7 @@ pub async fn update_channel(
     .await
     .map_err(internal)?
     .ok_or_else(not_found)?;
+    let _ = state.feishu_channel_updates.send(());
     Ok(Json(ChannelView {
         id: row.get("id"),
         label: row.get("label"),
@@ -151,7 +153,11 @@ pub async fn delete_channel(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    delete_row(&state, "notification_channels", &id).await
+    let result = delete_row(&state, "notification_channels", &id).await;
+    if result.is_ok() {
+        let _ = state.feishu_channel_updates.send(());
+    }
+    result
 }
 
 pub async fn test_channel(
@@ -318,6 +324,7 @@ fn bad_request() -> (StatusCode, Json<ApiError>) {
         }),
     )
 }
+
 fn not_found() -> (StatusCode, Json<ApiError>) {
     (StatusCode::NOT_FOUND, Json(ApiError { error: "not_found" }))
 }

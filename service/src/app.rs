@@ -5,7 +5,7 @@ use axum::Router;
 use secrecy::ExposeSecret;
 use sqlx::{AnyPool, any::AnyPoolOptions};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -26,6 +26,7 @@ pub struct AppState {
     pub credential_cipher: Arc<CredentialCipher>,
     pub nga_client: NgaClient,
     pub admin_sessions: Arc<RwLock<HashSet<String>>>,
+    pub feishu_channel_updates: watch::Sender<()>,
 }
 
 pub struct Application {
@@ -94,6 +95,7 @@ impl Application {
             credential_cipher,
             nga_client,
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
+            feishu_channel_updates: watch::channel(()).0,
         };
         let router = api::router(state.clone());
 
@@ -181,7 +183,6 @@ mod tests {
         .fetch_one(&application.state.pool)
         .await
         .expect("migration table query must succeed");
-
         assert_eq!(table_count, 1);
         assert!(database.is_file());
 

@@ -1,15 +1,15 @@
-use std::{
-    collections::HashMap,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use open_lark::Config as OpenLarkConfig;
+use open_lark::auth::AuthTokenProvider;
+use open_lark::communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
+use open_lark::communication::im::v1::message::models::ReceiveIdType;
+use open_lark::communication::{CommunicationClient, MediaImageUpload};
 use reqwest::{
     Client, StatusCode, Url,
     header::{CONTENT_LENGTH, CONTENT_TYPE},
-    multipart::{Form, Part},
     redirect,
 };
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,6 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 const FEISHU_API_BASE_URL: &str = "https://open.feishu.cn";
-const FEISHU_TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const FEISHU_MAX_CARD_IMAGES: usize = 3;
 const FEISHU_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -52,6 +51,15 @@ impl FeishuConfig {
     }
 }
 
+pub(crate) fn openlark_config(config: &FeishuConfig) -> OpenLarkConfig {
+    let base_config = OpenLarkConfig::builder()
+        .app_id(config.app_id.clone())
+        .app_secret(config.app_secret.clone())
+        .base_url(FEISHU_API_BASE_URL)
+        .build();
+    base_config.with_token_provider(AuthTokenProvider::new(base_config.clone()))
+}
+
 #[derive(Clone, Debug)]
 pub struct Notification {
     pub title: String,
@@ -73,6 +81,8 @@ pub enum SendError {
     Http { status: StatusCode, summary: String },
     #[error("notification API returned code {code}")]
     Api { code: i64, summary: String },
+    #[error("OpenLark request failed: {summary}")]
+    OpenLark { summary: String },
     #[error("notification image processing failed: {summary}")]
     Image { summary: &'static str },
     #[error("invalid notification configuration")]
@@ -94,6 +104,7 @@ impl SendError {
             Self::Http { .. } => "remote_4xx",
             Self::Api { code, .. } if *code == 99991400 => "rate_limited",
             Self::Api { .. } => "remote_api_error",
+            Self::OpenLark { .. } => "openlark_error",
             Self::Image { .. } => "image_error",
             Self::InvalidConfig => "invalid_config",
         }
@@ -110,18 +121,18 @@ pub async fn send_configured(
     config_json: &str,
     notification: &Notification,
 ) -> Result<DeliveryReceipt, SendError> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(SendError::Request)?;
     match channel_type {
         "bark" => {
+            let client = Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .map_err(SendError::Request)?;
             let config = serde_json::from_str(config_json).map_err(|_| SendError::InvalidConfig)?;
             BarkSender::new(client, config)?.send(notification).await
         }
         "feishu" => {
             let config = serde_json::from_str(config_json).map_err(|_| SendError::InvalidConfig)?;
-            FeishuSender::new(client, config)?.send(notification).await
+            FeishuSender::new(config)?.send(notification).await
         }
         _ => Err(SendError::InvalidConfig),
     }
@@ -164,13 +175,14 @@ impl NotificationSender for BarkSender {
 }
 
 pub struct FeishuSender {
-    client: Client,
     image_client: Client,
     config: FeishuConfig,
+    openlark_config: OpenLarkConfig,
+    communication: CommunicationClient,
 }
 
 impl FeishuSender {
-    pub fn new(client: Client, config: FeishuConfig) -> Result<Self, SendError> {
+    pub fn new(config: FeishuConfig) -> Result<Self, SendError> {
         if !config.is_valid() {
             return Err(SendError::InvalidConfig);
         }
@@ -185,104 +197,51 @@ impl FeishuSender {
             }))
             .build()
             .map_err(SendError::Request)?;
+        let openlark_config = openlark_config(&config);
+        let communication = CommunicationClient::new(openlark_config.clone());
         Ok(Self {
-            client,
             image_client,
             config,
+            openlark_config,
+            communication,
         })
     }
 
-    async fn access_token(&self) -> Result<String, SendError> {
-        let cache = feishu_token_cache();
-        let mut cache = cache.lock().await;
-        if let Some(cached) = cache.get(&self.config.app_id)
-            && cached.expires_at > Instant::now() + FEISHU_TOKEN_REFRESH_MARGIN
-        {
-            return Ok(cached.value.clone());
-        }
-
-        let response = self
-            .client
-            .post(format!(
-                "{FEISHU_API_BASE_URL}/open-apis/auth/v3/tenant_access_token/internal"
-            ))
-            .json(&serde_json::json!({
-                "app_id": self.config.app_id,
-                "app_secret": self.config.app_secret
-            }))
-            .send()
-            .await
-            .map_err(SendError::Request)?;
-        let status = response.status();
-        let text = response.text().await.map_err(SendError::Request)?;
-        if !status.is_success() {
-            return Err(SendError::Http {
-                status,
-                summary: summarize(&text),
-            });
-        }
-        let token_response: FeishuTokenResponse =
-            serde_json::from_str(&text).map_err(|_| SendError::Api {
-                code: -1,
-                summary: "invalid token response".to_owned(),
-            })?;
-        if token_response.code != 0 {
-            return Err(SendError::Api {
-                code: token_response.code,
-                summary: summarize(&token_response.msg),
-            });
-        }
-        let token = token_response
-            .tenant_access_token
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| SendError::Api {
-                code: -1,
-                summary: "token response omitted tenant_access_token".to_owned(),
-            })?;
-        let ttl = Duration::from_secs(token_response.expire.unwrap_or(7200).max(1));
-        cache.insert(
-            self.config.app_id.clone(),
-            CachedFeishuToken {
-                value: token.clone(),
-                expires_at: Instant::now() + ttl,
-            },
-        );
-        Ok(token)
-    }
-
-    async fn invalidate_token(&self, rejected_token: &str) {
-        let mut cache = feishu_token_cache().lock().await;
-        if cache
-            .get(&self.config.app_id)
-            .is_some_and(|cached| cached.value == rejected_token)
-        {
-            cache.remove(&self.config.app_id);
-        }
-    }
-
-    async fn send_with_token(
+    async fn send_message(
         &self,
         notification: &Notification,
-        token: &str,
     ) -> Result<DeliveryReceipt, SendError> {
-        let body = self.feishu_message_body(notification, token).await;
-        let response = self
-            .client
-            .post(format!("{FEISHU_API_BASE_URL}/open-apis/im/v1/messages"))
-            .query(&[("receive_id_type", &self.config.receive_id_type)])
-            .bearer_auth(token)
-            .json(&body)
-            .send()
+        let body = self.feishu_message_body(notification).await;
+        let message = CreateMessageBody {
+            receive_id: self.config.receive_id.clone(),
+            msg_type: body["msg_type"]
+                .as_str()
+                .ok_or_else(|| SendError::OpenLark {
+                    summary: "message body omitted msg_type".to_owned(),
+                })?
+                .to_owned(),
+            content: body["content"]
+                .as_str()
+                .ok_or_else(|| SendError::OpenLark {
+                    summary: "message body omitted content".to_owned(),
+                })?
+                .to_owned(),
+            uuid: None,
+        };
+        let response = CreateMessageRequest::new(self.openlark_config.clone())
+            .receive_id_type(receive_id_type(&self.config.receive_id_type)?)
+            .execute(message)
             .await
-            .map_err(SendError::Request)?;
-        feishu_receipt(response).await
+            .map_err(|error| SendError::OpenLark {
+                summary: summarize(&error.to_string()),
+            })?;
+        Ok(DeliveryReceipt {
+            http_status: 200,
+            response_summary: summarize(&response.to_string()),
+        })
     }
 
-    async fn feishu_message_body(
-        &self,
-        notification: &Notification,
-        token: &str,
-    ) -> serde_json::Value {
+    async fn feishu_message_body(&self, notification: &Notification) -> serde_json::Value {
         let parsed = parse_nga_images(&notification.body);
         let mut uploaded = Vec::new();
         let mut fallback = Vec::new();
@@ -292,7 +251,7 @@ impl FeishuSender {
                 fallback.push(url.clone());
                 continue;
             }
-            match self.upload_nga_image(url, token).await {
+            match self.upload_nga_image(url).await {
                 Ok(image_key) => uploaded.push(image_key),
                 Err(error) => {
                     warn!(
@@ -309,7 +268,7 @@ impl FeishuSender {
         feishu_message_body(&self.config, notification, &text, &uploaded, &fallback)
     }
 
-    async fn upload_nga_image(&self, value: &str, token: &str) -> Result<String, SendError> {
+    async fn upload_nga_image(&self, value: &str) -> Result<String, SendError> {
         let url = Url::parse(value).map_err(|_| SendError::Image {
             summary: "invalid image URL",
         })?;
@@ -373,49 +332,18 @@ impl FeishuSender {
             });
         }
 
-        let part = Part::bytes(bytes)
-            .file_name("nga-image")
-            .mime_str(&content_type)
-            .map_err(SendError::Request)?;
-        let response = self
-            .client
-            .post(format!("{FEISHU_API_BASE_URL}/open-apis/im/v1/images"))
-            .bearer_auth(token)
-            .multipart(
-                Form::new()
-                    .text("image_type", "message")
-                    .part("image", part),
-            )
-            .send()
+        let image_key = self
+            .communication
+            .im
+            .upload_image(MediaImageUpload::new(bytes).file_name(format!(
+                "nga-image.{}",
+                content_type.trim_start_matches("image/")
+            )))
             .await
-            .map_err(SendError::Request)?;
-        let status = response.status();
-        let text = response.text().await.map_err(SendError::Request)?;
-        if !status.is_success() {
-            return Err(SendError::Http {
-                status,
-                summary: summarize(&text),
-            });
-        }
-        let upload: FeishuImageResponse =
-            serde_json::from_str(&text).map_err(|_| SendError::Api {
-                code: -1,
-                summary: "invalid image upload response".to_owned(),
-            })?;
-        if upload.code != 0 {
-            return Err(SendError::Api {
-                code: upload.code,
-                summary: summarize(&upload.msg),
-            });
-        }
-        let image_key = upload
-            .data
-            .and_then(|data| data.image_key)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| SendError::Api {
-                code: -1,
-                summary: "image upload response omitted image_key".to_owned(),
-            })?;
+            .map_err(|error| SendError::OpenLark {
+                summary: summarize(&error.to_string()),
+            })?
+            .image_key;
         feishu_image_cache()
             .lock()
             .await
@@ -427,73 +355,24 @@ impl FeishuSender {
 #[async_trait]
 impl NotificationSender for FeishuSender {
     async fn send(&self, notification: &Notification) -> Result<DeliveryReceipt, SendError> {
-        let token = self.access_token().await?;
-        match self.send_with_token(notification, &token).await {
-            Err(SendError::Api { .. })
-            | Err(SendError::Http {
-                status: StatusCode::UNAUTHORIZED,
-                ..
-            }) => {
-                self.invalidate_token(&token).await;
-                invalidate_feishu_images(&self.config.app_id).await;
-                let refreshed = self.access_token().await?;
-                self.send_with_token(notification, &refreshed).await
-            }
-            result => result,
-        }
+        self.send_message(notification).await
     }
 }
 
-#[derive(Deserialize)]
-struct FeishuTokenResponse {
-    code: i64,
-    #[serde(default)]
-    msg: String,
-    tenant_access_token: Option<String>,
-    expire: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct FeishuApiResponse {
-    code: i64,
-    #[serde(default)]
-    msg: String,
-}
-
-#[derive(Deserialize)]
-struct FeishuImageResponse {
-    code: i64,
-    #[serde(default)]
-    msg: String,
-    data: Option<FeishuImageData>,
-}
-
-#[derive(Deserialize)]
-struct FeishuImageData {
-    image_key: Option<String>,
-}
-
-struct CachedFeishuToken {
-    value: String,
-    expires_at: Instant,
-}
-
-fn feishu_token_cache() -> &'static Mutex<HashMap<String, CachedFeishuToken>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CachedFeishuToken>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn receive_id_type(value: &str) -> Result<ReceiveIdType, SendError> {
+    match value {
+        "chat_id" => Ok(ReceiveIdType::ChatId),
+        "open_id" => Ok(ReceiveIdType::OpenId),
+        "user_id" => Ok(ReceiveIdType::UserId),
+        "union_id" => Ok(ReceiveIdType::UnionId),
+        "email" => Ok(ReceiveIdType::Email),
+        _ => Err(SendError::InvalidConfig),
+    }
 }
 
 fn feishu_image_cache() -> &'static Mutex<HashMap<String, String>> {
     static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-async fn invalidate_feishu_images(app_id: &str) {
-    let prefix = format!("{app_id}\0");
-    feishu_image_cache()
-        .lock()
-        .await
-        .retain(|key, _| !key.starts_with(&prefix));
 }
 
 struct ParsedImageBody {
@@ -589,30 +468,6 @@ fn feishu_message_body(
         "receive_id": config.receive_id,
         "msg_type": "interactive",
         "content": serde_json::to_string(&card).expect("JSON value must serialize")
-    })
-}
-
-async fn feishu_receipt(response: reqwest::Response) -> Result<DeliveryReceipt, SendError> {
-    let status = response.status();
-    let text = response.text().await.map_err(SendError::Request)?;
-    let summary = summarize(&text);
-    if !status.is_success() {
-        return Err(SendError::Http { status, summary });
-    }
-    let api_response: FeishuApiResponse =
-        serde_json::from_str(&text).map_err(|_| SendError::Api {
-            code: -1,
-            summary: "invalid message response".to_owned(),
-        })?;
-    if api_response.code != 0 {
-        return Err(SendError::Api {
-            code: api_response.code,
-            summary: summarize(&api_response.msg),
-        });
-    }
-    Ok(DeliveryReceipt {
-        http_status: status.as_u16(),
-        response_summary: summary,
     })
 }
 

@@ -17,6 +17,7 @@ encoding_rs = "0.8"
 futures-util = "0.3"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+openlark = { version = "0.20", default-features = false, features = ["auth", "communication", "websocket"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -39,3 +41,6 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+[patch.crates-io]
+lark-websocket-protobuf = { path = "vendor/lark-websocket-protobuf" }
