@@ -17,9 +17,13 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::markup;
+
 const FEISHU_API_BASE_URL: &str = "https://open.feishu.cn";
 const FEISHU_MAX_CARD_IMAGES: usize = 3;
 const FEISHU_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const FEISHU_MAX_CARD_TITLE: usize = 80;
+const FEISHU_MAX_CARD_TEXT: usize = 2_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BarkConfig {
@@ -264,7 +268,7 @@ impl FeishuSender {
             }
         }
 
-        let text = truncate_chars(&parsed.text, 3_000);
+        let text = render_feishu_text(&parsed.text);
         feishu_message_body(&self.config, notification, &text, &uploaded, &fallback)
     }
 
@@ -407,6 +411,11 @@ fn parse_nga_images(body: &str) -> ParsedImageBody {
     }
 }
 
+fn render_feishu_text(value: &str) -> String {
+    let rendered = markup::render_compact_markdown(value, &HashMap::new());
+    truncate_notification_text(&rendered, FEISHU_MAX_CARD_TEXT)
+}
+
 fn is_trusted_nga_image_url(url: &Url) -> bool {
     if url.scheme() != "https" {
         return false;
@@ -460,7 +469,7 @@ fn feishu_message_body(
     let card = serde_json::json!({
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": notification.title}
+            "title": {"tag": "plain_text", "content": truncate_chars(&notification.title, FEISHU_MAX_CARD_TITLE)}
         },
         "elements": elements
     });
@@ -498,6 +507,20 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     }
 }
 
+fn truncate_notification_text(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+
+    let suffix = "\n\n内容较长，点击“查看帖子”查看完整内容。";
+    let prefix_limit = limit.saturating_sub(suffix.chars().count() + 1);
+    format!("{}…{suffix}", take_chars(value, prefix_limit))
+}
+
+fn take_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
 fn default_bark_server() -> String {
     "https://api.day.app".to_owned()
 }
@@ -515,8 +538,9 @@ mod tests {
     use reqwest::{StatusCode, Url};
 
     use super::{
-        BarkConfig, FeishuConfig, Notification, SendError, feishu_message_body,
-        is_trusted_nga_image_url, parse_nga_images, send_configured,
+        BarkConfig, FEISHU_MAX_CARD_TEXT, FeishuConfig, Notification, SendError,
+        feishu_message_body, is_trusted_nga_image_url, parse_nga_images, render_feishu_text,
+        send_configured,
     };
 
     #[test]
@@ -612,6 +636,22 @@ mod tests {
                 "https://img4.nga.178.com/b.webp"
             ]
         );
+    }
+
+    #[test]
+    fn feishu_text_uses_export_markup_and_keeps_forum_emoticons() {
+        let text = render_feishu_text("[b]重要[/b][code]\n无意义的围栏\n[/code]正文[s:ac:瞎]");
+        assert!(text.contains("**重要**"));
+        assert!(text.contains("无意义的围栏"));
+        assert!(text.contains("正文[s:ac:瞎]"));
+        assert!(!text.contains("```"));
+    }
+
+    #[test]
+    fn feishu_text_adds_notice_when_content_is_too_long() {
+        let text = render_feishu_text(&"正文".repeat(2_000));
+        assert!(text.chars().count() <= FEISHU_MAX_CARD_TEXT);
+        assert!(text.contains("点击“查看帖子”查看完整内容"));
     }
 
     #[test]

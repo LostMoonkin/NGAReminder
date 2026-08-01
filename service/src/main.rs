@@ -6,7 +6,7 @@ mod config;
 mod crypto;
 mod domain;
 mod export;
-mod markup;
+pub(crate) mod markup;
 mod metrics;
 mod nga;
 mod notification;

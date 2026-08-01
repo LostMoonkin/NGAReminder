@@ -170,7 +170,7 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     let floor: Option<i32> = row.get("floor_number");
     let notification = Notification {
         title,
-        body: format!("{} (#{}): {}", author, floor.unwrap_or_default(), content),
+        body: format!("{} · #{}\n\n{}", author, floor.unwrap_or_default(), content),
         url: post_url(tid, page, pid),
     };
     let channel_type: String = row.get("channel_type");

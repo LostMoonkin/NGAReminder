@@ -40,6 +40,15 @@ pub fn render_markdown(input: &str, assets: &HashMap<String, String>) -> String 
     normalise_output(&output)
 }
 
+/// Render post content for compact notification cards.
+///
+/// This starts from the same renderer as Markdown exports, then removes code
+/// fences that are useful in a document but too noisy in a push notification.
+/// Non-empty code content is retained as ordinary text.
+pub fn render_compact_markdown(input: &str, assets: &HashMap<String, String>) -> String {
+    compact_code_blocks(&render_markdown(input, assets))
+}
+
 pub fn image_urls(input: &str) -> Vec<String> {
     let mut urls = Vec::new();
     collect_image_urls(&parse(input), &mut urls);
@@ -343,6 +352,68 @@ fn escape_text(value: &str) -> String {
     value.replace('\\', "\\\\").replace("\t", "    ")
 }
 
+fn compact_code_blocks(value: &str) -> String {
+    let mut output = Vec::new();
+    let mut code_lines = Vec::new();
+    let mut in_code = false;
+
+    for line in value.lines() {
+        if line.trim() == "```" {
+            if in_code {
+                if !is_meaningless_code_block(&code_lines) {
+                    output.extend(code_lines.drain(..));
+                } else {
+                    code_lines.clear();
+                }
+                in_code = false;
+            } else {
+                in_code = true;
+            }
+        } else if in_code {
+            code_lines.push(line.to_owned());
+        } else {
+            output.push(line.to_owned());
+        }
+    }
+
+    // Keep malformed/unclosed blocks visible rather than dropping user text.
+    if in_code {
+        output.extend(code_lines);
+    }
+
+    let mut compacted = String::new();
+    let mut previous_blank = false;
+    for line in output {
+        let blank = line.trim().is_empty();
+        if blank && previous_blank {
+            continue;
+        }
+        if !compacted.is_empty() {
+            compacted.push('\n');
+        }
+        compacted.push_str(&line);
+        previous_blank = blank;
+    }
+    normalise_output(&compacted)
+}
+
+fn is_meaningless_code_block(lines: &[String]) -> bool {
+    let meaningful_lines = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty());
+    let mut has_content = false;
+    for line in meaningful_lines {
+        if !line
+            .chars()
+            .all(|character| matches!(character, '-' | '=' | '_' | '*' | '`' | ' '))
+        {
+            has_content = true;
+        }
+    }
+    !has_content
+}
+
 fn normalise_output(value: &str) -> String {
     let mut output = value.trim().to_owned();
     output.push('\n');
@@ -359,7 +430,7 @@ fn is_safe_url(value: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{MarkupNode, parse, render_markdown};
+    use super::{MarkupNode, parse, render_compact_markdown, render_markdown};
 
     #[test]
     fn parses_nested_formatting_and_links() {
@@ -397,6 +468,16 @@ mod tests {
             render_markdown("中文\r\n第二行[br]第三行", &HashMap::new()),
             "中文\n第二行\n第三行\n"
         );
+    }
+
+    #[test]
+    fn compacts_code_blocks_and_preserves_nga_emoticons() {
+        let output = render_compact_markdown(
+            "[code]\n---\n[/code][code]重要提示[s:ac:瞎][/code]正文",
+            &HashMap::new(),
+        );
+        assert_eq!(output, "重要提示[s:ac:瞎]\n正文\n");
+        assert!(!output.contains("```"));
     }
 
     #[test]
