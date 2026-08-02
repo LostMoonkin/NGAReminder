@@ -166,6 +166,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - [服务端说明](service/README.md)
 - [运维手册](service/docs/OPERATIONS.md)
 - [NGA API 契约](service/docs/NGA_API_CONTRACT.md)
+- [机器人交互与 Cookie 续期设计](service/docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)
 - [Standalone 扩展说明](extension-standalone/README.md)
 - [更新日志](service/CHANGELOG.md)
 

@@ -331,4 +331,8 @@ See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for Prometheus metrics, structure
 失效告警、PostgreSQL/SQLite plus assets backup and restore, Docker release/rollback, and Nginx
 TLS/reverse-proxy deployment instructions.
 
+See [`docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md`](docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)
+for the generic bot architecture, slash-command protocol, Feishu adapter refactor, identity binding,
+and user-confirmed NGA Cookie renewal design.
+
 Do not commit real NGA Cookies, API tokens, Bark keys, or Feishu application secrets.
