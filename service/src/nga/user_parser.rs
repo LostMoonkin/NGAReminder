@@ -1,3 +1,6 @@
+//! (dead_code allowed: verified parser contract, covered by fixture tests; wired by later user-crawl enhancements)
+#![allow(dead_code)]
+
 use encoding_rs::GBK;
 use serde_json::{Map, Value};
 use thiserror::Error;

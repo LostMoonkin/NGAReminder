@@ -65,6 +65,21 @@ pub async fn resolve_nga_credentials_invalid_alert(state: &AppState) -> Result<(
     Ok(())
 }
 
+/// Transactional variant used by the renewal success flow so the alert
+/// resolution commits together with the cookie replacement.
+pub async fn resolve_nga_credentials_invalid_alert_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE system_alerts SET resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE alert_key = $1 AND resolved_at IS NULL",
+    )
+    .bind(NGA_CREDENTIALS_INVALID_KEY)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn enqueue_open_alert_channels(state: &AppState) -> Result<(), sqlx::Error> {
     let alerts = sqlx::query(
         "SELECT a.id FROM system_alerts a
@@ -85,10 +100,13 @@ async fn enqueue_alert_channels(
     reset_existing: bool,
 ) -> Result<(), sqlx::Error> {
     let query = if reset_existing {
-        "SELECT c.id FROM notification_channels c WHERE c.enabled = 1"
+        "SELECT c.id FROM notification_channels c
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE c.enabled = 1 AND i.enabled = 1 AND i.delivery_enabled = 1"
     } else {
         "SELECT c.id FROM notification_channels c
-         WHERE c.enabled = 1
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE c.enabled = 1 AND i.enabled = 1 AND i.delivery_enabled = 1
            AND NOT EXISTS (
              SELECT 1 FROM system_alert_outbox o
              WHERE o.alert_id = $1 AND o.channel_id = c.id
@@ -190,7 +208,7 @@ mod tests {
             ),
             nga_client: NgaClient::new("test-agent".to_owned()).unwrap(),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
-            feishu_channel_updates: tokio::sync::watch::channel(()).0,
+            platform_updates: tokio::sync::watch::channel(()).0,
         }
     }
 
@@ -203,9 +221,17 @@ mod tests {
     async fn invalid_alert_is_deduplicated_and_requeued_after_resolution() {
         let state = test_state().await;
         sqlx::query(
+            "INSERT INTO platform_integrations
+             (id, platform, label, credentials_encrypted)
+             VALUES ('integration', 'bark', 'test', X'00')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("integration must be inserted");
+        sqlx::query(
             "INSERT INTO notification_channels
-             (id, channel_type, label, config_encrypted)
-             VALUES ('channel', 'bark', 'test', X'00')",
+             (id, integration_id, label, target_encrypted)
+             VALUES ('channel', 'integration', 'test', X'00')",
         )
         .execute(&state.pool)
         .await

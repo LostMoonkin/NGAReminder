@@ -26,7 +26,7 @@ pub struct AppState {
     pub credential_cipher: Arc<CredentialCipher>,
     pub nga_client: NgaClient,
     pub admin_sessions: Arc<RwLock<HashSet<String>>>,
-    pub feishu_channel_updates: watch::Sender<()>,
+    pub platform_updates: watch::Sender<()>,
 }
 
 pub struct Application {
@@ -95,7 +95,7 @@ impl Application {
             credential_cipher,
             nga_client,
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
-            feishu_channel_updates: watch::channel(()).0,
+            platform_updates: watch::channel(()).0,
         };
         let router = api::router(state.clone());
 

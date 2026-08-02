@@ -361,7 +361,7 @@ fn compact_code_blocks(value: &str) -> String {
         if line.trim() == "```" {
             if in_code {
                 if !is_meaningless_code_block(&code_lines) {
-                    output.extend(code_lines.drain(..));
+                    output.append(&mut code_lines);
                 } else {
                     code_lines.clear();
                 }

@@ -9,28 +9,32 @@ use uuid::Uuid;
 
 use crate::{
     app::AppState,
-    notification::sender::{BarkConfig, FeishuConfig, Notification, send_configured},
+    notification::sender::{Notification, send_configured},
+    platform::integration::{PlatformKind, validate_target},
 };
 
 #[derive(Deserialize)]
 pub struct CreateChannel {
+    integration_id: String,
     label: String,
-    channel_type: String,
-    config: serde_json::Value,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    target: serde_json::Value,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateChannel {
     enabled: Option<bool>,
     label: Option<String>,
-    config: Option<serde_json::Value>,
+    target: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 pub struct ChannelView {
     id: String,
+    integration_id: String,
+    platform: String,
     label: String,
-    channel_type: String,
     enabled: bool,
 }
 
@@ -48,7 +52,10 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 pub async fn list_channels(State(state): State<AppState>) -> ApiResult<ListResponse<ChannelView>> {
     let rows = sqlx::query(
-        "SELECT id, label, channel_type, enabled FROM notification_channels ORDER BY created_at",
+        "SELECT c.id, c.integration_id, i.platform, c.label, c.enabled
+         FROM notification_channels c
+         JOIN platform_integrations i ON i.id = c.integration_id
+         ORDER BY c.created_at",
     )
     .fetch_all(&state.pool)
     .await
@@ -62,34 +69,51 @@ pub async fn create_channel(
     State(state): State<AppState>,
     Json(request): Json<CreateChannel>,
 ) -> Result<(StatusCode, Json<ChannelView>), (StatusCode, Json<ApiError>)> {
-    if request.label.trim().is_empty() || !validate_config(&request.channel_type, &request.config) {
+    if request.label.trim().is_empty() {
         return Err(bad_request());
     }
-    let config = serde_json::to_string(&request.config).map_err(|_| bad_request())?;
+    let platform_row = sqlx::query("SELECT platform FROM platform_integrations WHERE id = $1")
+        .bind(&request.integration_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?
+        .ok_or_else(bad_request)?;
+    let platform: String = platform_row.get("platform");
+    let kind = PlatformKind::parse(&platform).ok_or_else(bad_request)?;
+    if !validate_target(kind, &request.target) {
+        return Err(bad_request());
+    }
+    let target_raw = serde_json::json!({
+        "platform": platform,
+        "target": request.target,
+    })
+    .to_string();
     let encrypted = state
         .credential_cipher
-        .encrypt(&config)
+        .encrypt(&target_raw)
         .map_err(|_| internal_api())?;
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO notification_channels
-         (id, channel_type, label, config_encrypted) VALUES ($1, $2, $3, $4)",
+         (id, integration_id, label, enabled, target_encrypted) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&id)
-    .bind(&request.channel_type)
+    .bind(&request.integration_id)
     .bind(&request.label)
+    .bind(i32::from(request.enabled))
     .bind(encrypted)
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    let _ = state.feishu_channel_updates.send(());
+    notify_platform_change(&state);
     Ok((
         StatusCode::CREATED,
         Json(ChannelView {
             id,
+            integration_id: request.integration_id,
+            platform,
             label: request.label,
-            channel_type: request.channel_type,
-            enabled: true,
+            enabled: request.enabled,
         }),
     ))
 }
@@ -99,7 +123,7 @@ pub async fn update_channel(
     Path(id): Path<String>,
     Json(request): Json<UpdateChannel>,
 ) -> ApiResult<ChannelView> {
-    if request.enabled.is_none() && request.label.is_none() && request.config.is_none() {
+    if request.enabled.is_none() && request.label.is_none() && request.target.is_none() {
         return Err(bad_request());
     }
     if request
@@ -109,18 +133,28 @@ pub async fn update_channel(
     {
         return Err(bad_request());
     }
-    let current = sqlx::query("SELECT channel_type FROM notification_channels WHERE id = $1")
-        .bind(&id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
-    let channel_type: String = current.get("channel_type");
-    let encrypted = if let Some(config) = request.config {
-        if !validate_config(&channel_type, &config) {
+    let current = sqlx::query(
+        "SELECT c.integration_id, i.platform
+         FROM notification_channels c
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE c.id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
+    let platform: String = current.get("platform");
+    let kind = PlatformKind::parse(&platform).ok_or_else(bad_request)?;
+    let encrypted = if let Some(target) = request.target {
+        if !validate_target(kind, &target) {
             return Err(bad_request());
         }
-        let raw = serde_json::to_string(&config).map_err(|_| bad_request())?;
+        let raw = serde_json::json!({
+            "platform": platform,
+            "target": target,
+        })
+        .to_string();
         Some(
             state
                 .credential_cipher
@@ -134,7 +168,7 @@ pub async fn update_channel(
         "UPDATE notification_channels SET
          enabled = COALESCE($1, enabled),
          label = COALESCE($2, label),
-         config_encrypted = COALESCE($3, config_encrypted),
+         target_encrypted = COALESCE($3, target_encrypted),
          updated_at = CURRENT_TIMESTAMP WHERE id = $4",
     )
     .bind(request.enabled.map(i32::from))
@@ -145,13 +179,16 @@ pub async fn update_channel(
     .await
     .map_err(internal)?;
     let row = sqlx::query(
-        "SELECT id, label, channel_type, enabled FROM notification_channels WHERE id = $1",
+        "SELECT c.id, c.integration_id, i.platform, c.label, c.enabled
+         FROM notification_channels c
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE c.id = $1",
     )
     .bind(id)
     .fetch_one(&state.pool)
     .await
     .map_err(internal)?;
-    let _ = state.feishu_channel_updates.send(());
+    notify_platform_change(&state);
     Ok(Json(map_channel(&row)))
 }
 
@@ -187,7 +224,7 @@ pub async fn delete_channel(
     {
         return Err(not_found());
     }
-    let _ = state.feishu_channel_updates.send(());
+    notify_platform_change(&state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -196,21 +233,30 @@ pub async fn test_channel(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let row = sqlx::query(
-        "SELECT channel_type, config_encrypted FROM notification_channels WHERE id = $1",
+        "SELECT i.platform, i.credentials_encrypted, c.target_encrypted
+         FROM notification_channels c
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE c.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.pool)
     .await
     .map_err(internal)?
     .ok_or_else(not_found)?;
-    let encrypted: Vec<u8> = row.get("config_encrypted");
-    let config = state
+    let credentials_encrypted: Vec<u8> = row.get("credentials_encrypted");
+    let credentials = state
         .credential_cipher
-        .decrypt(&encrypted)
+        .decrypt(&credentials_encrypted)
+        .map_err(|_| internal_api())?;
+    let target_encrypted: Vec<u8> = row.get("target_encrypted");
+    let target = state
+        .credential_cipher
+        .decrypt(&target_encrypted)
         .map_err(|_| internal_api())?;
     send_configured(
-        &row.get::<String, _>("channel_type"),
-        &config,
+        &row.get::<String, _>("platform"),
+        &credentials,
+        &target,
         &Notification {
             title: "NGA Reminder 测试".to_owned(),
             body: "通知渠道配置成功".to_owned(),
@@ -229,22 +275,22 @@ pub async fn test_channel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn validate_config(channel_type: &str, value: &serde_json::Value) -> bool {
-    match channel_type {
-        "bark" => serde_json::from_value::<BarkConfig>(value.clone()).is_ok(),
-        "feishu" => serde_json::from_value::<FeishuConfig>(value.clone())
-            .is_ok_and(|config| config.is_valid()),
-        _ => false,
-    }
-}
-
 fn map_channel(row: &sqlx::any::AnyRow) -> ChannelView {
     ChannelView {
         id: row.get("id"),
+        integration_id: row.get("integration_id"),
+        platform: row.get("platform"),
         label: row.get("label"),
-        channel_type: row.get("channel_type"),
         enabled: row.get::<i32, _>("enabled") == 1,
     }
+}
+
+fn notify_platform_change(state: &AppState) {
+    let _ = state.platform_updates.send(());
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn bad_request() -> (StatusCode, Json<ApiError>) {

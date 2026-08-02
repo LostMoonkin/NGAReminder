@@ -80,6 +80,7 @@ pub async fn create_thread_watch(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_thread_watch_with_config(
     pool: &AnyPool,
     tid: i64,
@@ -720,9 +721,17 @@ mod tests {
             .expect("soft-deleted target can be recreated");
 
         sqlx::query(
+            "INSERT INTO platform_integrations
+             (id, platform, label, credentials_encrypted)
+             VALUES ('integration', 'bark', 'integration', X'00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("integration must create");
+        sqlx::query(
             "INSERT INTO notification_channels
-             (id, channel_type, label, config_encrypted)
-             VALUES ('channel', 'bark', 'channel', X'00')",
+             (id, integration_id, label, target_encrypted)
+             VALUES ('channel', 'integration', 'channel', X'00')",
         )
         .execute(&pool)
         .await

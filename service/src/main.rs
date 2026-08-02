@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod assets;
+mod bot;
 mod collector;
 mod config;
 mod crypto;
@@ -11,6 +12,7 @@ mod metrics;
 mod nga;
 mod notification;
 mod observability;
+mod platform;
 mod repository;
 mod schedule;
 mod worker;
@@ -84,10 +86,7 @@ async fn run_server(
     let server_cancellation = cancellation.clone();
     let receiver_cancellation = cancellation.clone();
     let mut server = tokio::spawn(async move { application.run_http(server_cancellation).await });
-    let mut receiver = tokio::spawn(notification::receiver::run(
-        receiver_state,
-        receiver_cancellation,
-    ));
+    let mut receiver = tokio::spawn(bot::runtime::run(receiver_state, receiver_cancellation));
 
     tokio::select! {
         result = &mut server => {
@@ -118,10 +117,7 @@ async fn run_worker(state: app::AppState, cancellation: CancellationToken) -> an
     let worker_cancellation = cancellation.clone();
     let receiver_cancellation = cancellation.clone();
     let mut workers = tokio::spawn(worker::run(state, worker_cancellation));
-    let mut receiver = tokio::spawn(notification::receiver::run(
-        receiver_state,
-        receiver_cancellation,
-    ));
+    let mut receiver = tokio::spawn(bot::runtime::run(receiver_state, receiver_cancellation));
 
     tokio::select! {
         result = &mut workers => {
@@ -156,10 +152,7 @@ async fn run_all(application: Application, cancellation: CancellationToken) -> a
 
     let mut server = tokio::spawn(async move { application.run_http(server_cancellation).await });
     let mut workers = tokio::spawn(worker::run(state, worker_cancellation));
-    let mut receiver = tokio::spawn(notification::receiver::run(
-        receiver_state,
-        receiver_cancellation,
-    ));
+    let mut receiver = tokio::spawn(bot::runtime::run(receiver_state, receiver_cancellation));
 
     tokio::select! {
         result = &mut server => {

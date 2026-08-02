@@ -1,3 +1,6 @@
+//! (dead_code allowed: verified parser contract, covered by fixture tests; wired by later user-crawl enhancements)
+#![allow(dead_code)]
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserProfile {
     pub uid: i64,

@@ -3,6 +3,7 @@ mod admin;
 mod auth;
 mod export;
 mod health;
+mod integration;
 mod notification;
 mod query;
 mod watch;
@@ -35,6 +36,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/settings/nga-account", get(account::get))
         .route("/api/v1/settings/nga-account", put(account::save))
         .route("/api/v1/settings/nga-account/test", post(account::test))
+        .route(
+            "/api/v1/settings/nga-account/renewal",
+            patch(account::update_renewal),
+        )
+        .route(
+            "/api/v1/settings/nga-account/renewal/cancel",
+            post(account::cancel_renewal),
+        )
+        .route(
+            "/api/v1/settings/nga-account/renewal/test",
+            post(account::test_renewal),
+        )
         .route("/api/v1/watches", get(watch::list))
         .route("/api/v1/watches/threads", post(watch::create_thread))
         .route("/api/v1/watches/users", post(watch::create_user))
@@ -56,6 +69,40 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/channels/{id}/test",
             post(notification::test_channel),
+        )
+        .route("/api/v1/integrations", get(integration::list))
+        .route("/api/v1/integrations", post(integration::create))
+        .route("/api/v1/integrations/{id}", get(integration::get))
+        .route("/api/v1/integrations/{id}", patch(integration::update))
+        .route("/api/v1/integrations/{id}", delete(integration::delete))
+        .route("/api/v1/integrations/{id}/test", post(integration::test))
+        .route(
+            "/api/v1/integrations/{id}/pairing-tokens",
+            post(integration::create_pairing_token),
+        )
+        .route(
+            "/api/v1/integrations/{id}/bot-status",
+            get(integration::bot_status),
+        )
+        .route(
+            "/api/v1/integrations/{id}/bindings",
+            get(integration::list_bindings),
+        )
+        .route(
+            "/api/v1/bot-bindings/{id}",
+            patch(integration::update_binding),
+        )
+        .route(
+            "/api/v1/bot-bindings/{id}",
+            delete(integration::delete_binding),
+        )
+        .route(
+            "/api/v1/platforms/{platform}/bot-integration",
+            put(integration::set_bot),
+        )
+        .route(
+            "/api/v1/platforms/{platform}/bot-integration",
+            delete(integration::clear_bot),
         )
         .route("/api/v1/events", get(query::events))
         .route("/api/v1/events/{id}/read", post(query::mark_event_read))
@@ -159,7 +206,7 @@ mod tests {
             ),
             nga_client: NgaClient::new("test".to_owned()).expect("test client must build"),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
-            feishu_channel_updates: tokio::sync::watch::channel(()).0,
+            platform_updates: tokio::sync::watch::channel(()).0,
         }
     }
 

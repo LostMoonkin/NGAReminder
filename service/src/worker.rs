@@ -39,6 +39,11 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                 while notification::worker::process_one(&state).await? {
                     metrics::notification_job();
                 }
+                // Expire stale login sessions and clear their protocol
+                // contexts on every cycle (cheap: one indexed query).
+                if let Err(error) = crate::bot::session::expire_stale_sessions(&state).await {
+                    warn!(error = %error, "login session cleanup failed");
+                }
                 let claimed = watch::claim_due(&state.pool, state.config.database_backend).await?;
                 if let Some(watch_target) = claimed {
                     match watch_target.target_type.as_str() {

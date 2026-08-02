@@ -6,6 +6,7 @@ use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION_V2: u8 = 2;
 const NONCE_LENGTH: usize = 12;
 
 pub struct CredentialCipher {
@@ -52,6 +53,43 @@ impl CredentialCipher {
             .map_err(|_| anyhow::anyhow!("credential decryption failed"))?;
         String::from_utf8(plaintext).context("decrypted credential is not UTF-8")
     }
+
+    /// v2 format: the caller supplies a field context used as AEAD AAD so a
+    /// ciphertext cannot be moved to a different field. Payload layout is
+    /// `version(2) + nonce + ciphertext` with the AAD bound into the tag.
+    pub fn encrypt_v2(&self, plaintext: &str, aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut nonce = [0_u8; NONCE_LENGTH];
+        OsRng.fill_bytes(&mut nonce);
+        let payload = aes_gcm::aead::Payload {
+            msg: plaintext.as_bytes(),
+            aad,
+        };
+        let ciphertext = self
+            .cipher
+            .encrypt((&nonce).into(), payload)
+            .map_err(|_| anyhow::anyhow!("credential encryption failed"))?;
+        let mut payload = Vec::with_capacity(1 + NONCE_LENGTH + ciphertext.len());
+        payload.push(FORMAT_VERSION_V2);
+        payload.extend_from_slice(&nonce);
+        payload.extend_from_slice(&ciphertext);
+        Ok(payload)
+    }
+
+    pub fn decrypt_v2(&self, payload: &[u8], aad: &[u8]) -> anyhow::Result<String> {
+        if payload.len() <= 1 + NONCE_LENGTH || payload[0] != FORMAT_VERSION_V2 {
+            bail!("unsupported or truncated v2 encrypted credential");
+        }
+        let (nonce, ciphertext) = payload[1..].split_at(NONCE_LENGTH);
+        let payload = aes_gcm::aead::Payload {
+            msg: ciphertext,
+            aad,
+        };
+        let plaintext = self
+            .cipher
+            .decrypt(nonce.into(), payload)
+            .map_err(|_| anyhow::anyhow!("credential decryption failed"))?;
+        String::from_utf8(plaintext).context("decrypted credential is not UTF-8")
+    }
 }
 
 #[cfg(test)]
@@ -78,5 +116,27 @@ mod tests {
     fn rejects_wrong_key_size() {
         let key = STANDARD.encode([7_u8; 16]);
         assert!(CredentialCipher::from_base64(&key).is_err());
+    }
+
+    #[test]
+    fn v2_binds_aad_to_the_field() {
+        let key = STANDARD.encode([7_u8; 32]);
+        let cipher = CredentialCipher::from_base64(&key).expect("key must be valid");
+        let payload = cipher
+            .encrypt_v2("secret", b"nga_account:renewal_password:v2")
+            .expect("encryption must succeed");
+        assert_eq!(payload[0], 2);
+        assert_eq!(
+            cipher
+                .decrypt_v2(&payload, b"nga_account:renewal_password:v2")
+                .expect("decryption with correct AAD must succeed"),
+            "secret"
+        );
+        // Moving the ciphertext to a different field must fail.
+        assert!(
+            cipher
+                .decrypt_v2(&payload, b"nga_account:cookie:v2")
+                .is_err()
+        );
     }
 }

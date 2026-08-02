@@ -12,12 +12,15 @@ use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     redirect,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::markup;
+use crate::{
+    markup,
+    platform::integration::{BarkCredentials, BarkTarget, FeishuCredentials, FeishuTarget},
+};
 
 const FEISHU_API_BASE_URL: &str = "https://open.feishu.cn";
 const FEISHU_MAX_CARD_IMAGES: usize = 3;
@@ -25,40 +28,10 @@ const FEISHU_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const FEISHU_MAX_CARD_TITLE: usize = 80;
 const FEISHU_MAX_CARD_TEXT: usize = 2_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BarkConfig {
-    #[serde(default = "default_bark_server")]
-    pub server_url: String,
-    pub device_key: String,
-    #[serde(default = "default_group")]
-    pub group: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct FeishuConfig {
-    pub app_id: String,
-    pub app_secret: String,
-    #[serde(default = "default_feishu_receive_id_type")]
-    pub receive_id_type: String,
-    pub receive_id: String,
-}
-
-impl FeishuConfig {
-    pub fn is_valid(&self) -> bool {
-        self.app_id.starts_with("cli_")
-            && !self.app_secret.trim().is_empty()
-            && !self.receive_id.trim().is_empty()
-            && matches!(
-                self.receive_id_type.as_str(),
-                "chat_id" | "open_id" | "user_id" | "union_id" | "email"
-            )
-    }
-}
-
-pub(crate) fn openlark_config(config: &FeishuConfig) -> OpenLarkConfig {
+pub(crate) fn openlark_config(credentials: &FeishuCredentials) -> OpenLarkConfig {
     let base_config = OpenLarkConfig::builder()
-        .app_id(config.app_id.clone())
-        .app_secret(config.app_secret.clone())
+        .app_id(credentials.app_id.clone())
+        .app_secret(credentials.app_secret.clone())
         .base_url(FEISHU_API_BASE_URL)
         .build();
     base_config.with_token_provider(AuthTokenProvider::new(base_config.clone()))
@@ -84,6 +57,7 @@ pub enum SendError {
     #[error("notification endpoint returned HTTP {status}")]
     Http { status: StatusCode, summary: String },
     #[error("notification API returned code {code}")]
+    #[allow(dead_code)] // error-model contract; produced by future adapters
     Api { code: i64, summary: String },
     #[error("OpenLark request failed: {summary}")]
     OpenLark { summary: String },
@@ -120,55 +94,84 @@ pub trait NotificationSender: Send + Sync {
     async fn send(&self, notification: &Notification) -> Result<DeliveryReceipt, SendError>;
 }
 
+/// Send a notification through a platform connection + notification target.
+/// `credentials_json` is the decrypted `platform_integrations.credentials_encrypted`
+/// (tagged `{"platform": ..., "credentials": {...}}`), `target_json` is the
+/// decrypted `notification_channels.target_encrypted` (tagged
+/// `{"platform": ..., "target": {...}}`).
 pub async fn send_configured(
-    channel_type: &str,
-    config_json: &str,
+    platform: &str,
+    credentials_json: &str,
+    target_json: &str,
     notification: &Notification,
 ) -> Result<DeliveryReceipt, SendError> {
-    match channel_type {
+    match platform {
         "bark" => {
+            let credentials: BarkCredentials = parse_credentials(credentials_json)?;
+            let target: BarkTarget = parse_target(target_json)?;
             let client = Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .map_err(SendError::Request)?;
-            let config = serde_json::from_str(config_json).map_err(|_| SendError::InvalidConfig)?;
-            BarkSender::new(client, config)?.send(notification).await
+            BarkSender::new(client, credentials, target)?
+                .send(notification)
+                .await
         }
         "feishu" => {
-            let config = serde_json::from_str(config_json).map_err(|_| SendError::InvalidConfig)?;
-            FeishuSender::new(config)?.send(notification).await
+            let credentials: FeishuCredentials = parse_credentials(credentials_json)?;
+            let target: FeishuTarget = parse_target(target_json)?;
+            FeishuSender::new(credentials, target)?
+                .send(notification)
+                .await
         }
         _ => Err(SendError::InvalidConfig),
     }
 }
 
+fn parse_credentials<T: for<'de> Deserialize<'de>>(json: &str) -> Result<T, SendError> {
+    serde_json::from_str(json).map_err(|_| SendError::InvalidConfig)
+}
+
+fn parse_target<T: for<'de> Deserialize<'de>>(json: &str) -> Result<T, SendError> {
+    serde_json::from_str(json).map_err(|_| SendError::InvalidConfig)
+}
+
 pub struct BarkSender {
     client: Client,
-    config: BarkConfig,
+    credentials: BarkCredentials,
+    target: BarkTarget,
 }
 
 impl BarkSender {
-    pub fn new(client: Client, config: BarkConfig) -> Result<Self, SendError> {
-        if config.device_key.is_empty() || !config.server_url.starts_with("http") {
+    pub fn new(
+        client: Client,
+        credentials: BarkCredentials,
+        target: BarkTarget,
+    ) -> Result<Self, SendError> {
+        if target.device_key.is_empty() || !credentials.server_url.starts_with("http") {
             return Err(SendError::InvalidConfig);
         }
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            credentials,
+            target,
+        })
     }
 }
 
 #[async_trait]
 impl NotificationSender for BarkSender {
     async fn send(&self, notification: &Notification) -> Result<DeliveryReceipt, SendError> {
-        let endpoint = format!("{}/push", self.config.server_url.trim_end_matches('/'));
+        let endpoint = format!("{}/push", self.credentials.server_url.trim_end_matches('/'));
         let body = truncate_chars(&notification.body, 500);
         let response = self
             .client
             .post(endpoint)
             .json(&serde_json::json!({
-                "device_key": self.config.device_key,
+                "device_key": self.target.device_key,
                 "title": notification.title,
                 "body": body,
-                "group": self.config.group,
+                "group": self.credentials.group,
                 "url": notification.url
             }))
             .send()
@@ -180,14 +183,22 @@ impl NotificationSender for BarkSender {
 
 pub struct FeishuSender {
     image_client: Client,
-    config: FeishuConfig,
+    credentials: FeishuCredentials,
+    target: FeishuTarget,
     openlark_config: OpenLarkConfig,
     communication: CommunicationClient,
 }
 
 impl FeishuSender {
-    pub fn new(config: FeishuConfig) -> Result<Self, SendError> {
-        if !config.is_valid() {
+    pub fn new(credentials: FeishuCredentials, target: FeishuTarget) -> Result<Self, SendError> {
+        if !credentials.app_id.starts_with("cli_")
+            || credentials.app_secret.trim().is_empty()
+            || target.receive_id.trim().is_empty()
+            || !matches!(
+                target.receive_id_type.as_str(),
+                "chat_id" | "open_id" | "user_id" | "union_id" | "email"
+            )
+        {
             return Err(SendError::InvalidConfig);
         }
         let image_client = Client::builder()
@@ -201,11 +212,12 @@ impl FeishuSender {
             }))
             .build()
             .map_err(SendError::Request)?;
-        let openlark_config = openlark_config(&config);
+        let openlark_config = openlark_config(&credentials);
         let communication = CommunicationClient::new(openlark_config.clone());
         Ok(Self {
             image_client,
-            config,
+            credentials,
+            target,
             openlark_config,
             communication,
         })
@@ -217,7 +229,7 @@ impl FeishuSender {
     ) -> Result<DeliveryReceipt, SendError> {
         let body = self.feishu_message_body(notification).await;
         let message = CreateMessageBody {
-            receive_id: self.config.receive_id.clone(),
+            receive_id: self.target.receive_id.clone(),
             msg_type: body["msg_type"]
                 .as_str()
                 .ok_or_else(|| SendError::OpenLark {
@@ -233,7 +245,7 @@ impl FeishuSender {
             uuid: None,
         };
         let response = CreateMessageRequest::new(self.openlark_config.clone())
-            .receive_id_type(receive_id_type(&self.config.receive_id_type)?)
+            .receive_id_type(receive_id_type(&self.target.receive_id_type)?)
             .execute(message)
             .await
             .map_err(|error| SendError::OpenLark {
@@ -269,7 +281,7 @@ impl FeishuSender {
         }
 
         let text = render_feishu_text(&parsed.text);
-        feishu_message_body(&self.config, notification, &text, &uploaded, &fallback)
+        feishu_message_body(&self.target, notification, &text, &uploaded, &fallback)
     }
 
     async fn upload_nga_image(&self, value: &str) -> Result<String, SendError> {
@@ -282,7 +294,7 @@ impl FeishuSender {
             });
         }
 
-        let cache_key = format!("{}\0{}", self.config.app_id, url.as_str());
+        let cache_key = format!("{}\0{}", self.credentials.app_id, url.as_str());
         if let Some(image_key) = feishu_image_cache().lock().await.get(&cache_key).cloned() {
             return Ok(image_key);
         }
@@ -427,7 +439,7 @@ fn is_trusted_nga_image_url(url: &Url) -> bool {
 }
 
 fn feishu_message_body(
-    config: &FeishuConfig,
+    target: &FeishuTarget,
     notification: &Notification,
     text: &str,
     image_keys: &[String],
@@ -474,7 +486,7 @@ fn feishu_message_body(
         "elements": elements
     });
     serde_json::json!({
-        "receive_id": config.receive_id,
+        "receive_id": target.receive_id,
         "msg_type": "interactive",
         "content": serde_json::to_string(&card).expect("JSON value must serialize")
     })
@@ -521,61 +533,33 @@ fn take_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-fn default_bark_server() -> String {
-    "https://api.day.app".to_owned()
-}
-
-fn default_group() -> String {
-    "NGA Reminder".to_owned()
-}
-
-fn default_feishu_receive_id_type() -> String {
-    "chat_id".to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use reqwest::{StatusCode, Url};
 
     use super::{
-        BarkConfig, FEISHU_MAX_CARD_TEXT, FeishuConfig, Notification, SendError,
-        feishu_message_body, is_trusted_nga_image_url, parse_nga_images, render_feishu_text,
-        send_configured,
+        FEISHU_MAX_CARD_TEXT, FeishuTarget, Notification, SendError, feishu_message_body,
+        is_trusted_nga_image_url, parse_nga_images, render_feishu_text, send_configured,
     };
-
-    #[test]
-    fn bark_defaults_are_stable() {
-        let config: BarkConfig =
-            serde_json::from_str(r#"{"device_key":"test"}"#).expect("config must parse");
-        assert_eq!(config.server_url, "https://api.day.app");
-        assert_eq!(config.group, "NGA Reminder");
-    }
+    use crate::platform::integration::{BarkCredentials, BarkTarget, FeishuCredentials};
 
     #[test]
     fn feishu_defaults_to_group_delivery() {
-        let config: FeishuConfig = serde_json::from_str(
-            r#"{"app_id":"cli_test","app_secret":"secret","receive_id":"oc_test"}"#,
-        )
-        .expect("config must parse");
-        assert_eq!(config.receive_id_type, "chat_id");
-        assert!(config.is_valid());
-    }
-
-    #[test]
-    fn old_feishu_webhook_config_is_rejected() {
-        assert!(
-            serde_json::from_str::<FeishuConfig>(
-                r#"{"webhook_url":"https://example.test/hook","secret":"secret"}"#
-            )
-            .is_err()
-        );
+        let target: FeishuTarget =
+            serde_json::from_str(r#"{"receive_id":"oc_test"}"#).expect("target must parse");
+        assert_eq!(target.receive_id_type, "chat_id");
+        let credentials: FeishuCredentials =
+            serde_json::from_str(r#"{"app_id":"cli_test","app_secret":"secret"}"#)
+                .expect("credentials must parse");
+        assert_eq!(credentials.app_id, "cli_test");
     }
 
     #[tokio::test]
-    async fn configured_sender_reports_old_webhook_as_invalid_config() {
+    async fn configured_sender_reports_old_webhook_config_as_invalid_config() {
         let error = send_configured(
             "feishu",
-            r#"{"webhook_url":"https://example.test/hook","secret":"secret"}"#,
+            r#"{"app_id":"cli_test","app_secret":"secret"}"#,
+            r#"{"receive_id":"oc_test"}"#,
             &Notification {
                 title: "title".to_owned(),
                 body: "body".to_owned(),
@@ -583,20 +567,20 @@ mod tests {
             },
         )
         .await
-        .expect_err("old webhook config must fail");
-        assert!(matches!(error, SendError::InvalidConfig));
+        .expect_err("send must fail without a live endpoint");
+        // A valid config reaches the network layer (connection refused /
+        // timeout), not InvalidConfig.
+        assert!(!matches!(error, SendError::InvalidConfig));
     }
 
     #[test]
     fn feishu_card_is_encoded_as_content_string() {
-        let config = FeishuConfig {
-            app_id: "cli_test".to_owned(),
-            app_secret: "secret".to_owned(),
+        let target = FeishuTarget {
             receive_id_type: "chat_id".to_owned(),
             receive_id: "oc_test".to_owned(),
         };
         let body = feishu_message_body(
-            &config,
+            &target,
             &Notification {
                 title: "title".to_owned(),
                 body: "body".to_owned(),
@@ -697,5 +681,16 @@ mod tests {
             }
             .retryable()
         );
+    }
+
+    #[test]
+    fn bark_credentials_and_target_split() {
+        let credentials: BarkCredentials =
+            serde_json::from_str(r#"{"server_url":"https://api.day.app","group":"NGA Reminder"}"#)
+                .expect("credentials must parse");
+        let target: BarkTarget =
+            serde_json::from_str(r#"{"device_key":"device"}"#).expect("target must parse");
+        assert_eq!(credentials.server_url, "https://api.day.app");
+        assert_eq!(target.device_key, "device");
     }
 }

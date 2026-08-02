@@ -1,3 +1,4 @@
+pub mod login;
 pub mod thread_parser;
 pub mod user_parser;
 
@@ -202,6 +203,7 @@ impl NgaClient {
             .await
     }
 
+    #[allow(dead_code)] // verified client contract; wired by later user-crawl enhancements
     pub async fn fetch_user_profile(
         &self,
         passport_uid: &str,

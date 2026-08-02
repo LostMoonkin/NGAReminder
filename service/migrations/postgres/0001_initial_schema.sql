@@ -68,6 +68,8 @@ CREATE TABLE watch_targets (
     target_type TEXT NOT NULL CHECK (target_type IN ('thread', 'user')),
     target_id BIGINT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    pause_reason TEXT
+        CHECK (pause_reason IN ('user', 'auth', 'error')),
     interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK (interval_seconds BETWEEN 30 AND 86400),
     schedule_json TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
@@ -153,15 +155,119 @@ CREATE TABLE post_events (
 CREATE INDEX post_events_occurred_at ON post_events (occurred_at);
 CREATE INDEX post_events_unread ON post_events (read_at, occurred_at);
 
-CREATE TABLE notification_channels (
+CREATE TABLE platform_integrations (
     id TEXT PRIMARY KEY,
-    channel_type TEXT NOT NULL CHECK (channel_type IN ('bark', 'feishu')),
+    platform TEXT NOT NULL
+        CHECK (platform IN ('bark', 'feishu', 'telegram', 'qq')),
     label TEXT NOT NULL UNIQUE,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    config_encrypted BYTEA NOT NULL,
+    delivery_enabled INTEGER NOT NULL DEFAULT 1 CHECK (delivery_enabled IN (0, 1)),
+    bot_enabled INTEGER NOT NULL DEFAULT 0 CHECK (bot_enabled IN (0, 1)),
+    credentials_encrypted BYTEA NOT NULL,
+    connection_status TEXT NOT NULL DEFAULT 'disconnected'
+        CHECK (connection_status IN
+            ('disconnected', 'connecting', 'connected', 'error')),
+    last_connected_at TIMESTAMPTZ,
+    last_error_kind TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (platform <> 'bark' OR bot_enabled = 0)
+);
+
+COMMENT ON TABLE platform_integrations IS
+    'A platform connection holds app credentials (e.g. Feishu App ID/Secret)';
+COMMENT ON COLUMN platform_integrations.credentials_encrypted IS
+    'Versioned application-encrypted JSON; notification targets live in notification_channels';
+
+CREATE UNIQUE INDEX platform_integrations_one_bot_per_platform
+    ON platform_integrations (platform)
+    WHERE bot_enabled = 1;
+
+CREATE TABLE notification_channels (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    label TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    target_encrypted BYTEA NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+COMMENT ON COLUMN notification_channels.target_encrypted IS
+    'Versioned application-encrypted per-recipient target (e.g. Feishu chat/open id, Bark device key)';
+
+CREATE TABLE bot_bindings (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT,
+    conversation_type TEXT
+        CHECK (conversation_type IN ('private', 'group', 'channel')),
+    role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'read_only')),
+    label TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (integration_id, actor_id, conversation_id)
+);
+
+CREATE TABLE bot_pairing_tokens (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    requested_role TEXT NOT NULL
+        CHECK (requested_role IN ('owner', 'operator', 'read_only')),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE bot_inbound_events (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    platform_message_id TEXT NOT NULL,
+    platform_event_id TEXT,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    command_name TEXT,
+    status TEXT NOT NULL DEFAULT 'received'
+        CHECK (status IN
+            ('received', 'processing', 'succeeded', 'rejected', 'failed')),
+    error_kind TEXT,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMPTZ,
+    UNIQUE (integration_id, platform_message_id)
+);
+
+CREATE TABLE bot_outbox (
+    id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    inbound_event_id TEXT REFERENCES bot_inbound_events(id) ON DELETE SET NULL,
+    conversation_id TEXT NOT NULL,
+    reply_to_message_id TEXT,
+    message_kind TEXT NOT NULL
+        CHECK (message_kind IN ('text', 'image', 'card')),
+    payload_encrypted BYTEA NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sending', 'delivered', 'failed', 'dead')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_until TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    last_error_kind TEXT,
+    delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX bot_outbox_due
+    ON bot_outbox (status, next_attempt_at);
 
 CREATE TABLE watch_notification_authors (
     watch_id TEXT NOT NULL REFERENCES watch_targets(id) ON DELETE CASCADE,
@@ -285,3 +391,64 @@ CREATE TABLE system_alert_deliveries (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (outbox_id, attempt)
 );
+
+CREATE TABLE nga_account_renewal_settings (
+    account_id UUID PRIMARY KEY REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    login_name_encrypted BYTEA NOT NULL,
+    password_encrypted BYTEA NOT NULL,
+    bot_binding_id TEXT NOT NULL REFERENCES bot_bindings(id) ON DELETE RESTRICT,
+    credential_status TEXT NOT NULL DEFAULT 'ready'
+        CHECK (credential_status IN ('ready', 'invalid', 'cooldown')),
+    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TIMESTAMPTZ,
+    last_renewal_at TIMESTAMPTZ,
+    last_error_kind TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON COLUMN nga_account_renewal_settings.login_name_encrypted IS
+    'Optional renewal-only NGA login name; never used for crawling';
+COMMENT ON COLUMN nga_account_renewal_settings.password_encrypted IS
+    'Optional renewal-only NGA password; decrypted only inside a login flow';
+
+CREATE TABLE nga_login_sessions (
+    id TEXT PRIMARY KEY,
+    account_id UUID NOT NULL REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    bot_binding_id TEXT NOT NULL REFERENCES bot_bindings(id) ON DELETE RESTRICT,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('cookie_invalid', 'manual')),
+    status TEXT NOT NULL
+        CHECK (status IN (
+            'awaiting_confirmation',
+            'starting',
+            'awaiting_captcha',
+            'submitting',
+            'validating_cookie',
+            'succeeded',
+            'failed',
+            'cancelled',
+            'expired',
+            'unsupported_challenge'
+        )),
+    challenge_kind TEXT
+        CHECK (challenge_kind IN ('none', 'image', 'tencent', 'match_phone')),
+    protocol_context_encrypted BYTEA,
+    captcha_attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error_kind TEXT,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX nga_login_sessions_one_active_account
+    ON nga_login_sessions (account_id)
+    WHERE status IN (
+        'awaiting_confirmation', 'starting', 'awaiting_captcha',
+        'submitting', 'validating_cookie'
+    );

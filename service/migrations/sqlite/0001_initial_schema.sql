@@ -68,6 +68,8 @@ CREATE TABLE watch_targets (
     target_type TEXT NOT NULL CHECK (target_type IN ('thread', 'user')),
     target_id INTEGER NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    pause_reason TEXT
+        CHECK (pause_reason IN ('user', 'auth', 'error')),
     interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK (interval_seconds BETWEEN 30 AND 86400),
     schedule_json TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
@@ -153,15 +155,111 @@ CREATE TABLE post_events (
 CREATE INDEX post_events_occurred_at ON post_events (occurred_at);
 CREATE INDEX post_events_unread ON post_events (read_at, occurred_at);
 
-CREATE TABLE notification_channels (
+CREATE TABLE platform_integrations (
     id TEXT PRIMARY KEY,
-    channel_type TEXT NOT NULL CHECK (channel_type IN ('bark', 'feishu')),
+    platform TEXT NOT NULL
+        CHECK (platform IN ('bark', 'feishu', 'telegram', 'qq')),
     label TEXT NOT NULL UNIQUE,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    config_encrypted BLOB NOT NULL,
+    delivery_enabled INTEGER NOT NULL DEFAULT 1 CHECK (delivery_enabled IN (0, 1)),
+    bot_enabled INTEGER NOT NULL DEFAULT 0 CHECK (bot_enabled IN (0, 1)),
+    credentials_encrypted BLOB NOT NULL,
+    connection_status TEXT NOT NULL DEFAULT 'disconnected'
+        CHECK (connection_status IN
+            ('disconnected', 'connecting', 'connected', 'error')),
+    last_connected_at TEXT,
+    last_error_kind TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (platform <> 'bark' OR bot_enabled = 0)
+);
+
+CREATE UNIQUE INDEX platform_integrations_one_bot_per_platform
+    ON platform_integrations (platform)
+    WHERE bot_enabled = 1;
+
+CREATE TABLE notification_channels (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    label TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    target_encrypted BLOB NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE bot_bindings (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT,
+    conversation_type TEXT
+        CHECK (conversation_type IN ('private', 'group', 'channel')),
+    role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'read_only')),
+    label TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (integration_id, actor_id, conversation_id)
+);
+
+CREATE TABLE bot_pairing_tokens (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    requested_role TEXT NOT NULL
+        CHECK (requested_role IN ('owner', 'operator', 'read_only')),
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE bot_inbound_events (
+    id TEXT PRIMARY KEY,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE CASCADE,
+    platform_message_id TEXT NOT NULL,
+    platform_event_id TEXT,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    command_name TEXT,
+    status TEXT NOT NULL DEFAULT 'received'
+        CHECK (status IN
+            ('received', 'processing', 'succeeded', 'rejected', 'failed')),
+    error_kind TEXT,
+    received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TEXT,
+    UNIQUE (integration_id, platform_message_id)
+);
+
+CREATE TABLE bot_outbox (
+    id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    inbound_event_id TEXT REFERENCES bot_inbound_events(id) ON DELETE SET NULL,
+    conversation_id TEXT NOT NULL,
+    reply_to_message_id TEXT,
+    message_kind TEXT NOT NULL
+        CHECK (message_kind IN ('text', 'image', 'card')),
+    payload_encrypted BLOB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sending', 'delivered', 'failed', 'dead')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_until TEXT,
+    expires_at TEXT,
+    last_error_kind TEXT,
+    delivered_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX bot_outbox_due
+    ON bot_outbox (status, next_attempt_at);
 
 CREATE TABLE watch_notification_authors (
     watch_id TEXT NOT NULL REFERENCES watch_targets(id) ON DELETE CASCADE,
@@ -285,3 +383,59 @@ CREATE TABLE system_alert_deliveries (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (outbox_id, attempt)
 );
+
+CREATE TABLE nga_account_renewal_settings (
+    account_id TEXT PRIMARY KEY REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    login_name_encrypted BLOB NOT NULL,
+    password_encrypted BLOB NOT NULL,
+    bot_binding_id TEXT NOT NULL REFERENCES bot_bindings(id) ON DELETE RESTRICT,
+    credential_status TEXT NOT NULL DEFAULT 'ready'
+        CHECK (credential_status IN ('ready', 'invalid', 'cooldown')),
+    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TEXT,
+    last_renewal_at TEXT,
+    last_error_kind TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE nga_login_sessions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    bot_binding_id TEXT NOT NULL REFERENCES bot_bindings(id) ON DELETE RESTRICT,
+    integration_id TEXT NOT NULL
+        REFERENCES platform_integrations(id) ON DELETE RESTRICT,
+    actor_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('cookie_invalid', 'manual')),
+    status TEXT NOT NULL
+        CHECK (status IN (
+            'awaiting_confirmation',
+            'starting',
+            'awaiting_captcha',
+            'submitting',
+            'validating_cookie',
+            'succeeded',
+            'failed',
+            'cancelled',
+            'expired',
+            'unsupported_challenge'
+        )),
+    challenge_kind TEXT
+        CHECK (challenge_kind IN ('none', 'image', 'tencent', 'match_phone')),
+    protocol_context_encrypted BLOB,
+    captcha_attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error_kind TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+
+CREATE UNIQUE INDEX nga_login_sessions_one_active_account
+    ON nga_login_sessions (account_id)
+    WHERE status IN (
+        'awaiting_confirmation', 'starting', 'awaiting_captcha',
+        'submitting', 'validating_cookie'
+    );

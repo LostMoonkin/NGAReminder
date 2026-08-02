@@ -188,6 +188,7 @@ async fn collect(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_pages(
     state: &AppState,
     passport_uid: &secrecy::SecretString,
@@ -861,21 +862,9 @@ async fn record_failure(
         warn!(crawl_run_id = run_id, error = %db_error, "failed to record crawl failure");
     }
     if kind == "unauthorized"
-        && let Err(db_error) = sqlx::query(
-            "UPDATE nga_accounts SET status = 'paused', last_auth_error_kind = 'unauthorized',
-             last_auth_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-             WHERE label = 'default'",
-        )
-        .execute(&state.pool)
-        .await
+        && let Err(db_error) = crate::bot::session::on_auth_failure(state).await
     {
-        warn!(error = %db_error, "failed to pause rejected NGA account");
-    }
-    if kind == "unauthorized"
-        && let Err(db_error) =
-            notification::alerts::ensure_nga_credentials_invalid_alert(state).await
-    {
-        warn!(error = %db_error, "failed to enqueue NGA credential alert");
+        warn!(error = %db_error, "failed to handle NGA auth failure");
     }
 }
 
@@ -998,7 +987,7 @@ mod tests {
             credential_cipher: cipher,
             nga_client: NgaClient::new("test-agent".to_owned()).expect("test client must build"),
             admin_sessions: Arc::new(RwLock::new(HashSet::new())),
-            feishu_channel_updates: tokio::sync::watch::channel(()).0,
+            platform_updates: tokio::sync::watch::channel(()).0,
         };
 
         let created = watch::create_thread_watch(&pool, 1001, 60)

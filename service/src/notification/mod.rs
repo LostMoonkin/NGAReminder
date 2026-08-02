@@ -1,5 +1,4 @@
 pub mod alerts;
-pub mod receiver;
 pub mod sender;
 pub mod worker;
 
@@ -76,7 +75,9 @@ pub async fn enqueue_matches(
     let channels = sqlx::query(
         "SELECT wc.channel_id FROM watch_notification_channels wc
          JOIN notification_channels c ON c.id = wc.channel_id
-         WHERE wc.watch_id = $1 AND c.enabled = 1",
+         JOIN platform_integrations i ON i.id = c.integration_id
+         WHERE wc.watch_id = $1 AND c.enabled = 1
+           AND i.enabled = 1 AND i.delivery_enabled = 1",
     )
     .bind(watch_id)
     .fetch_all(&mut **tx)
@@ -148,9 +149,17 @@ mod tests {
         .await
         .expect("event must insert");
         sqlx::query(
+            "INSERT INTO platform_integrations
+             (id, platform, label, credentials_encrypted)
+             VALUES ('integration', 'bark', 'test', X'00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("integration must insert");
+        sqlx::query(
             "INSERT INTO notification_channels
-             (id, channel_type, label, config_encrypted)
-             VALUES ('channel', 'bark', 'test', X'00')",
+             (id, integration_id, label, target_encrypted)
+             VALUES ('channel', 'integration', 'test', X'00')",
         )
         .execute(&pool)
         .await
