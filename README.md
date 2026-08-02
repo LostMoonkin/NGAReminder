@@ -17,13 +17,13 @@ NGA Reminder 是一个面向 NGA 的主题与用户监控、内容持久化和�
 
 ## 服务端能力
 
-- 按 TID 监控 NGA 主题，保存主题、主楼、回复和可获取的楼中楼。
-- 按 UID 监控用户自己的主题和单条回复，不扩展保存其参与主题的其他楼层。
-- PostgreSQL 或 SQLite 持久化，支持基线导入、增量抓取、游标和自然键去重。
-- Bark 和飞书国内版企业应用机器人通知，支持 TID、UID、TID+UID 规则。
+- 按 TID 监控 NGA 主题，可选择全量历史或仅新增；历史回溯支持有界并发。
+- 按 UID 监控用户的新主题和回复，首次只建立当前水位，之后的新增内容落库用于重试和审计。
+- PostgreSQL 或 SQLite 持久化，支持动态时间段间隔、游标和自然键去重。
+- Bark 和飞书国内版企业应用机器人通知；渠道与 TID 作者 UID 过滤直接配置在监控目标中。
 - Transactional outbox、投递 lease、重试、死信和通知去重。
 - Markdown 与 ZIP 导出，支持图片资源元数据、本地下载和 SHA-256 内容寻址。
-- 响应式 `/admin` 管理台：Cookie、监控目标、通知渠道、规则、事件和导出管理。
+- 响应式 `/admin` 管理台：Cookie、监控目标与通知过滤、动态间隔、通知渠道、事件和导出管理。
 - `/health`、`/ready`、`/metrics`、结构化日志、请求 ID 和 NGA Cookie 失效告警。
 
 ## 快速启动服务端
@@ -104,9 +104,11 @@ POST   /api/v1/settings/nga-account
 POST   /api/v1/watches/threads
 POST   /api/v1/watches/users
 GET    /api/v1/watches
+GET/PATCH/DELETE /api/v1/watches/{id}
 POST   /api/v1/watches/{id}/run
+POST   /api/v1/watches/{id}/reset
+GET    /api/v1/watches/{id}/runs
 GET/POST/PATCH/DELETE /api/v1/channels...
-GET/POST/PATCH/DELETE /api/v1/notification-rules...
 GET    /api/v1/threads
 GET    /api/v1/threads/{tid}/posts
 GET    /api/v1/events
@@ -114,7 +116,7 @@ GET    /api/v1/exports/threads/{tid}?format=markdown|zip
 GET    /api/v1/exports/users/{uid}?format=markdown|zip
 ```
 
-首次创建监控目标会建立静默基线；后续抓取到的新内容才产生事件并进入通知 outbox。
+TID 可选择全量静默基线或仅建立当前水位；UID 首次只读取主题/回复列表首页建立水位。后续抓取到的新内容才产生事件并进入通知 outbox。
 
 ## 独立扩展
 
@@ -132,12 +134,12 @@ Standalone 扩展位于 [`extension-standalone/`](extension-standalone/)，无�
 - M1：Rust 服务骨架与双持久化后端——完成。
 - M2：Thread 全量与增量持久化——完成。
 - M3：User 监控——完成。
-- M4：通知规则、Bark 与飞书——验收完成。
+- M4：监控目标内嵌通知过滤、Bark 与飞书——验收完成。
 - M5：Markdown/ZIP 导出与资源持久化——验收完成。
 - M6：Web 管理页面——验收完成。
 - M7：生产加固——按 homeserver 单机部署范围验收完成。
 
-后续增强包括更完整的音频/视频附件提取、大主题流式导出、资源孤儿清理，以及管理台更细的用户视图、schedule 编辑和事件筛选。
+后续增强包括更完整的音频/视频附件提取、大主题流式导出、资源孤儿清理，以及旧父帖楼中楼的独立变化检测。
 
 ## 开发与验证
 

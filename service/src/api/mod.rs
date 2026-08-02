@@ -38,9 +38,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/watches", get(watch::list))
         .route("/api/v1/watches/threads", post(watch::create_thread))
         .route("/api/v1/watches/users", post(watch::create_user))
+        .route("/api/v1/watches/{id}", get(watch::get))
         .route("/api/v1/watches/{id}", patch(watch::update))
         .route("/api/v1/watches/{id}", delete(watch::delete))
         .route("/api/v1/watches/{id}/run", post(watch::run))
+        .route("/api/v1/watches/{id}/reset", post(watch::reset))
+        .route("/api/v1/watches/{id}/runs", get(watch::runs))
         .route("/api/v1/threads", get(query::threads))
         .route("/api/v1/threads/{tid}/posts", get(query::posts))
         .route("/api/v1/channels", get(notification::list_channels))
@@ -53,19 +56,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/channels/{id}/test",
             post(notification::test_channel),
-        )
-        .route("/api/v1/notification-rules", get(notification::list_rules))
-        .route(
-            "/api/v1/notification-rules",
-            post(notification::create_rule),
-        )
-        .route(
-            "/api/v1/notification-rules/{id}",
-            patch(notification::update_rule),
-        )
-        .route(
-            "/api/v1/notification-rules/{id}",
-            delete(notification::delete_rule),
         )
         .route("/api/v1/events", get(query::events))
         .route("/api/v1/events/{id}/read", post(query::mark_event_read))

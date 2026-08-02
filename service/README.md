@@ -127,7 +127,19 @@ Create a thread watch after configuring and testing the NGA account:
 curl -X POST http://127.0.0.1:8080/api/v1/watches/threads \
   -H "Authorization: Bearer $NGA_REMINDER__API_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"tid":12345678,"interval_seconds":60}'
+  --data '{
+    "tid": 12345678,
+    "interval_seconds": 60,
+    "history": {
+      "mode": "full",
+      "parallel_enabled": true,
+      "parallelism": 2
+    },
+    "notification": {
+      "channel_ids": ["channel-id"],
+      "author_uids": []
+    }
+  }'
 ```
 
 The worker picks up a new watch immediately. Its first crawl imports every accessible page as a
@@ -140,9 +152,12 @@ Available watch endpoints:
 GET    /api/v1/watches
 POST   /api/v1/watches/threads
 POST   /api/v1/watches/users
+GET    /api/v1/watches/{id}
 PATCH  /api/v1/watches/{id}
 DELETE /api/v1/watches/{id}
 POST   /api/v1/watches/{id}/run
+POST   /api/v1/watches/{id}/reset
+GET    /api/v1/watches/{id}/runs
 ```
 
 `interval_seconds` is optional and defaults to `scheduler.default_interval_seconds` in
@@ -180,12 +195,21 @@ curl -X POST http://127.0.0.1:8080/api/v1/watches/threads \
         "end_time": "23:59",
         "interval": 3600
       }
-    ]
+    ],
+    "history": {
+      "mode": "incremental",
+      "parallel_enabled": false,
+      "parallelism": 2
+    },
+    "notification": {
+      "channel_ids": ["channel-id"],
+      "author_uids": [150058]
+    }
   }'
 ```
 
 When a rule boundary is approaching, the scheduler runs no later than that boundary, so a long
-interval cannot skip a faster/slower rule transition. A `PATCH` with `schedule: []` clears the
+interval cannot skip a faster/slower rule transition. A `PATCH` with `schedule: null` clears the
 schedule and returns the watch to its fallback interval.
 
 Create a user watch:
@@ -194,12 +218,20 @@ Create a user watch:
 curl -X POST http://127.0.0.1:8080/api/v1/watches/users \
   -H "Authorization: Bearer $NGA_REMINDER__API_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"uid":150058,"interval_seconds":60}'
+  --data '{
+    "uid": 150058,
+    "interval_seconds": 60,
+    "notification": {
+      "channel_ids": ["channel-id"]
+    }
+  }'
 ```
 
-A user watch stores only that UID's topic post and individual replies; it never expands a
-participated TID into a full-thread crawl. The baseline is silent. Later list scans stop at the
-stored `(postdate, tid/pid)` boundary and fetch details only for new candidates. User-list NGA busy
+A user watch never imports history. Its first run records only the current topic/reply list
+watermarks and creates no posts or notifications. Later runs store that UID's newly discovered
+topic posts and individual replies for reliable delivery retries and audit, but never expand a
+participated TID into a full-thread crawl. List scans stop at the stored `(postdate, tid/pid)`
+boundary and fetch details only for new candidates. User-list NGA busy
 responses are retried once per second for ten total attempts; exhaustion records `skipped_busy`
 without advancing either cursor. If a thread detail returns `code=51`, the user crawl is recorded as
 `skipped_pending_review` and its cursors remain unchanged for the next scheduled run.
@@ -207,15 +239,13 @@ without advancing either cursor. If a thread detail returns `code=51`, the user 
 ## Notifications
 
 Notification channel secrets are encrypted at rest and never returned by list APIs. Supported
-channel types are `bark` and `feishu`. Rules require at least one of `tid` or `uid`; providing both
-uses AND semantics.
+channel types are `bark` and `feishu`. Notification matching is configured directly on each watch;
+the notification center manages channels only.
 
 ```text
 GET/POST    /api/v1/channels
 PATCH/DELETE /api/v1/channels/{id}
 POST        /api/v1/channels/{id}/test
-GET/POST    /api/v1/notification-rules
-PATCH/DELETE /api/v1/notification-rules/{id}
 ```
 
 Example Bark channel config:
@@ -248,9 +278,13 @@ application and source URL. A rejected host, failed download, failed upload, or 
 first three is rendered as a source link instead, so image handling never blocks the text
 notification. The Feishu application therefore also needs the image/file resource upload scope.
 
-Matching is transactional with post-event creation. Multiple TID/UID rules targeting the same
-channel share one outbox row. Delivery retries transient failures up to five attempts and records
-each attempt without logging channel secrets.
+Matching is transactional with post-event creation. A TID watch optionally filters each new post
+by author UID; a UID watch always matches its target UID. Multiple watches targeting the same event
+and channel share one outbox row while retaining every source-watch relationship for audit.
+Delivery retries transient failures up to five attempts and records each attempt without logging
+channel secrets. Disabling a channel pauses both new enqueue operations and existing retries;
+channels referenced by watches or outbox records cannot be deleted until those references are
+removed.
 
 Reply actions use the persisted page number and NGA's in-thread anchor format:
 `read.php?tid={tid}&page={page}#pid{pid}Anchor`. Opening a notification therefore shows the full

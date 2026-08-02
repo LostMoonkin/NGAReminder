@@ -204,7 +204,8 @@ execute page JavaScript.
 Useful fields include `uid`, `username`, `groupid`, `avatar`, `regdate`, `lastpost`, `posts`, and `sign`.
 
 For a tested nonexistent UID, the profile endpoint returned HTTP 200 and a GBK page without a
-`__UCPUSER` object. Validate a new UID watch with this endpoint before scheduling list requests.
+`__UCPUSER` object. The redesigned UID collector does not persist profiles and does not require this
+endpoint during normal polling; it remains available as an optional diagnostic probe.
 The user-topic list endpoint returned an empty HTTP 503 for the nonexistent UID; this is recorded as an
 observed transport outcome, not treated as an empty successful list or a stable NGA business code.
 
@@ -213,10 +214,11 @@ observed transport outcome, not treated as an empty successful list or a stable 
 - Topic posts are unique by TID and topic kind because their PID may be zero.
 - Reply/comment natural keys use `(tid, pid)`; parent-child relations are separate.
 - Live inserts use `INSERT ... ON CONFLICT DO NOTHING RETURNING id`.
-- Only a successful live insert creates a `post_event`; baseline imports do not notify.
+- A live discovery creates or reuses one `post_event`, even when another watch already stored the post;
+  baseline imports do not notify.
 - `post_events` are unique by `(post_id, event_type)`.
 - Notification outbox rows are unique by `(post_event_id, channel_id)`.
-- TID and UID rules may both be recorded in `post_event_matches`, but they share one channel delivery.
+- TID and UID sources may both be recorded in `post_event_watch_matches`, but they share one channel delivery.
 - Discovery order—TID then UID, UID then TID, or concurrent—must not change the single-delivery result.
 
 ## Deferred probe

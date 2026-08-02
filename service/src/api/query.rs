@@ -13,6 +13,14 @@ pub struct LimitQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EventQuery {
+    limit: Option<i64>,
+    watch_id: Option<String>,
+    tid: Option<i64>,
+    uid: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OverviewResponse {
     pub service: &'static str,
@@ -65,6 +73,7 @@ pub struct EventView {
     pub preview: String,
     pub occurred_at: String,
     pub read_at: Option<String>,
+    pub uid_watch_source: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,10 +91,14 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 pub async fn overview(State(state): State<AppState>) -> ApiResult<OverviewResponse> {
     let threads = count(&state, "SELECT COUNT(*) FROM threads").await?;
     let posts = count(&state, "SELECT COUNT(*) FROM posts").await?;
-    let watches = count(&state, "SELECT COUNT(*) FROM watch_targets").await?;
+    let watches = count(
+        &state,
+        "SELECT COUNT(*) FROM watch_targets WHERE deleted_at IS NULL",
+    )
+    .await?;
     let active_watches = count(
         &state,
-        "SELECT COUNT(*) FROM watch_targets WHERE enabled = 1",
+        "SELECT COUNT(*) FROM watch_targets WHERE enabled = 1 AND deleted_at IS NULL",
     )
     .await?;
     let unread_events = count(
@@ -161,18 +174,35 @@ pub async fn posts(
 
 pub async fn events(
     State(state): State<AppState>,
-    Query(query): Query<LimitQuery>,
+    Query(query): Query<EventQuery>,
 ) -> ApiResult<ListResponse<EventView>> {
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let watch_id = query.watch_id.unwrap_or_default();
+    let tid = query.tid.unwrap_or_default();
+    let uid = query.uid.unwrap_or_default();
     let rows = sqlx::query(
         "SELECT e.id, e.event_type, e.post_id, p.tid, p.pid, t.title AS thread_title,
          p.author_name, p.content_raw, CAST(e.occurred_at AS TEXT) AS occurred_at,
-         CAST(e.read_at AS TEXT) AS read_at
+         CAST(e.read_at AS TEXT) AS read_at,
+         CASE WHEN EXISTS (
+             SELECT 1 FROM post_event_watch_matches source
+             JOIN watch_targets source_watch ON source_watch.id = source.watch_id
+             WHERE source.post_event_id = e.id AND source_watch.target_type = 'user'
+         ) THEN 1 ELSE 0 END AS uid_watch_source
          FROM post_events e
          JOIN posts p ON p.id = e.post_id
          JOIN threads t ON t.tid = p.tid
-         ORDER BY e.occurred_at DESC LIMIT $1",
+         WHERE ($1 = '' OR EXISTS (
+             SELECT 1 FROM post_event_watch_matches filter_source
+             WHERE filter_source.post_event_id = e.id AND filter_source.watch_id = $1
+         ))
+           AND ($2 = 0 OR p.tid = $2)
+           AND ($3 = 0 OR p.author_uid = $3)
+         ORDER BY e.occurred_at DESC LIMIT $4",
     )
+    .bind(watch_id)
+    .bind(tid)
+    .bind(uid)
     .bind(limit)
     .fetch_all(&state.pool)
     .await
@@ -268,6 +298,7 @@ fn map_event(row: &sqlx::any::AnyRow) -> EventView {
         preview: preview(row.get("content_raw")),
         occurred_at: row.get("occurred_at"),
         read_at: row.get("read_at"),
+        uid_watch_source: row.get::<i32, _>("uid_watch_source") == 1,
     }
 }
 

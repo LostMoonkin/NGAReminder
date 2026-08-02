@@ -26,8 +26,15 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
             }
             _ = scheduler.tick() => {
                 metrics::worker_cycle();
-                while assets::process_one(&state).await? {
-                    metrics::asset_job();
+                loop {
+                    match assets::process_one(&state).await {
+                        Ok(true) => metrics::asset_job(),
+                        Ok(false) => break,
+                        Err(error) => {
+                            warn!(error = %error, "asset job failed; it will be retried on a later cycle");
+                            break;
+                        }
+                    }
                 }
                 while notification::worker::process_one(&state).await? {
                     metrics::notification_job();

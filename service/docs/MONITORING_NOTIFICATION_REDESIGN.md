@@ -337,11 +337,13 @@ POST /api/v1/watches/{id}/reset
 
 ```json
 {
-  "history_mode": "incremental"
+  "history_mode": "incremental",
+  "parallel_enabled": false,
+  "parallelism": 2
 }
 ```
 
-- `history_mode = full`：原子更新 TID 初始化配置并清空 watch 游标，下一轮重新执行全量静默回溯。
+- `history_mode = full`：原子更新 TID 初始化配置（包括并发开关和并发数）并清空 watch 游标，下一轮重新执行全量静默回溯。
 - `history_mode = incremental`：原子更新配置并清空 watch 游标，下一轮只建立新的当前水位。
 - reset 不删除已有 TID 内容；full 重跑通过自然键去重，incremental 只改变后续水位。
 

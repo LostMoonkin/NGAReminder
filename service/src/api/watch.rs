@@ -1,9 +1,12 @@
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use sqlx::Row;
 
 use crate::{
     app::AppState,
@@ -11,9 +14,26 @@ use crate::{
         thread::{self, ThreadCollectorError},
         user::{self, UserCollectorError},
     },
-    repository::watch::{self, CreateWatchError, WatchTarget},
+    repository::watch::{self, CreateWatchError, ResetWatchError, WatchTarget},
     schedule::{self, Schedule},
 };
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryRequest {
+    #[serde(default = "default_history_mode")]
+    mode: String,
+    #[serde(default)]
+    parallel_enabled: bool,
+    #[serde(default = "default_parallelism")]
+    parallelism: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationRequest {
+    channel_ids: Vec<String>,
+    #[serde(default)]
+    author_uids: Option<Vec<i64>>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateThreadWatchRequest {
@@ -21,22 +41,55 @@ pub struct CreateThreadWatchRequest {
     interval_seconds: Option<i32>,
     #[serde(default)]
     schedule: Option<Schedule>,
+    #[serde(default)]
+    history: Option<HistoryRequest>,
+    notification: NotificationRequest,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateUserWatchRequest {
     uid: i64,
     interval_seconds: Option<i32>,
     #[serde(default)]
     schedule: Option<Schedule>,
+    notification: NotificationRequest,
+}
+
+#[derive(Debug, Default)]
+enum PatchField<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+fn deserialize_patch_field<'de, D, T>(deserializer: D) -> Result<PatchField<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Option::<T>::deserialize(deserializer)? {
+        Some(value) => PatchField::Value(value),
+        None => PatchField::Null,
+    })
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWatchRequest {
     enabled: Option<bool>,
     interval_seconds: Option<i32>,
-    #[serde(default)]
-    schedule: Option<Schedule>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    schedule: PatchField<Schedule>,
+    history: Option<HistoryRequest>,
+    notification: Option<NotificationRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetWatchRequest {
+    history_mode: Option<String>,
+    parallel_enabled: Option<bool>,
+    parallelism: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,11 +105,49 @@ pub struct WatchResponse {
     next_run_at: String,
     last_completed_at: Option<String>,
     last_error_kind: Option<String>,
+    history: Option<HistoryResponse>,
+    notification: NotificationResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryResponse {
+    mode: String,
+    parallel_enabled: bool,
+    parallelism: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotificationResponse {
+    channel_ids: Vec<String>,
+    author_uids: Vec<i64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WatchListResponse {
     items: Vec<WatchResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunView {
+    id: String,
+    status: String,
+    baseline: bool,
+    sync_mode: String,
+    pages_requested: i32,
+    posts_inserted: i32,
+    events_created: i32,
+    matches_created: i32,
+    outbox_enqueued: i32,
+    remote_vrows: Option<i32>,
+    error_kind: Option<String>,
+    error_message: Option<String>,
+    started_at: String,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunListResponse {
+    items: Vec<RunView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +164,18 @@ pub async fn list(State(state): State<AppState>) -> ApiResult<WatchListResponse>
     }))
 }
 
+pub async fn get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<WatchResponse> {
+    watch::find(&state.pool, &id)
+        .await
+        .map_err(internal_error)?
+        .map(WatchResponse::from)
+        .map(Json)
+        .ok_or_else(not_found)
+}
+
 pub async fn create_thread(
     State(state): State<AppState>,
     Json(request): Json<CreateThreadWatchRequest>,
@@ -80,29 +183,37 @@ pub async fn create_thread(
     let interval_seconds = request
         .interval_seconds
         .unwrap_or(state.config.scheduler.default_interval_seconds);
+    let history = request.history.unwrap_or(HistoryRequest {
+        mode: default_history_mode(),
+        parallel_enabled: false,
+        parallelism: default_parallelism(),
+    });
     if request.tid <= 0
         || !valid_interval(interval_seconds)
         || !valid_schedule(request.schedule.as_ref())
+        || !valid_history(&history)
+        || !valid_notification(&request.notification, true)
     {
         return Err(bad_request());
     }
-    let watch = watch::create_thread_watch_with_schedule(
-        &state.pool,
-        request.tid,
-        interval_seconds,
-        request.schedule.as_ref(),
+    map_create(
+        watch::create_thread_watch_with_config(
+            &state.pool,
+            request.tid,
+            interval_seconds,
+            request.schedule.as_ref(),
+            &history.mode,
+            history.parallel_enabled,
+            history.parallelism,
+            request
+                .notification
+                .author_uids
+                .as_deref()
+                .unwrap_or_default(),
+            &request.notification.channel_ids,
+        )
+        .await,
     )
-    .await;
-    match watch {
-        Ok(watch) => Ok((StatusCode::CREATED, Json(watch.into()))),
-        Err(CreateWatchError::Conflict) => Err((
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "watch_already_exists",
-            }),
-        )),
-        Err(CreateWatchError::Database(error)) => Err(internal_error(error)),
-    }
 }
 
 pub async fn create_user(
@@ -115,26 +226,20 @@ pub async fn create_user(
     if request.uid <= 0
         || !valid_interval(interval_seconds)
         || !valid_schedule(request.schedule.as_ref())
+        || !valid_notification(&request.notification, false)
     {
         return Err(bad_request());
     }
-    match watch::create_user_watch_with_schedule(
-        &state.pool,
-        request.uid,
-        interval_seconds,
-        request.schedule.as_ref(),
+    map_create(
+        watch::create_user_watch_with_config(
+            &state.pool,
+            request.uid,
+            interval_seconds,
+            request.schedule.as_ref(),
+            &request.notification.channel_ids,
+        )
+        .await,
     )
-    .await
-    {
-        Ok(watch) => Ok((StatusCode::CREATED, Json(watch.into()))),
-        Err(CreateWatchError::Conflict) => Err((
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "watch_already_exists",
-            }),
-        )),
-        Err(CreateWatchError::Database(error)) => Err(internal_error(error)),
-    }
 }
 
 pub async fn update(
@@ -142,29 +247,123 @@ pub async fn update(
     Path(id): Path<String>,
     Json(request): Json<UpdateWatchRequest>,
 ) -> ApiResult<WatchResponse> {
-    if request.enabled.is_none() && request.interval_seconds.is_none() && request.schedule.is_none()
+    let has_schedule = !matches!(request.schedule, PatchField::Missing);
+    if request.enabled.is_none()
+        && request.interval_seconds.is_none()
+        && !has_schedule
+        && request.history.is_none()
+        && request.notification.is_none()
     {
         return Err(bad_request());
     }
     if request
         .interval_seconds
         .is_some_and(|interval| !valid_interval(interval))
-        || !valid_schedule(request.schedule.as_ref())
+        || matches!(&request.schedule, PatchField::Value(value) if !valid_schedule(Some(value)))
+        || request
+            .history
+            .as_ref()
+            .is_some_and(|value| !valid_history(value))
     {
         return Err(bad_request());
     }
-    let schedule_update = request.schedule.as_ref().map(Some);
-    let watch = watch::update_with_schedule(
+    let current = watch::find(&state.pool, &id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if current.target_type == "user" && request.history.is_some() {
+        return Err(bad_request());
+    }
+    if current.baseline_completed && request.history.is_some() {
+        return Err(conflict("history_requires_reset"));
+    }
+    if let Some(notification) = &request.notification
+        && !valid_notification(notification, current.target_type == "thread")
+    {
+        return Err(bad_request());
+    }
+
+    let schedule = match &request.schedule {
+        PatchField::Missing => None,
+        PatchField::Null => Some(None),
+        PatchField::Value(value) => Some(Some(value)),
+    };
+    let history_mode = request.history.as_ref().map(|value| value.mode.as_str());
+    let history_parallel_enabled = request.history.as_ref().map(|value| value.parallel_enabled);
+    let history_parallelism = request.history.as_ref().map(|value| value.parallelism);
+    let author_uids = request
+        .notification
+        .as_ref()
+        .filter(|_| current.target_type == "thread")
+        .map(|value| value.author_uids.as_deref().unwrap_or_default());
+    let channel_ids = request
+        .notification
+        .as_ref()
+        .map(|value| value.channel_ids.as_slice());
+
+    watch::update_with_config(
         &state.pool,
         &id,
         request.enabled,
         request.interval_seconds,
-        schedule_update,
+        schedule,
+        history_mode,
+        history_parallel_enabled,
+        history_parallelism,
+        author_uids,
+        channel_ids,
     )
     .await
-    .map_err(internal_error)?
-    .ok_or_else(not_found)?;
-    Ok(Json(watch.into()))
+    .map_err(map_create_error)?
+    .map(WatchResponse::from)
+    .map(Json)
+    .ok_or_else(not_found)
+}
+
+pub async fn reset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ResetWatchRequest>,
+) -> ApiResult<WatchResponse> {
+    let current = watch::find(&state.pool, &id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if current.target_type == "thread" {
+        if !matches!(
+            request.history_mode.as_deref(),
+            Some("full" | "incremental")
+        ) {
+            return Err(bad_request());
+        }
+        if request
+            .parallelism
+            .is_some_and(|value| !(1..=16).contains(&value))
+            || (request.history_mode.as_deref() == Some("incremental")
+                && request.parallel_enabled == Some(true))
+        {
+            return Err(bad_request());
+        }
+    } else if request.history_mode.is_some()
+        || request.parallel_enabled.is_some()
+        || request.parallelism.is_some()
+    {
+        return Err(bad_request());
+    }
+    match watch::reset(
+        &state.pool,
+        &id,
+        request.history_mode.as_deref(),
+        request.parallel_enabled,
+        request.parallelism,
+    )
+    .await
+    {
+        Ok(Some(value)) => Ok(Json(value.into())),
+        Ok(None) => Err(not_found()),
+        Err(ResetWatchError::Busy) => Err(conflict("watch_running")),
+        Err(ResetWatchError::Database(error)) => Err(internal_error(error)),
+    }
 }
 
 pub async fn delete(
@@ -181,87 +380,178 @@ pub async fn delete(
     }
 }
 
+pub async fn runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<RunListResponse> {
+    watch::find(&state.pool, &id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let rows = sqlx::query(
+        "SELECT id, status, baseline, sync_mode, pages_requested, posts_inserted,
+         events_created, matches_created, outbox_enqueued, remote_vrows,
+         error_kind, error_message, CAST(started_at AS TEXT) AS started_at,
+         CAST(completed_at AS TEXT) AS completed_at
+         FROM crawl_runs WHERE watch_id = $1 ORDER BY started_at DESC LIMIT 100",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(RunListResponse {
+        items: rows
+            .iter()
+            .map(|row| RunView {
+                id: row.get("id"),
+                status: row.get("status"),
+                baseline: row.get::<i32, _>("baseline") == 1,
+                sync_mode: row.get("sync_mode"),
+                pages_requested: row.get("pages_requested"),
+                posts_inserted: row.get("posts_inserted"),
+                events_created: row.get("events_created"),
+                matches_created: row.get("matches_created"),
+                outbox_enqueued: row.get("outbox_enqueued"),
+                remote_vrows: row.get("remote_vrows"),
+                error_kind: row.get("error_kind"),
+                error_message: row.get("error_message"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+            })
+            .collect(),
+    }))
+}
+
 pub async fn run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    let _watch = watch::find(&state.pool, &id)
+    watch::find(&state.pool, &id)
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
     let claimed = watch::claim_by_id(&state.pool, state.config.database_backend, &id)
         .await
         .map_err(internal_error)?
-        .ok_or((
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "watch_already_running",
-            }),
-        ))?;
+        .ok_or_else(|| conflict("watch_already_running"))?;
 
     match claimed.target_type.as_str() {
         "thread" => thread::run(&state, claimed)
             .await
             .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
-            .map_err(|error| {
-                let (status, kind) = match error {
-                    ThreadCollectorError::Credentials => (
-                        StatusCode::PRECONDITION_FAILED,
-                        "nga_account_not_configured",
-                    ),
-                    ThreadCollectorError::Nga(crate::nga::NgaRequestError::NotFound) => {
-                        (StatusCode::NOT_FOUND, "nga_thread_not_found")
-                    }
-                    ThreadCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
-                        (StatusCode::UNAUTHORIZED, "nga_unauthorized")
-                    }
-                    ThreadCollectorError::Nga(_) | ThreadCollectorError::Parse(_) => {
-                        (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
-                    }
-                    ThreadCollectorError::Database(_) | ThreadCollectorError::InvalidWatch => {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                    }
-                };
-                (status, Json(ApiError { error: kind }))
-            }),
+            .map_err(map_thread_error),
         "user" => user::run(&state, claimed)
             .await
             .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
-            .map_err(|error| {
-                let (status, kind) = match error {
-                    UserCollectorError::Credentials => (
-                        StatusCode::PRECONDITION_FAILED,
-                        "nga_account_not_configured",
-                    ),
-                    UserCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
-                        (StatusCode::UNAUTHORIZED, "nga_unauthorized")
-                    }
-                    UserCollectorError::UserParse(
-                        crate::nga::user_parser::UserParseError::ProfileNotFound
-                        | crate::nga::user_parser::UserParseError::UidMismatch,
-                    ) => (StatusCode::NOT_FOUND, "nga_user_not_found"),
-                    UserCollectorError::Nga(_)
-                    | UserCollectorError::ThreadParse(_)
-                    | UserCollectorError::UserParse(_)
-                    | UserCollectorError::InvalidDetail => {
-                        (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
-                    }
-                    UserCollectorError::Database(_) | UserCollectorError::InvalidWatch => {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                    }
-                };
-                (status, Json(ApiError { error: kind }))
-            }),
+            .map_err(map_user_error),
         _ => Err(bad_request()),
     }
+}
+
+fn map_create(
+    result: Result<WatchTarget, CreateWatchError>,
+) -> Result<(StatusCode, Json<WatchResponse>), (StatusCode, Json<ApiError>)> {
+    result
+        .map(|watch| (StatusCode::CREATED, Json(watch.into())))
+        .map_err(map_create_error)
+}
+
+fn map_create_error(error: CreateWatchError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        CreateWatchError::Conflict => conflict("watch_already_exists"),
+        CreateWatchError::InvalidChannel => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "invalid_notification_channel",
+            }),
+        ),
+        CreateWatchError::Database(error) => internal_error(error),
+    }
+}
+
+fn map_thread_error(error: ThreadCollectorError) -> (StatusCode, Json<ApiError>) {
+    let (status, kind) = match error {
+        ThreadCollectorError::Credentials => (
+            StatusCode::PRECONDITION_FAILED,
+            "nga_account_not_configured",
+        ),
+        ThreadCollectorError::Nga(crate::nga::NgaRequestError::NotFound) => {
+            (StatusCode::NOT_FOUND, "nga_thread_not_found")
+        }
+        ThreadCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
+            (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+        }
+        ThreadCollectorError::Nga(_) | ThreadCollectorError::Parse(_) => {
+            (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
+        }
+        ThreadCollectorError::Database(_) | ThreadCollectorError::InvalidWatch => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    };
+    (status, Json(ApiError { error: kind }))
+}
+
+fn map_user_error(error: UserCollectorError) -> (StatusCode, Json<ApiError>) {
+    let (status, kind) = match error {
+        UserCollectorError::Credentials => (
+            StatusCode::PRECONDITION_FAILED,
+            "nga_account_not_configured",
+        ),
+        UserCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
+            (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+        }
+        UserCollectorError::UserParse(
+            crate::nga::user_parser::UserParseError::ProfileNotFound
+            | crate::nga::user_parser::UserParseError::UidMismatch,
+        ) => (StatusCode::NOT_FOUND, "nga_user_not_found"),
+        UserCollectorError::Nga(_)
+        | UserCollectorError::ThreadParse(_)
+        | UserCollectorError::UserParse(_)
+        | UserCollectorError::InvalidDetail => (StatusCode::BAD_GATEWAY, "nga_crawl_failed"),
+        UserCollectorError::Database(_) | UserCollectorError::InvalidWatch => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        }
+    };
+    (status, Json(ApiError { error: kind }))
 }
 
 fn valid_interval(value: i32) -> bool {
     schedule::validate_interval(value)
 }
 
-fn valid_schedule(schedule: Option<&Schedule>) -> bool {
-    schedule.is_none_or(|items| schedule::validate_schedule(items).is_ok())
+fn valid_schedule(value: Option<&Schedule>) -> bool {
+    value.is_none_or(|items| schedule::validate_schedule(items).is_ok())
+}
+
+fn valid_history(value: &HistoryRequest) -> bool {
+    matches!(value.mode.as_str(), "full" | "incremental")
+        && (1..=16).contains(&value.parallelism)
+        && (value.mode == "full" || !value.parallel_enabled)
+}
+
+fn valid_notification(value: &NotificationRequest, allow_authors: bool) -> bool {
+    !value.channel_ids.is_empty()
+        && unique(&value.channel_ids)
+        && (allow_authors || value.author_uids.is_none())
+        && value
+            .author_uids
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .all(|uid| *uid > 0)
+        && unique(value.author_uids.as_deref().unwrap_or_default())
+}
+
+fn unique<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
+    values.iter().collect::<HashSet<_>>().len() == values.len()
+}
+
+fn default_history_mode() -> String {
+    "full".to_owned()
+}
+
+fn default_parallelism() -> i32 {
+    2
 }
 
 fn bad_request() -> (StatusCode, Json<ApiError>) {
@@ -280,6 +570,10 @@ fn not_found() -> (StatusCode, Json<ApiError>) {
             error: "watch_not_found",
         }),
     )
+}
+
+fn conflict(error: &'static str) -> (StatusCode, Json<ApiError>) {
+    (StatusCode::CONFLICT, Json(ApiError { error }))
 }
 
 fn internal_error(_: sqlx::Error) -> (StatusCode, Json<ApiError>) {
@@ -305,6 +599,57 @@ impl From<WatchTarget> for WatchResponse {
             next_run_at: value.next_run_at,
             last_completed_at: value.last_completed_at,
             last_error_kind: value.last_error_kind,
+            history: value.history_mode.map(|mode| HistoryResponse {
+                mode,
+                parallel_enabled: value.history_parallel_enabled,
+                parallelism: value.history_parallelism,
+            }),
+            notification: NotificationResponse {
+                channel_ids: value.channel_ids,
+                author_uids: value.author_uids,
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_create_rejects_tid_only_fields() {
+        let history = serde_json::from_str::<CreateUserWatchRequest>(
+            r#"{
+                "uid": 150058,
+                "history": {"mode": "full"},
+                "notification": {"channel_ids": ["channel-id"]}
+            }"#,
+        );
+        assert!(history.is_err());
+
+        let request = serde_json::from_str::<CreateUserWatchRequest>(
+            r#"{
+                "uid": 150058,
+                "notification": {
+                    "channel_ids": ["channel-id"],
+                    "author_uids": []
+                }
+            }"#,
+        )
+        .expect("notification body should deserialize before semantic validation");
+        assert!(!valid_notification(&request.notification, false));
+    }
+
+    #[test]
+    fn thread_notification_defaults_to_all_authors() {
+        let request = serde_json::from_str::<CreateThreadWatchRequest>(
+            r#"{
+                "tid": 47264819,
+                "notification": {"channel_ids": ["channel-id"]}
+            }"#,
+        )
+        .expect("thread request should deserialize");
+        assert!(valid_notification(&request.notification, true));
+        assert!(request.notification.author_uids.is_none());
     }
 }

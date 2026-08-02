@@ -129,11 +129,12 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
         "UPDATE notification_outbox SET status = 'sending',
          attempt_count = attempt_count + 1, lease_until = {lease}
          WHERE id = (
-           SELECT id FROM notification_outbox
-           WHERE status IN ('pending', 'failed')
+           SELECT o.id FROM notification_outbox o
+           JOIN notification_channels c ON c.id = o.channel_id
+           WHERE c.enabled = 1 AND o.status IN ('pending', 'failed')
              AND next_attempt_at <= CURRENT_TIMESTAMP
-             AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
-           ORDER BY next_attempt_at, created_at LIMIT 1
+             AND (o.lease_until IS NULL OR o.lease_until <= CURRENT_TIMESTAMP)
+           ORDER BY o.next_attempt_at, o.created_at LIMIT 1
          )
          AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
          RETURNING id"

@@ -166,15 +166,23 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
     let id: String = row.get("id");
     let source_url: String = row.get("source_url");
     let original_name: Option<String> = row.get("original_name");
-    sqlx::query("UPDATE assets SET download_status = 'downloading' WHERE id = $1")
-        .bind(&id)
-        .execute(&state.pool)
-        .await?;
+    let claimed = sqlx::query(
+        "UPDATE assets SET download_status = 'downloading'
+         WHERE id = $1 AND download_status = 'pending'",
+    )
+    .bind(&id)
+    .execute(&state.pool)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        // Another worker claimed the row after our SELECT. Report progress so
+        // this worker continues looking for another pending asset.
+        return Ok(true);
+    }
 
     let result = download_asset(&state.config.assets, &source_url, original_name.as_deref()).await;
     match result {
         Ok((hash, relative_path, mime_type, size)) => {
-            sqlx::query(
+            let update = sqlx::query(
                 "UPDATE assets SET content_hash = $1, mime_type = $2, size_bytes = $3,
                  local_relative_path = $4, download_status = 'ready', downloaded_at = CURRENT_TIMESTAMP,
                  last_error_kind = NULL WHERE id = $5",
@@ -183,9 +191,21 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
             .bind(mime_type)
             .bind(size as i64)
             .bind(relative_path)
-            .bind(id)
+            .bind(&id)
             .execute(&state.pool)
-            .await?;
+            .await;
+            if let Err(error) = update {
+                // The claim is committed before the network request. Make the
+                // job retryable if final metadata persistence fails.
+                let _ = sqlx::query(
+                    "UPDATE assets SET download_status = 'pending', last_error_kind = 'database_error'
+                     WHERE id = $1 AND download_status = 'downloading'",
+                )
+                .bind(&id)
+                .execute(&state.pool)
+                .await;
+                return Err(error.into());
+            }
         }
         Err(error) => {
             sqlx::query(
@@ -426,5 +446,42 @@ mod tests {
             .unwrap();
         assert_eq!(assets, 2);
         assert_eq!(links, 2);
+    }
+
+    #[tokio::test]
+    async fn different_source_urls_may_share_the_same_content_hash() {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&pool)
+            .await
+            .unwrap();
+
+        for (id, source_url) in [
+            ("a", "https://img.nga.cn/a.jpg"),
+            ("b", "https://img4.nga.178.com/a.jpg"),
+        ] {
+            sqlx::query(
+                "INSERT INTO assets (id, source_url, content_hash, download_status)
+                 VALUES ($1, $2, $3, 'ready')",
+            )
+            .bind(id)
+            .bind(source_url)
+            .bind("same-content")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE content_hash = $1")
+            .bind("same-content")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

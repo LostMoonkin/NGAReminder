@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use futures_util::{StreamExt, TryStreamExt, stream};
 use secrecy::ExposeSecret;
 use sqlx::{Any, Row, Transaction};
 use thiserror::Error;
@@ -26,6 +27,8 @@ pub struct CrawlSummary {
     pub pages_requested: i32,
     pub posts_inserted: i32,
     pub events_created: i32,
+    pub matches_created: i32,
+    pub outbox_enqueued: i32,
     pub remote_vrows: i32,
     pub last_floor: i32,
 }
@@ -53,8 +56,16 @@ pub async fn run(
     }
 
     let baseline = !watch_target.baseline_completed;
+    let sync_mode = if baseline {
+        match watch_target.history_mode.as_deref() {
+            Some("incremental") => "tid_incremental_baseline",
+            _ => "tid_full_baseline",
+        }
+    } else {
+        "incremental"
+    };
     let run_id = Uuid::new_v4().to_string();
-    create_crawl_run(state, &run_id, &watch_target.id, baseline).await?;
+    create_crawl_run(state, &run_id, &watch_target.id, baseline, sync_mode).await?;
 
     match collect(state, &run_id, &watch_target, baseline).await {
         Ok(summary) => Ok(summary),
@@ -75,6 +86,8 @@ pub async fn run(
                 pages_requested: 0,
                 posts_inserted: 0,
                 events_created: 0,
+                matches_created: 0,
+                outbox_enqueued: 0,
                 remote_vrows: 0,
                 last_floor: -1,
             })
@@ -109,62 +122,117 @@ async fn collect(
     }
 
     let mut pages = vec![first_page];
-    if baseline {
+    let history_mode = watch_target.history_mode.as_deref().unwrap_or("full");
+    let persist_content = !(baseline && history_mode == "incremental");
+    if baseline && history_mode == "incremental" {
+        let last_page = pages[0].metadata.total_pages;
+        if last_page > 1 {
+            fetch_pages(
+                state,
+                &passport_uid,
+                &passport_cid,
+                &watch_target.id,
+                watch_target.target_id,
+                last_page,
+                last_page,
+                1,
+                &mut pages,
+            )
+            .await?;
+        }
+    } else if baseline {
+        let concurrency = if watch_target.history_parallel_enabled {
+            usize::try_from(watch_target.history_parallelism).unwrap_or(2)
+        } else {
+            1
+        };
         fetch_pages(
             state,
             &passport_uid,
             &passport_cid,
+            &watch_target.id,
             watch_target.target_id,
             2,
             pages[0].metadata.total_pages,
+            concurrency,
             &mut pages,
         )
         .await?;
-    } else if pages[0].metadata.vrows > cursor.remote_vrows {
+    } else if pages[0].metadata.vrows > cursor.remote_vrows
+        || pages[0].metadata.total_pages > cursor.remote_total_pages
+    {
         let start_page = cursor.last_floor.div_euclid(pages[0].metadata.per_page) + 1;
         fetch_pages(
             state,
             &passport_uid,
             &passport_cid,
+            &watch_target.id,
             watch_target.target_id,
             start_page.max(2),
             pages[0].metadata.total_pages,
+            2,
             &mut pages,
         )
         .await?;
     }
 
-    persist_pages(state, run_id, watch_target, &cursor, baseline, pages).await
+    persist_pages(
+        state,
+        run_id,
+        watch_target,
+        &cursor,
+        baseline,
+        persist_content,
+        pages,
+    )
+    .await
 }
 
 async fn fetch_pages(
     state: &AppState,
     passport_uid: &secrecy::SecretString,
     passport_cid: &secrecy::SecretString,
+    watch_id: &str,
     tid: i64,
     start_page: i32,
     end_page: i32,
+    concurrency: usize,
     pages: &mut Vec<ThreadPage>,
 ) -> Result<(), ThreadCollectorError> {
     if start_page > end_page {
         return Ok(());
     }
-    for page_number in start_page..=end_page {
-        let value = state
-            .nga_client
-            .fetch_thread_page(
-                passport_uid.expose_secret(),
-                passport_cid.expose_secret(),
-                tid,
-                page_number,
-            )
+    let concurrency = concurrency.clamp(1, 16);
+    let page_numbers: Vec<i32> = (start_page..=end_page).collect();
+    for chunk in page_numbers.chunks(concurrency) {
+        let fetched: Vec<ThreadPage> =
+            stream::iter(chunk.iter().copied().map(|page_number| async move {
+                let value = state
+                    .nga_client
+                    .fetch_thread_page(
+                        passport_uid.expose_secret(),
+                        passport_cid.expose_secret(),
+                        tid,
+                        page_number,
+                    )
+                    .await?;
+                let page = thread_parser::parse_thread_page(&value, tid)?;
+                if page.current_page != page_number {
+                    return Err(ThreadCollectorError::from(
+                        thread_parser::ThreadParseError::Pagination,
+                    ));
+                }
+                Ok::<_, ThreadCollectorError>(page)
+            }))
+            .buffer_unordered(concurrency)
+            .try_collect()
             .await?;
-        let page = thread_parser::parse_thread_page(&value, tid)?;
-        if page.current_page != page_number {
-            return Err(thread_parser::ThreadParseError::Pagination.into());
+        pages.extend(fetched);
+        if !watch::renew_lease(&state.pool, state.config.database_backend, watch_id).await? {
+            return Err(ThreadCollectorError::InvalidWatch);
         }
-        pages.push(page);
     }
+    pages.sort_by_key(|page| page.current_page);
     Ok(())
 }
 
@@ -174,11 +242,16 @@ async fn persist_pages(
     watch_target: &WatchTarget,
     cursor: &ThreadCursor,
     baseline: bool,
+    persist_content: bool,
     pages: Vec<ThreadPage>,
 ) -> Result<CrawlSummary, ThreadCollectorError> {
     let metadata = pages[0].metadata.clone();
     let pages_requested = i32::try_from(pages.len()).unwrap_or(i32::MAX);
-    let selected = select_posts(&pages, cursor.last_floor, baseline);
+    let selected = if persist_content {
+        select_posts(&pages, cursor.last_floor, baseline)
+    } else {
+        Vec::new()
+    };
     let last_floor = pages
         .iter()
         .flat_map(|page| page.posts.iter())
@@ -189,11 +262,19 @@ async fn persist_pages(
         .max(cursor.last_floor);
 
     let mut tx = state.pool.begin().await?;
-    upsert_thread(&mut tx, &metadata).await?;
+    if persist_content {
+        if watch_target.history_mode.as_deref() == Some("incremental") {
+            upsert_thread_partial(&mut tx, &metadata).await?;
+        } else {
+            upsert_thread(&mut tx, &metadata).await?;
+        }
+    }
 
     let mut canonical_ids = HashMap::new();
     let mut inserted_count = 0_i32;
     let mut event_count = 0_i32;
+    let mut match_count = 0_i32;
+    let mut outbox_count = 0_i32;
 
     for post in selected
         .iter()
@@ -210,9 +291,12 @@ async fn persist_pages(
         canonical_ids.insert(natural_key(post), id.clone());
         if inserted {
             inserted_count += 1;
-            if !baseline && insert_event(&mut tx, &id, post, &watch_target.id).await? {
-                event_count += 1;
-            }
+        }
+        if !baseline {
+            let result = insert_event(&mut tx, &id, post, &watch_target.id).await?;
+            event_count += i32::from(result.event_created);
+            match_count += result.matches_created;
+            outbox_count += result.outbox_enqueued;
         }
     }
 
@@ -243,10 +327,24 @@ async fn persist_pages(
         .await?;
         if inserted {
             inserted_count += 1;
-            if !baseline && insert_event(&mut tx, &id, post, &watch_target.id).await? {
-                event_count += 1;
-            }
         }
+        if !baseline {
+            let result = insert_event(&mut tx, &id, post, &watch_target.id).await?;
+            event_count += i32::from(result.event_created);
+            match_count += result.matches_created;
+            outbox_count += result.outbox_enqueued;
+        }
+    }
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM watch_targets
+         WHERE id = $1 AND deleted_at IS NULL AND status = 'running'",
+    )
+    .bind(&watch_target.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active != 1 {
+        return Err(ThreadCollectorError::InvalidWatch);
     }
 
     update_cursor_and_finish(
@@ -259,6 +357,8 @@ async fn persist_pages(
         pages_requested,
         inserted_count,
         event_count,
+        match_count,
+        outbox_count,
         state.config.scheduler.timezone_offset,
     )
     .await?;
@@ -272,6 +372,8 @@ async fn persist_pages(
         pages_requested,
         posts_inserted = inserted_count,
         events_created = event_count,
+        matches_created = match_count,
+        outbox_enqueued = outbox_count,
         "thread crawl completed"
     );
 
@@ -283,6 +385,8 @@ async fn persist_pages(
         pages_requested,
         posts_inserted: inserted_count,
         events_created: event_count,
+        matches_created: match_count,
+        outbox_enqueued: outbox_count,
         remote_vrows: metadata.vrows,
         last_floor,
     })
@@ -358,7 +462,15 @@ async fn create_crawl_run(
     run_id: &str,
     watch_id: &str,
     baseline: bool,
+    sync_mode: &str,
 ) -> Result<(), ThreadCollectorError> {
+    sqlx::query(
+        "UPDATE watch_targets SET status = 'running', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(watch_id)
+    .execute(&state.pool)
+    .await?;
     sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_expired',
          error_message = 'lease_expired', completed_at = CURRENT_TIMESTAMP
@@ -368,12 +480,13 @@ async fn create_crawl_run(
     .execute(&state.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO crawl_runs (id, watch_id, status, baseline)
-         VALUES ($1, $2, 'running', $3)",
+        "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
+         VALUES ($1, $2, 'running', $3, $4)",
     )
     .bind(run_id)
     .bind(watch_id)
     .bind(i32::from(baseline))
+    .bind(sync_mode)
     .execute(&state.pool)
     .await?;
     Ok(())
@@ -418,7 +531,8 @@ async fn finish_skipped(
         "UPDATE watch_targets SET status = 'active',
          next_run_at = {next_run}, lease_until = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
-         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP WHERE id = $1"
+         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL"
     );
     sqlx::query(&query)
         .bind(&watch_target.id)
@@ -568,29 +682,48 @@ pub(crate) async fn find_post_id(
     Ok(row.get("id"))
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EventInsertResult {
+    pub event_created: bool,
+    pub matches_created: i32,
+    pub outbox_enqueued: i32,
+}
+
 pub(crate) async fn insert_event(
     tx: &mut Transaction<'_, Any>,
     post_id: &str,
     post: &ParsedPost,
     watch_id: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<EventInsertResult, sqlx::Error> {
     let event_id = Uuid::new_v4().to_string();
     let result = sqlx::query(
         "INSERT INTO post_events
-            (id, post_id, event_type, discovered_by_watch_id)
-         VALUES ($1, $2, $3, $4)
+            (id, post_id, event_type)
+         VALUES ($1, $2, $3)
          ON CONFLICT DO NOTHING",
     )
     .bind(&event_id)
     .bind(post_id)
     .bind(post.kind.event_type())
-    .bind(watch_id)
     .execute(&mut **tx)
     .await?;
-    if result.rows_affected() == 1 {
-        notification::enqueue_matches(tx, &event_id, post).await?;
-    }
-    Ok(result.rows_affected() == 1)
+    let created = result.rows_affected() == 1;
+    let event_id = if created {
+        event_id
+    } else {
+        sqlx::query("SELECT id FROM post_events WHERE post_id = $1 AND event_type = $2")
+            .bind(post_id)
+            .bind(post.kind.event_type())
+            .fetch_one(&mut **tx)
+            .await?
+            .get("id")
+    };
+    let matched = notification::enqueue_matches(tx, &event_id, post, watch_id).await?;
+    Ok(EventInsertResult {
+        event_created: created,
+        matches_created: matched.matches_created,
+        outbox_enqueued: matched.outbox_enqueued,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -604,6 +737,8 @@ async fn update_cursor_and_finish(
     pages_requested: i32,
     posts_inserted: i32,
     events_created: i32,
+    matches_created: i32,
+    outbox_enqueued: i32,
     timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -632,7 +767,8 @@ async fn update_cursor_and_finish(
         "UPDATE watch_targets SET status = 'active', baseline_completed = 1,
          next_run_at = {next_run}, lease_until = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
-         last_error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1"
+         last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL"
     );
     sqlx::query(&query)
         .bind(&watch_target.id)
@@ -642,12 +778,15 @@ async fn update_cursor_and_finish(
 
     sqlx::query(
         "UPDATE crawl_runs SET status = 'succeeded', pages_requested = $1,
-         posts_inserted = $2, events_created = $3, remote_vrows = $4,
-         completed_at = CURRENT_TIMESTAMP WHERE id = $5",
+         posts_inserted = $2, events_created = $3, matches_created = $4,
+         outbox_enqueued = $5, remote_vrows = $6,
+         completed_at = CURRENT_TIMESTAMP WHERE id = $7",
     )
     .bind(pages_requested)
     .bind(posts_inserted)
     .bind(events_created)
+    .bind(matches_created)
+    .bind(outbox_enqueued)
     .bind(metadata.vrows)
     .bind(run_id)
     .execute(&mut **tx)
@@ -696,7 +835,7 @@ async fn record_failure(
          enabled = CASE WHEN $1 IN ('paused', 'not_found') THEN 0 ELSE enabled END,
          lease_until = NULL,
          next_run_at = {next_run}, last_error_kind = $2, last_error_message = $3,
-         updated_at = CURRENT_TIMESTAMP WHERE id = $4"
+         updated_at = CURRENT_TIMESTAMP WHERE id = $4 AND deleted_at IS NULL"
     );
     if let Err(db_error) = sqlx::query(&watch_query)
         .bind(status)
@@ -868,9 +1007,15 @@ mod tests {
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "baseline-run", &created.id, true)
-            .await
-            .expect("crawl run must create");
+        create_crawl_run(
+            &state,
+            "baseline-run",
+            &created.id,
+            true,
+            "tid_full_baseline",
+        )
+        .await
+        .expect("crawl run must create");
         let baseline_page =
             parse_thread_page(&fixture("thread_page_success.json"), 1001).expect("page must parse");
         let baseline = persist_pages(
@@ -878,6 +1023,7 @@ mod tests {
             "baseline-run",
             &created,
             &cursor,
+            true,
             true,
             vec![baseline_page],
         )
@@ -913,7 +1059,7 @@ mod tests {
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "increment-run", &created.id, false)
+        create_crawl_run(&state, "increment-run", &created.id, false, "incremental")
             .await
             .expect("crawl run must create");
         let increment = persist_pages(
@@ -922,6 +1068,7 @@ mod tests {
             &current_watch,
             &cursor,
             false,
+            true,
             vec![live_page.clone()],
         )
         .await
@@ -946,7 +1093,7 @@ mod tests {
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "repeat-run", &created.id, false)
+        create_crawl_run(&state, "repeat-run", &created.id, false, "incremental")
             .await
             .expect("crawl run must create");
         let repeat = persist_pages(
@@ -955,6 +1102,7 @@ mod tests {
             &current_watch,
             &cursor,
             false,
+            true,
             vec![live_page],
         )
         .await
@@ -973,9 +1121,15 @@ mod tests {
         assert_eq!(post_count, 3);
         assert_eq!(event_count, 1);
 
-        create_crawl_run(&state, "pending-review-run", &created.id, false)
-            .await
-            .expect("pending-review crawl run must create");
+        create_crawl_run(
+            &state,
+            "pending-review-run",
+            &created.id,
+            false,
+            "incremental",
+        )
+        .await
+        .expect("pending-review crawl run must create");
         mark_skipped_pending_review(&state, "pending-review-run", &current_watch)
             .await
             .expect("pending-review crawl must be skipped");

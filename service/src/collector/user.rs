@@ -13,7 +13,7 @@ use crate::{
     config::DatabaseBackend,
     domain::{
         thread::{ParsedPost, PostKind, ThreadMetadata},
-        user::{UserProfile, UserReplyCandidate, UserTopicCandidate},
+        user::{UserReplyCandidate, UserTopicCandidate},
     },
     nga::{NgaRequestError, thread_parser, user_parser},
     repository::watch::{self, UserCursor, WatchTarget},
@@ -29,6 +29,8 @@ pub struct UserCrawlSummary {
     pub pages_requested: i32,
     pub posts_inserted: i32,
     pub events_created: i32,
+    pub matches_created: i32,
+    pub outbox_enqueued: i32,
 }
 
 #[derive(Debug, Error)]
@@ -55,7 +57,6 @@ struct UserDetail {
 }
 
 struct Discovery {
-    profile: UserProfile,
     topics: Vec<UserTopicCandidate>,
     replies: Vec<UserReplyCandidate>,
     details: Vec<UserDetail>,
@@ -84,6 +85,8 @@ pub async fn run(
                 pages_requested: 0,
                 posts_inserted: 0,
                 events_created: 0,
+                matches_created: 0,
+                outbox_enqueued: 0,
             })
         }
         Err(UserCollectorError::Nga(NgaRequestError::PendingReview)) => {
@@ -96,6 +99,8 @@ pub async fn run(
                 pages_requested: 0,
                 posts_inserted: 0,
                 events_created: 0,
+                matches_created: 0,
+                outbox_enqueued: 0,
             })
         }
         Err(error) => {
@@ -116,15 +121,6 @@ async fn collect(
     let (passport_uid, passport_cid) = thread::load_credentials(state)
         .await
         .map_err(|_| UserCollectorError::Credentials)?;
-    let profile_bytes = state
-        .nga_client
-        .fetch_user_profile(
-            passport_uid.expose_secret(),
-            passport_cid.expose_secret(),
-            watch_target.target_id,
-        )
-        .await?;
-    let profile = user_parser::parse_profile_gbk(&profile_bytes, watch_target.target_id)?;
 
     let (topics, topic_pages) = discover_topics(
         state,
@@ -135,6 +131,9 @@ async fn collect(
         baseline,
     )
     .await?;
+    if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id).await? {
+        return Err(UserCollectorError::InvalidWatch);
+    }
     let (replies, reply_pages) = discover_replies(
         state,
         passport_uid.expose_secret(),
@@ -146,75 +145,87 @@ async fn collect(
     .await?;
 
     let mut details = Vec::with_capacity(topics.len() + replies.len());
-    for candidate in &topics {
-        let value = state
-            .nga_client
-            .fetch_thread_page(
-                passport_uid.expose_secret(),
-                passport_cid.expose_secret(),
-                candidate.tid,
-                1,
-            )
-            .await?;
-        let page = thread_parser::parse_thread_page(&value, candidate.tid)?;
-        let Some(topic) = page
-            .posts
-            .iter()
-            .find(|post| post.kind == PostKind::Topic && post.author_uid == watch_target.target_id)
-            .cloned()
-        else {
-            return Err(UserCollectorError::InvalidDetail);
-        };
-        let mut posts = vec![topic];
-        posts.extend(
-            page.posts
-                .into_iter()
-                .filter(|post| post.kind == PostKind::Comment && post.parent_is_topic),
-        );
-        details.push(UserDetail {
-            metadata: page.metadata,
-            posts,
-        });
-    }
-    for candidate in &replies {
-        let value = state
-            .nga_client
-            .fetch_post_by_pid(
-                passport_uid.expose_secret(),
-                passport_cid.expose_secret(),
-                candidate.tid,
-                candidate.pid,
-            )
-            .await?;
-        let page = thread_parser::parse_thread_page(&value, candidate.tid)?;
-        let Some(reply) = page
-            .posts
-            .iter()
-            .find(|post| {
-                post.kind == PostKind::Reply
-                    && post.pid == Some(candidate.pid)
-                    && post.author_uid == watch_target.target_id
-            })
-            .cloned()
-        else {
-            return Err(UserCollectorError::InvalidDetail);
-        };
-        let mut posts = vec![reply];
-        posts.extend(page.posts.into_iter().filter(|post| {
-            post.kind == PostKind::Comment && post.parent_pid == Some(candidate.pid)
-        }));
-        details.push(UserDetail {
-            metadata: page.metadata,
-            posts,
-        });
+    if !baseline {
+        for candidate in &topics {
+            let value = state
+                .nga_client
+                .fetch_thread_page(
+                    passport_uid.expose_secret(),
+                    passport_cid.expose_secret(),
+                    candidate.tid,
+                    1,
+                )
+                .await?;
+            let page = thread_parser::parse_thread_page(&value, candidate.tid)?;
+            let Some(topic) = page
+                .posts
+                .iter()
+                .find(|post| {
+                    post.kind == PostKind::Topic && post.author_uid == watch_target.target_id
+                })
+                .cloned()
+            else {
+                return Err(UserCollectorError::InvalidDetail);
+            };
+            let mut posts = vec![topic];
+            posts.extend(
+                page.posts
+                    .into_iter()
+                    .filter(|post| post.kind == PostKind::Comment && post.parent_is_topic),
+            );
+            details.push(UserDetail {
+                metadata: page.metadata,
+                posts,
+            });
+            if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id)
+                .await?
+            {
+                return Err(UserCollectorError::InvalidWatch);
+            }
+        }
+        for candidate in &replies {
+            let value = state
+                .nga_client
+                .fetch_post_by_pid(
+                    passport_uid.expose_secret(),
+                    passport_cid.expose_secret(),
+                    candidate.tid,
+                    candidate.pid,
+                )
+                .await?;
+            let page = thread_parser::parse_thread_page(&value, candidate.tid)?;
+            let Some(reply) = page
+                .posts
+                .iter()
+                .find(|post| {
+                    post.kind == PostKind::Reply
+                        && post.pid == Some(candidate.pid)
+                        && post.author_uid == watch_target.target_id
+                })
+                .cloned()
+            else {
+                return Err(UserCollectorError::InvalidDetail);
+            };
+            let mut posts = vec![reply];
+            posts.extend(page.posts.into_iter().filter(|post| {
+                post.kind == PostKind::Comment && post.parent_pid == Some(candidate.pid)
+            }));
+            details.push(UserDetail {
+                metadata: page.metadata,
+                posts,
+            });
+            if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id)
+                .await?
+            {
+                return Err(UserCollectorError::InvalidWatch);
+            }
+        }
     }
 
     let discovery = Discovery {
-        profile,
         topics,
         replies,
-        pages_requested: 1
-            + topic_pages
+        pages_requested: topic_pages
             + reply_pages
             + i32::try_from(details.len()).unwrap_or(i32::MAX),
         details,
@@ -244,6 +255,14 @@ async fn discover_topics(
         requested += 1;
         let page = user_parser::parse_topic_list(&value, uid)?;
         total_pages = page.total_pages;
+        if baseline
+            && page
+                .candidates
+                .windows(2)
+                .any(|items| (items[0].postdate, items[0].tid) < (items[1].postdate, items[1].tid))
+        {
+            return Err(UserCollectorError::InvalidDetail);
+        }
         let reached_boundary = page
             .candidates
             .iter()
@@ -253,7 +272,7 @@ async fn discover_topics(
                 result.push(item);
             }
         }
-        if !baseline && reached_boundary {
+        if baseline || reached_boundary {
             break;
         }
         page_number += 1;
@@ -283,6 +302,14 @@ async fn discover_replies(
         requested += 1;
         let page = user_parser::parse_reply_list(&value, uid)?;
         total_pages = page.total_pages;
+        if baseline
+            && page
+                .candidates
+                .windows(2)
+                .any(|items| (items[0].postdate, items[0].pid) < (items[1].postdate, items[1].pid))
+        {
+            return Err(UserCollectorError::InvalidDetail);
+        }
         let reached_boundary = page
             .candidates
             .iter()
@@ -294,7 +321,7 @@ async fn discover_replies(
                 result.push(item);
             }
         }
-        if !baseline && reached_boundary {
+        if baseline || reached_boundary {
             break;
         }
         page_number += 1;
@@ -311,9 +338,10 @@ async fn persist(
     discovery: Discovery,
 ) -> Result<UserCrawlSummary, UserCollectorError> {
     let mut tx = state.pool.begin().await?;
-    upsert_user(&mut tx, &discovery.profile).await?;
     let mut posts_inserted = 0;
     let mut events_created = 0;
+    let mut matches_created = 0;
+    let mut outbox_enqueued = 0;
 
     for detail in &discovery.details {
         thread::upsert_thread_partial(&mut tx, &detail.metadata).await?;
@@ -332,18 +360,20 @@ async fn persist(
         .await?;
         if inserted {
             posts_inserted += 1;
-            if !baseline
-                && thread::insert_event(&mut tx, &parent_id, parent, &watch_target.id).await?
-            {
-                events_created += 1;
-            }
+        }
+        if !baseline {
+            let result =
+                thread::insert_event(&mut tx, &parent_id, parent, &watch_target.id).await?;
+            events_created += i32::from(result.event_created);
+            matches_created += result.matches_created;
+            outbox_enqueued += result.outbox_enqueued;
         }
         for comment in detail
             .posts
             .iter()
             .filter(|post| post.kind == PostKind::Comment)
         {
-            let (id, inserted) = thread::insert_post(
+            let (_id, inserted) = thread::insert_post(
                 &mut tx,
                 comment,
                 Some(&parent_id),
@@ -353,13 +383,19 @@ async fn persist(
             .await?;
             if inserted {
                 posts_inserted += 1;
-                if !baseline
-                    && thread::insert_event(&mut tx, &id, comment, &watch_target.id).await?
-                {
-                    events_created += 1;
-                }
             }
         }
+    }
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM watch_targets
+         WHERE id = $1 AND deleted_at IS NULL AND status = 'running'",
+    )
+    .bind(&watch_target.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active != 1 {
+        return Err(UserCollectorError::InvalidWatch);
     }
 
     let topic_key = discovery
@@ -386,6 +422,8 @@ async fn persist(
         discovery.pages_requested,
         posts_inserted,
         events_created,
+        matches_created,
+        outbox_enqueued,
         state.config.scheduler.timezone_offset,
     )
     .await?;
@@ -398,6 +436,8 @@ async fn persist(
         baseline,
         posts_inserted,
         events_created,
+        matches_created,
+        outbox_enqueued,
         "user crawl completed"
     );
     Ok(UserCrawlSummary {
@@ -408,38 +448,9 @@ async fn persist(
         pages_requested: discovery.pages_requested,
         posts_inserted,
         events_created,
+        matches_created,
+        outbox_enqueued,
     })
-}
-
-async fn upsert_user(
-    tx: &mut Transaction<'_, Any>,
-    profile: &UserProfile,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO nga_users
-            (uid, username, group_id, avatar, registered_at_unix, last_post_at_unix,
-             remote_post_count, signature, raw_payload)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (uid) DO UPDATE SET
-            username = EXCLUDED.username, group_id = EXCLUDED.group_id,
-            avatar = EXCLUDED.avatar, registered_at_unix = EXCLUDED.registered_at_unix,
-            last_post_at_unix = EXCLUDED.last_post_at_unix,
-            remote_post_count = EXCLUDED.remote_post_count,
-            signature = EXCLUDED.signature, raw_payload = EXCLUDED.raw_payload,
-            last_seen_at = CURRENT_TIMESTAMP",
-    )
-    .bind(profile.uid)
-    .bind(&profile.username)
-    .bind(profile.group_id)
-    .bind(&profile.avatar)
-    .bind(profile.registered_at_unix)
-    .bind(profile.last_post_at_unix)
-    .bind(profile.remote_post_count)
-    .bind(&profile.signature)
-    .bind(&profile.raw_payload)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -453,6 +464,8 @@ async fn finish_success(
     pages_requested: i32,
     posts_inserted: i32,
     events_created: i32,
+    matches_created: i32,
+    outbox_enqueued: i32,
     timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -478,6 +491,8 @@ async fn finish_success(
         pages_requested,
         posts_inserted,
         events_created,
+        matches_created,
+        outbox_enqueued,
         timezone_offset,
     )
     .await
@@ -490,6 +505,13 @@ async fn create_crawl_run(
     baseline: bool,
 ) -> Result<(), UserCollectorError> {
     sqlx::query(
+        "UPDATE watch_targets SET status = 'running', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(watch_id)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_expired',
          error_message = 'lease_expired', completed_at = CURRENT_TIMESTAMP
          WHERE watch_id = $1 AND status = 'running'",
@@ -498,12 +520,17 @@ async fn create_crawl_run(
     .execute(&state.pool)
     .await?;
     sqlx::query(
-        "INSERT INTO crawl_runs (id, watch_id, status, baseline)
-         VALUES ($1, $2, 'running', $3)",
+        "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
+         VALUES ($1, $2, 'running', $3, $4)",
     )
     .bind(run_id)
     .bind(watch_id)
     .bind(i32::from(baseline))
+    .bind(if baseline {
+        "uid_baseline"
+    } else {
+        "incremental"
+    })
     .execute(&state.pool)
     .await?;
     Ok(())
@@ -523,6 +550,8 @@ async fn mark_skipped_busy(
         false,
         run_id,
         "skipped_busy",
+        0,
+        0,
         0,
         0,
         0,
@@ -553,7 +582,8 @@ async fn mark_skipped_pending_review(
         "UPDATE watch_targets SET status = 'active',
          next_run_at = {next_run}, lease_until = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
-         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP WHERE id = $1"
+         last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL"
     );
     sqlx::query(&watch_query)
         .bind(&watch_target.id)
@@ -583,6 +613,8 @@ async fn finish_watch(
     pages_requested: i32,
     posts_inserted: i32,
     events_created: i32,
+    matches_created: i32,
+    outbox_enqueued: i32,
     timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
     let next_run = match backend {
@@ -600,7 +632,8 @@ async fn finish_watch(
          baseline_completed = CASE WHEN $2 = 1 THEN 1 ELSE baseline_completed END,
          next_run_at = {next_run}, lease_until = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
-         last_error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $3"
+         last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3 AND deleted_at IS NULL"
     );
     sqlx::query(&query)
         .bind(watch_status)
@@ -611,13 +644,15 @@ async fn finish_watch(
         .await?;
     sqlx::query(
         "UPDATE crawl_runs SET status = $1, pages_requested = $2,
-         posts_inserted = $3, events_created = $4,
-         completed_at = CURRENT_TIMESTAMP WHERE id = $5",
+         posts_inserted = $3, events_created = $4, matches_created = $5,
+         outbox_enqueued = $6, completed_at = CURRENT_TIMESTAMP WHERE id = $7",
     )
     .bind(run_status)
     .bind(pages_requested)
     .bind(posts_inserted)
     .bind(events_created)
+    .bind(matches_created)
+    .bind(outbox_enqueued)
     .bind(run_id)
     .execute(&mut **tx)
     .await?;
@@ -672,7 +707,7 @@ async fn record_failure(
          enabled = CASE WHEN $2 = 1 THEN 0 ELSE enabled END,
          lease_until = NULL, next_run_at = {next_run},
          last_error_kind = $3, last_error_message = $3,
-         updated_at = CURRENT_TIMESTAMP WHERE id = $4"
+         updated_at = CURRENT_TIMESTAMP WHERE id = $4 AND deleted_at IS NULL"
     );
     if let Err(db_error) = sqlx::query(&query)
         .bind(status)
@@ -733,7 +768,7 @@ mod tests {
         },
         crypto::CredentialCipher,
         domain::user::{UserReplyCandidate, UserTopicCandidate},
-        nga::{NgaClient, thread_parser, user_parser},
+        nga::{NgaClient, thread_parser},
         repository::watch,
     };
 
@@ -797,11 +832,6 @@ mod tests {
         let watch = watch::create_user_watch(&pool, 2001, 60)
             .await
             .expect("watch must create");
-        let profile = user_parser::parse_profile_gbk(&fixture_bytes("user_profile_gbk.html"), 2001)
-            .expect("profile must parse");
-        let topic_page =
-            thread_parser::parse_thread_page(&fixture("thread_page_success.json"), 1001)
-                .expect("topic detail must parse");
         let cursor = watch::user_cursor(&pool, &watch.id)
             .await
             .expect("cursor must load");
@@ -815,22 +845,18 @@ mod tests {
             &cursor,
             true,
             Discovery {
-                profile: profile.clone(),
                 topics: vec![UserTopicCandidate {
                     tid: 1001,
                     postdate: 1767225600,
                 }],
                 replies: vec![],
-                details: vec![UserDetail {
-                    metadata: topic_page.metadata,
-                    posts: vec![topic_page.posts[0].clone()],
-                }],
-                pages_requested: 3,
+                details: vec![],
+                pages_requested: 2,
             },
         )
         .await
         .expect("baseline must persist");
-        assert_eq!(baseline.posts_inserted, 1);
+        assert_eq!(baseline.posts_inserted, 0);
         assert_eq!(baseline.events_created, 0);
 
         let mut reply_json = fixture("post_by_pid_success.json");
@@ -850,7 +876,6 @@ mod tests {
             .await
             .expect("run must create");
         let discovery = Discovery {
-            profile,
             topics: vec![],
             replies: vec![UserReplyCandidate {
                 tid: 1003,
@@ -893,11 +918,6 @@ mod tests {
             &cursor,
             false,
             Discovery {
-                profile: user_parser::parse_profile_gbk(
-                    &fixture_bytes("user_profile_gbk.html"),
-                    2001,
-                )
-                .expect("profile must parse"),
                 topics: vec![],
                 replies: vec![UserReplyCandidate {
                     tid: 1003,
@@ -926,7 +946,7 @@ mod tests {
                 .await
                 .expect("threads must count");
         assert_eq!(events, 1);
-        assert_eq!(partial_threads, 2);
+        assert_eq!(partial_threads, 1);
     }
 
     fn fixture(name: &str) -> Value {
