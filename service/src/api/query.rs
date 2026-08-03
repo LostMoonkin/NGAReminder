@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use crate::app::AppState;
+use crate::{app::AppState, markup};
 
 #[derive(Debug, Deserialize)]
 pub struct LimitQuery {
@@ -54,11 +54,23 @@ pub struct PostView {
     pub pid: Option<i64>,
     pub floor_number: Option<i32>,
     pub post_kind: String,
+    pub thread_title: String,
     pub author_name: String,
     pub author_uid: i64,
     pub subject: String,
     pub preview: String,
+    pub content_html: String,
+    pub page_number: i32,
     pub published_at_unix: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserView {
+    pub uid: i64,
+    pub author_name: String,
+    pub post_count: i64,
+    pub thread_count: i64,
+    pub last_post_at_unix: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,12 +169,78 @@ pub async fn posts(
 ) -> ApiResult<ListResponse<PostView>> {
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
     let rows = sqlx::query(
-        "SELECT id, tid, pid, floor_number, post_kind, author_name, author_uid,
-         subject, content_raw, published_at_unix
-         FROM posts WHERE tid = $1 ORDER BY COALESCE(floor_number, 0), published_at_unix NULLS LAST
+        "SELECT p.id, p.tid, p.pid, p.floor_number, p.post_kind,
+         t.title AS thread_title, p.author_name, p.author_uid,
+         p.subject, p.content_raw, p.page_number, p.published_at_unix
+         FROM posts p JOIN threads t ON t.tid = p.tid
+         WHERE p.tid = $1
+         ORDER BY COALESCE(p.floor_number, 0), p.page_number,
+                  COALESCE(p.pid, 0), p.id
          LIMIT $2",
     )
     .bind(tid)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(ListResponse {
+        items: rows.iter().map(map_post).collect(),
+    }))
+}
+
+pub async fn users(
+    State(state): State<AppState>,
+    Query(query): Query<LimitQuery>,
+) -> ApiResult<ListResponse<UserView>> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows = sqlx::query(
+        "SELECT w.target_id AS uid,
+         COALESCE(MAX(p.author_name), '') AS author_name,
+         CAST(COUNT(p.id) AS BIGINT) AS post_count,
+         CAST(COUNT(DISTINCT p.tid) AS BIGINT) AS thread_count,
+         MAX(p.published_at_unix) AS last_post_at_unix
+         FROM watch_targets w
+         LEFT JOIN posts p ON p.author_uid = w.target_id
+         WHERE w.target_type = 'user' AND w.deleted_at IS NULL
+         GROUP BY w.target_id
+         ORDER BY MAX(p.published_at_unix) DESC, w.target_id
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(ListResponse {
+        items: rows
+            .iter()
+            .map(|row| UserView {
+                uid: row.get("uid"),
+                author_name: row.get("author_name"),
+                post_count: row.get("post_count"),
+                thread_count: row.get("thread_count"),
+                last_post_at_unix: row.get("last_post_at_unix"),
+            })
+            .collect(),
+    }))
+}
+
+pub async fn user_posts(
+    State(state): State<AppState>,
+    Path(uid): Path<i64>,
+    Query(query): Query<LimitQuery>,
+) -> ApiResult<ListResponse<PostView>> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let rows = sqlx::query(
+        "SELECT p.id, p.tid, p.pid, p.floor_number, p.post_kind,
+         t.title AS thread_title, p.author_name, p.author_uid,
+         p.subject, p.content_raw, p.page_number, p.published_at_unix
+         FROM posts p JOIN threads t ON t.tid = p.tid
+         WHERE p.author_uid = $1
+         ORDER BY p.tid, COALESCE(p.floor_number, 0), p.page_number,
+                  COALESCE(p.pid, 0), p.id
+         LIMIT $2",
+    )
+    .bind(uid)
     .bind(limit)
     .fetch_all(&state.pool)
     .await
@@ -272,16 +350,20 @@ fn map_thread(row: &sqlx::any::AnyRow) -> ThreadView {
 }
 
 fn map_post(row: &sqlx::any::AnyRow) -> PostView {
+    let content_raw: String = row.get("content_raw");
     PostView {
         id: row.get("id"),
         tid: row.get("tid"),
         pid: row.get("pid"),
         floor_number: row.get("floor_number"),
         post_kind: row.get("post_kind"),
+        thread_title: row.get("thread_title"),
         author_name: row.get("author_name"),
         author_uid: row.get("author_uid"),
         subject: row.get("subject"),
-        preview: preview(row.get("content_raw")),
+        preview: preview(content_raw.clone()),
+        content_html: markup::render_html(&content_raw),
+        page_number: row.get("page_number"),
         published_at_unix: row.get("published_at_unix"),
     }
 }

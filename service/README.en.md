@@ -144,6 +144,17 @@ GET /api/v1/exports/users/{uid}?format=zip
 
 Thread exports contain all persisted posts for the TID. User exports contain persisted posts authored by the UID, grouped by TID. ZIP files contain Markdown, `metadata.json`, and ready local assets; missing or remote-only assets remain remote links.
 
+Markdown is read with stable cursor pagination and streamed to the client. ZIP exports are built incrementally under `assets.storage_path/.tmp` and streamed from disk, so complete posts, assets, and archives are not retained in memory. Temporary ZIP files are removed when the response completes or is dropped.
+
+Asset maintenance is available in the admin console and through:
+
+```text
+GET  /api/v1/assets/maintenance
+POST /api/v1/assets/maintenance/cleanup
+```
+
+The read-only scan reports missing files, orphan metadata, orphan content files, and expired export temporary files. Cleanup requeues missing ready assets and removes only orphan/temporary files older than the retention window.
+
 See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for metrics, structured logging, Cookie-invalid alerts, backups, Docker release/rollback, and Nginx deployment. See [`docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md`](docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md) for bot architecture and Cookie renewal.
 
 Never commit real NGA Cookies, API tokens, Bark keys, or Feishu application secrets.

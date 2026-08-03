@@ -26,8 +26,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "postgres",
 subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "serde"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = "0.7"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["request-id", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

@@ -1,5 +1,6 @@
 mod account;
 mod admin;
+mod assets;
 mod auth;
 mod export;
 mod health;
@@ -63,6 +64,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/watches/{id}/runs", get(watch::runs))
         .route("/api/v1/threads", get(query::threads))
         .route("/api/v1/threads/{tid}/posts", get(query::posts))
+        .route("/api/v1/users", get(query::users))
+        .route("/api/v1/users/{uid}/posts", get(query::user_posts))
         .route("/api/v1/channels", get(notification::list_channels))
         .route("/api/v1/channels", post(notification::create_channel))
         .route("/api/v1/channels/{id}", patch(notification::update_channel))
@@ -113,6 +116,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/events/read-all", post(query::mark_all_events_read))
         .route("/api/v1/exports/threads/{tid}", get(export::thread))
         .route("/api/v1/exports/users/{uid}", get(export::user))
+        .route("/api/v1/assets/maintenance", get(assets::report))
+        .route("/api/v1/assets/maintenance/cleanup", post(assets::cleanup))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_token,
