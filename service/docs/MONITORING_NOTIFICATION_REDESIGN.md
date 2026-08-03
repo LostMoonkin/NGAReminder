@@ -186,7 +186,7 @@ CREATE TABLE post_event_watch_matches (
 
 ## 4. 采集器改造
 
-### 4.1 TID collector
+### 4.1 TID 采集器
 
 首次运行：
 
@@ -214,7 +214,7 @@ TID full 完成后将 `threads.coverage` 升级为 `full`。incremental 初始�
 - 运行租约必须支持续租。历史回溯可能超过当前固定 5 分钟 lease，应增加 heartbeat 或根据页数延长 lease。
 - full backfill 期间暂停或删除 watch 时，未提交的内存结果直接丢弃；已提交的数据保持一致。
 
-### 4.2 UID collector
+### 4.2 UID 采集器
 
 1. 读取用户主题和用户回复游标。
 2. 首次运行分别只请求 topic/reply 列表第 1 页并记录水位，不翻页、不请求详情、不保存历史内容、不发送历史通知。两个列表必须在同一次成功运行中完成初始化，任一失败都不设置 `baseline_completed`。

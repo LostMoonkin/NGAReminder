@@ -1,36 +1,35 @@
-# NGA fixtures
+# NGA 测试样例
 
-These fixtures are synthetic, sanitized equivalents of structures observed during authenticated,
-read-only NGA probes.
+这些 fixture 是在认证账号下执行只读 NGA 探测后，根据观察到的结构生成的合成、脱敏样本。
 
-Rules:
+规则：
 
-- Never store a Cookie header or credential value.
-- Never store a real username, post body, signature, avatar URL, webhook, or device key.
-- Replace TID, PID, UID, FID, timestamps, and URLs with internally consistent synthetic values.
-- Preserve JSON types, nesting, optional/null fields, ordering, and pagination relationships.
-- Keep raw probe responses only in a temporary directory and delete them after sanitization.
-- Record a new fixture here before changing parser behavior.
+- 不得保存 Cookie 请求头或任何凭据值。
+- 不得保存真实用户名、帖子正文、签名、头像 URL、webhook 或设备密钥。
+- 将 TID、PID、UID、FID、时间戳和 URL 替换为内部一致的合成值。
+- 保留 JSON 类型、嵌套关系、可选/null 字段、顺序和分页关系。
+- 原始探测响应只能暂存在临时目录中，脱敏后立即删除。
+- 修改解析器行为前，先在此处记录对应的新 fixture。
 
-Current fixtures:
+当前 fixture：
 
 | File | Contract |
 | --- | --- |
-| `thread_page_success.json` | Thread page, topic PID zero, ascending floors |
-| `thread_comments_hot_post.json` | Nested comments and duplicate hot-post reference |
-| `thread_attachments.json` | Relative attachment metadata |
-| `post_by_pid_success.json` | TID/PID detail returns one post |
-| `user_topics_page_1.json` | Accessible topic plus denied placeholder |
-| `user_topics_page_2.json` | Final user-topic page |
-| `user_replies_success.json` | Topic summary with watched reply in `__P` |
-| `busy_2048.json` | HTTP-success NGA busy response |
-| `thread_pending_review_51.json` | Thread pending-review business error |
-| `invalid_tid_14.json` | Unknown TID business error |
-| `missing_auth_46.json` | Missing Passport-cookie business error |
-| `user_profile_gbk.html` | Synthetic GBK profile page with `__UCPUSER` |
-| `invalid_uid_profile_gbk.html` | Synthetic GBK page without `__UCPUSER` |
-| `invalid_uid_http_503.json` | Observed empty HTTP response envelope for an invalid UID list request |
+| `thread_page_success.json` | 主题页面、主题 PID 为零、楼层升序 |
+| `thread_comments_hot_post.json` | 楼中楼评论和重复的热门帖子引用 |
+| `thread_attachments.json` | 相对路径附件元数据 |
+| `post_by_pid_success.json` | TID/PID 详情只返回一条帖子 |
+| `user_topics_page_1.json` | 可访问主题和无权访问占位记录 |
+| `user_topics_page_2.json` | 用户主题列表最后一页 |
+| `user_replies_success.json` | 包含 `__P` 中目标回复的主题摘要 |
+| `busy_2048.json` | HTTP 成功但 NGA 返回 busy 的响应 |
+| `thread_pending_review_51.json` | 主题待审核业务错误 |
+| `invalid_tid_14.json` | 未知 TID 业务错误 |
+| `missing_auth_46.json` | Passport Cookie 缺失业务错误 |
+| `user_profile_gbk.html` | 含 `__UCPUSER` 的合成 GBK 资料页 |
+| `invalid_uid_profile_gbk.html` | 不含 `__UCPUSER` 的合成 GBK 页面 |
+| `invalid_uid_http_503.json` | 无效 UID 列表请求观察到的空 HTTP 响应封装 |
 
-Deferred:
+延后补充：
 
-- Permission-denied thread/post response.
+- 无权访问主题/帖子的响应。

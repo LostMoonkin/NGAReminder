@@ -82,7 +82,7 @@ GET http://127.0.0.1:8080/admin
 
 生产环境建议使用 Nginx 终止 TLS，并让 Rust 服务只监听内部地址。详细备份、恢复、升级、回滚和反向代理说明见 [`service/docs/OPERATIONS.md`](service/docs/OPERATIONS.md)。
 
-不需要 PostgreSQL 的单机生产部署可直接使用 [`service/compose.production.yml`](service/compose.production.yml)。该模板只启动一个 SQLite `all` 容器，并将数据库与资源保存在同一个 Docker volume 中。
+不需要 PostgreSQL 的单机生产部署可直接使用 [`service/compose.production.yml`](service/compose.production.yml)。该模板只启动一个 SQLite `all` 容器，并将数据库与资源保存在同一个 Docker 数据卷中。
 
 ## Docker 镜像发布
 
@@ -92,7 +92,7 @@ GET http://127.0.0.1:8080/admin
 ghcr.io/<owner>/<repository>
 ```
 
-镜像会生成分支/tag、语义化版本、commit SHA 标签；默认分支额外生成 `latest`。Workflow 使用 GitHub Actions 内置 `GITHUB_TOKEN`，不需要额外配置 Docker Hub 凭据。
+镜像会生成分支/tag、语义化版本、commit SHA 标签；默认分支额外生成 `latest`。工作流使用 GitHub Actions 内置 `GITHUB_TOKEN`，不需要额外配置 Docker Hub 凭据。
 
 ## 常用 API
 
@@ -156,7 +156,7 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-当前测试覆盖 NGA parser fixtures、GBK 资料解析、TID/UID collector、数据库幂等、通知重试、资源安全、Markdown/ZIP 导出和 API 鉴权。
+当前测试覆盖 NGA 解析器 fixture、GBK 资料解析、TID/UID 采集器、数据库幂等、通知重试、资源安全、Markdown/ZIP 导出和 API 鉴权。
 
 ## 安全注意事项
 
@@ -168,13 +168,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 ## 文档
 
 - [项目计划](PROJECT_PLAN.md)
-- [服务端说明](service/README.md)
+- [服务端说明](service/README.md)（[English](service/README.en.md)）
 - [运维手册](service/docs/OPERATIONS.md)
 - [NGA API 契约](service/docs/NGA_API_CONTRACT.md)
 - [机器人交互与 Cookie 续期设计](service/docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)
 - [Standalone 扩展说明](extension-standalone/README.md)
-- [更新日志](service/CHANGELOG.md)
+- [更新日志](service/CHANGELOG.md)（[English](service/CHANGELOG.en.md)）
 
-## License
+## 许可证
 
 [MIT](LICENSE)

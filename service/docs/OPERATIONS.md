@@ -1,6 +1,6 @@
 # NGA Reminder 运维说明
 
-本文面向部署在 homeserver 上的单机实例。推荐使用 PostgreSQL、Docker Compose 和 Nginx；SQLite
+本文面向部署在家庭服务器（homeserver）上的单机实例。推荐使用 PostgreSQL、Docker Compose 和 Nginx；SQLite
 适合不需要独立数据库容器的单进程部署。
 
 ## 观测、日志和告警
@@ -100,7 +100,7 @@ tar --xattrs --same-owner -czf ./backups/20260728-020000/sqlite-data.tar.gz \
 ### SQLite 单容器生产模板
 
 不需要单独部署 PostgreSQL 时，使用 [`../compose.production.yml`](../compose.production.yml)。该模板
-只启动一个 `all` 容器，数据库和资源统一保存在 `nga-reminder-data` named volume 中：
+只启动一个 `all` 容器，数据库和资源统一保存在 Docker 命名卷 `nga-reminder-data` 中：
 
 ```bash
 cd service
@@ -113,7 +113,7 @@ curl -fsS http://127.0.0.1:12888/ready
 
 模板默认只绑定宿主机 `127.0.0.1:12888`，由 Nginx 对外提供 HTTPS。SQLite 只支持单个 `all`
 进程，不要通过启动多个容器来扩容。备份前先停止 app，且不要使用 `docker compose down -v`，
-否则会删除包含数据库和资源文件的 named volume。
+否则会删除包含数据库和资源文件的 Docker 命名卷。
 
 首次启动：
 
@@ -153,7 +153,7 @@ migrations 由应用启动自动执行，生产升级前应保留数据库备份
 发布包只需要服务目录中的 Dockerfile、Cargo 清单/锁文件、源码、migrations、config、部署和
 运维文档；`.env`、数据库文件、assets、真实导出文件和真实日志不属于发布包。
 
-## Nginx TLS、反向代理和 forwarded headers
+## Nginx TLS、反向代理和转发请求头
 
 `deploy/nginx.conf` 是 server/location 级配置示例。Nginx 负责公网 TLS，Rust 服务只监听 Docker
 内部网络的 `12888` 端口：
@@ -163,7 +163,7 @@ migrations 由应用启动自动执行，生产升级前应保留数据库备份
 ```
 
 部署时替换证书路径、域名和上游服务名，并确保 `X-Forwarded-Proto` 只由可信 Nginx 设置。应用
-使用该 header 判断管理员 session cookie 是否附加 `Secure` 属性，同时保留 `X-Request-Id` 供日志
+使用该请求头判断管理员 session cookie 是否附加 `Secure` 属性，同时保留 `X-Request-Id` 供日志
 关联。不要让公网直接暴露应用容器端口；Compose 的端口映射应改为仅绑定 homeserver 本机，或
 移除映射并只让 Nginx 所在网络访问应用。
 

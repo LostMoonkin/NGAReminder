@@ -120,7 +120,7 @@ Rust 工程开始建设。服务端与 `extension-standalone` 是两个相互独
 
 ```text
 nga-reminder serve    # REST API
-nga-reminder worker   # 抓取、通知、导出 worker
+nga-reminder worker   # 抓取、通知、导出工作进程
 nga-reminder all      # API + worker，默认单机模式
 ```
 
@@ -131,7 +131,7 @@ nga-reminder all      # API + worker，默认单机模式
 Rust 服务自身不终止 TLS。生产流量路径为：
 
 ```text
-Client → HTTPS Nginx → HTTP Axum
+客户端 → HTTPS Nginx → HTTP Axum
 ```
 
 ### 3.3 持久化与任务协调
@@ -167,10 +167,10 @@ Web Management UI
 Axum API
     ├── Watch API
     ├── NGA Account / Settings API
-    ├── Post/User/Thread Query API
+    ├── 帖子/用户/主题查询 API
     ├── Notification Rule API
     ├── Export API
-    └── Unread Event API
+    └── 未读事件 API
               │
               ▼
     PostgreSQL / SQLite
@@ -178,11 +178,11 @@ Axum API
               │
 Scheduler → Collector → NGA Client
               │
-              ├── Thread Collector
-              └── User Collector
+              ├── 主题采集器
+              └── 用户采集器
 
-Post Event Outbox → Rule Matcher → Bark / 飞书
-Export Job        → Markdown Renderer → .md / .zip
+帖子事件 Outbox → 规则匹配器 → Bark / 飞书
+导出任务        → Markdown 渲染器 → .md / .zip
 ```
 
 ## 5. Rust 工程结构
@@ -245,7 +245,7 @@ service/
 | `assets` | 图片、音频、视频等资源的 URL、hash、MIME、大小、本地路径和下载状态 |
 | `post_assets` | 帖子与资源的多对多关联、正文出现顺序和用途 |
 
-### 6.2 Post 建议字段
+### 6.2 帖子建议字段
 
 ```text
 id                  UUID PRIMARY KEY
@@ -288,7 +288,7 @@ persistence.store_raw_payload = false # 默认值
 - 无论是否保存原始 payload，附件元数据都应由 asset parser 写入结构化 `assets` /
   `post_assets`，不能依赖长期保留 `raw_payload`。
 
-### 6.3 Asset 建议字段与存储边界
+### 6.3 资源建议字段与存储边界
 
 附件、正文图片、音频和视频的二进制内容不写入 PostgreSQL `BYTEA` 或 SQLite `BLOB`。
 数据库只保存资源元数据、帖子关联和本地相对路径，二进制文件保存到
@@ -336,7 +336,7 @@ downloaded_at       TIMESTAMPTZ
 或取得一致性快照，再备份数据库和资源目录；恢复后运行资源一致性检查，报告缺失文件和
 孤儿文件。ZIP 导出只读取状态为 `ready` 且 hash/路径校验通过的本地资源。
 
-### 6.4 Secret
+### 6.4 密钥
 
 - NGA Cookie、Bark device key、飞书 `app_secret` 不以明文出现在 API 响应或日志中。
 - 数据库存储使用应用级加密，密钥仅由环境变量或 Secret Manager 注入。
@@ -345,7 +345,7 @@ downloaded_at       TIMESTAMPTZ
 
 ## 7. 抓取策略
 
-### 7.1 Thread Collector
+### 7.1 主题采集器
 
 首次回溯：
 
@@ -366,7 +366,7 @@ downloaded_at       TIMESTAMPTZ
 
 该策略不为发现编辑或删除而重拉历史页面，也不对已有回复执行 update。
 
-### 7.2 User Collector
+### 7.2 用户采集器
 
 验证并实现以下来源：
 
@@ -511,7 +511,7 @@ result.__GLOBAL          # 页面级全局数据
   用户 UID，只作为原始元数据保存。
 - 主楼自然键为 `(tid, topic)`，普通回复和楼中楼评论自然键统一为 `(tid, pid)`。
 - 附件元数据位于 `attches`，资源基址来自 `attachPrefix`；正文中的图片、音视频 URL
-  也交给统一 asset resolver 处理。
+  也交给统一资源解析器处理。
 - 已验证 `attches` 为数组，`attachurl` 和 `path` 为相对地址；
   `attachPrefix + attachurl` 的样本资源 HEAD 请求返回 HTTP 200、`image/jpeg`。
 - 已验证非空 `hot_post` 与 `result` 存在重复 PID；hot post 只建立对规范 post 的引用，
@@ -580,16 +580,16 @@ trait NotificationSender {
 
 ### 9.1 转换原则
 
-参考 `ngapost2md` 的 NGA 标记处理能力，但用 Rust 重新实现并配套 golden tests。
+参考 `ngapost2md` 的 NGA 标记处理能力，但用 Rust 重新实现并配套固定样例测试。
 
 转换管线：
 
 ```text
 content_raw
-  → NGA markup tokenizer
+  → NGA 标记 tokenizer
   → 中间 AST
-  → Markdown renderer
-  → asset resolver
+  → Markdown 渲染器
+  → 资源解析器
 ```
 
 优先支持：
@@ -834,20 +834,20 @@ Cookie 原文或可逆的日志摘要。
 
 预计：4～6 个开发日。
 
-### M2：Thread 全量与增量持久化
+### M2：主题全量与增量持久化
 
 状态：完成。
 
 已实现并验证：
 
 - PostgreSQL/SQLite 两套语义一致的 thread、append-only post、watch、cursor、crawl run
-  和 post event migration。
+  和帖子事件 migration。
 - 强类型 thread parser 覆盖主楼、普通回复、楼中楼、`hot_post` 去重边界及附件原始
   payload 保留。
 - NGA thread HTTP client 统一使用已验证请求头，只传 Passport UID/CID，并实现
   账号级 500ms 请求间隔、超时、429/5xx/网络错误退避重试及业务码分类。
 - 新 watch 首次抓取全部可访问页面并建立无事件基线；后续仅抓取覆盖新楼层的页面范围，
-  通过 floor cursor 和自然唯一键追加新记录。
+  通过楼层游标和自然唯一键追加新记录。
 - `posts` 不执行 update/delete；旧楼远端内容即使变化也不会覆盖数据库历史。
 - 只有实时阶段 `INSERT ... ON CONFLICT DO NOTHING` 真正成功时才创建唯一
   `post_event`；重复抓取不重复生成事件。
@@ -885,7 +885,7 @@ Cookie 原文或可逆的日志摘要。
 
 预计：5～8 个开发日。
 
-### M3：User 监控
+### M3：用户监控
 
 状态：完成。
 
@@ -948,7 +948,7 @@ Cookie 原文或可逆的日志摘要。
 - 渠道配置使用现有 AES-256-GCM 加密后入库，列表 API 不返回 device key、`app_id`、
   `app_secret` 或接收目标。
 - 新 `post_event` 在原数据库事务中匹配 TID、UID、TID+UID 规则，同时写入
-  `post_event_matches` 和 transactional outbox。
+  `post_event_matches` 和事务 outbox。
 - `(post_event_id, rule_id)` 保留全部匹配来源，`(post_event_id, channel_id)` 唯一约束
   保证多条规则命中同一渠道时只投递一次。
 - Bark V2 POST adapter 支持标题、正文、group 和帖子跳转 URL。
@@ -974,7 +974,7 @@ Cookie 原文或可逆的日志摘要。
 - 在 `nga_reminder_dev` 实际执行 M4 migration，验证加密渠道与规则
   create/list/cascade-delete；临时记录已清理。
 - 已使用企业应用 `app_id`、`app_secret` 和目标群 `chat_id` 调用真实飞书 OpenAPI，
-  获取 tenant token 并成功发送群消息；测试 secret 随后应轮换。
+  获取 tenant access token 并成功发送群消息；测试密钥随后应轮换。
 - Bark 推送已通过真实渠道测试和通知链路验收，包含跳转链接、规则匹配、outbox 和 delivery
   结果验证。
 
@@ -1188,7 +1188,7 @@ export_jobs_total
 ```
 
 日志必须包含 `crawl_run_id`、`watch_id`、`tid`、`uid` 和 `event_id`，但不得包含 Cookie、
-device key、飞书 `app_secret`、tenant token 和 API token。
+设备密钥、飞书 `app_secret`、tenant access token 和 API token。
 
 ## 16. 风险与应对
 
