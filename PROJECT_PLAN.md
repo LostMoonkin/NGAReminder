@@ -800,6 +800,8 @@ Cookie 原文或可逆的日志摘要。
   migration。
 - 管理页可粘贴完整 Cookie 或分别录入 Passport 字段；后端为跨用户监控加密保存完整 Cookie，
   并提取 `ngaPassportUid`、`ngaPassportCid`，全部使用 AES-256-GCM 和随机 nonce 加密保存。
+- 自动续期收集本次登录的完整 cookie jar，验证成功后与旧 Cookie 合并并写入 `cookie_encrypted`；
+  即使旧账号只有 UID/CID，也不得让完整 Cookie 列保持 `NULL`。
 - Cookie 查询 API 只返回脱敏 UID、认证状态和检查时间，不回显凭据。
 - 连通性测试使用用户回复接口判断认证状态；用户资料页不用于认证，因为已验证无效 CID
   仍可能正常取得公开资料。

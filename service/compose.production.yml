@@ -36,6 +36,7 @@ services:
       - "127.0.0.1:12888:12888"
 
     # SQLite 数据库和资源文件必须放在同一个卷中，保证备份/恢复的一致性。
+    # 改用宿主机或 NFS 绑定目录时，该目录必须允许容器用户 999:999 读写。
     # 不要使用 docker compose down -v，否则会删除业务数据卷。
     volumes:
       - nga-reminder-data:/data

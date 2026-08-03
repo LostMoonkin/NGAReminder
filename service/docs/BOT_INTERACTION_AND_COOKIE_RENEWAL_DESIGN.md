@@ -873,13 +873,14 @@ dispatcher 验证 integration、actor、conversation 和 request ID 全部匹配
 
 #### Cookie 验证和替换
 
-取得候选 UID/CID 后：
+取得候选 UID/CID 和本次登录的完整候选 cookie jar 后：
 
-1. 调用现有 `NgaClient::check_credentials`。
+1. 使用完整候选 Cookie 调用现有 `NgaClient::check_credentials`。
 2. 校验返回 UID 与候选 UID 一致。
-3. 只有验证成功才加密候选 Cookie。
+3. 只有验证成功才将候选 Cookie 与旧完整 Cookie 合并并加密；候选字段覆盖旧值，旧的其他字段保留，UID/CID 强制使用已验证值。旧 `cookie_encrypted` 为空时也必须创建完整 Cookie 密文。
 4. 在一个数据库事务内：
    - 替换 `passport_uid_encrypted/passport_cid_encrypted`；
+   - 写入非空 `cookie_encrypted`；
    - 设置账号 `status = 'valid'`；
    - 更新 `last_auth_checked_at/last_renewal_at`；
    - 清空续期错误；

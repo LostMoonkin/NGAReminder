@@ -67,7 +67,7 @@ export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 docker compose -f compose.production.yml up -d
 ```
 
-The template binds `127.0.0.1:12888` and is intended to sit behind Nginx. Set `NGA_REMINDER_IMAGE` to an immutable GHCR tag for upgrades or rollbacks. Do not run `docker compose down -v`, which removes the SQLite data volume. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for backup and restore.
+The template binds `127.0.0.1:12888` and is intended to sit behind Nginx. The service runs as UID/GID `999:999`; grant that numeric user write access before replacing `/data` with a host or NFS bind mount. Set `NGA_REMINDER_IMAGE` to an immutable GHCR tag for upgrades or rollbacks. Do not run `docker compose down -v`, which removes the SQLite data volume. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for backup and restore.
 
 Roles and public probes:
 

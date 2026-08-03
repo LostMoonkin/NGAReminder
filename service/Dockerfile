@@ -14,10 +14,11 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --create-home --uid 10001 nga-reminder \
+RUN groupadd --gid 999 nga-reminder \
+    && useradd --system --create-home --uid 999 --gid 999 nga-reminder \
     && mkdir -p /app/data /data \
     && chown -R nga-reminder:nga-reminder /app /data
-USER nga-reminder
+USER 999:999
 WORKDIR /app
 
 COPY --from=builder /usr/local/bin/nga-reminder /usr/local/bin/nga-reminder

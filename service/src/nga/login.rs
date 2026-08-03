@@ -102,6 +102,7 @@ pub enum LoginStep {
     CookieCandidate {
         passport_uid: SecretString,
         passport_cid: SecretString,
+        cookie_header: SecretString,
     },
     UnsupportedChallenge {
         kind: String,
@@ -300,15 +301,34 @@ impl NgaWebLoginV1 {
         if body.len() > MAX_PAGE_BYTES {
             return Err(NgaLoginError::ProtocolChanged);
         }
-        match parse_login_response(&body) {
+        let step = match parse_login_response(&body) {
             Err(NgaLoginError::CandidateCookieMissing { response_shape }) => self
                 .cookie_candidate()
                 .map(|(uid, cid)| LoginStep::CookieCandidate {
                     passport_uid: SecretString::from(uid),
                     passport_cid: SecretString::from(cid),
+                    cookie_header: SecretString::from(String::new()),
                 })
                 .ok_or(NgaLoginError::CandidateCookieMissing { response_shape }),
             result => result,
+        }?;
+        match step {
+            LoginStep::CookieCandidate {
+                passport_uid,
+                passport_cid,
+                ..
+            } => {
+                let cookie_header = self.cookie_header_for_candidate(
+                    passport_uid.expose_secret(),
+                    passport_cid.expose_secret(),
+                );
+                Ok(LoginStep::CookieCandidate {
+                    passport_uid,
+                    passport_cid,
+                    cookie_header: SecretString::from(cookie_header),
+                })
+            }
+            other => Ok(other),
         }
     }
 
@@ -326,6 +346,28 @@ impl NgaWebLoginV1 {
             .value
             .as_str();
         valid_cookie_candidate(uid, cid)
+    }
+
+    fn cookie_header_for_candidate(&self, passport_uid: &str, passport_cid: &str) -> String {
+        let mut pairs = self.cookie_jar.clone();
+        for (name, value) in [
+            ("ngaPassportUid", passport_uid),
+            ("ngaPassportCid", passport_cid),
+        ] {
+            if let Some(existing) = pairs.iter_mut().find(|pair| pair.name == name) {
+                existing.value = value.to_owned();
+            } else {
+                pairs.push(CookiePair {
+                    name: name.to_owned(),
+                    value: value.to_owned(),
+                });
+            }
+        }
+        pairs
+            .into_iter()
+            .map(|pair| format!("{}={}", pair.name, pair.value))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -361,6 +403,10 @@ fn parse_login_response(body: &[u8]) -> Result<LoginStep, NgaLoginError> {
 
     if let Some(candidate) = extract_cookie_candidate_bounded(data3) {
         return Ok(LoginStep::CookieCandidate {
+            cookie_header: SecretString::from(format!(
+                "ngaPassportUid={}; ngaPassportCid={}",
+                candidate.0, candidate.1
+            )),
             passport_uid: SecretString::from(candidate.0),
             passport_cid: SecretString::from(candidate.1),
         });
@@ -698,9 +744,15 @@ mod tests {
             LoginStep::CookieCandidate {
                 passport_uid,
                 passport_cid,
+                cookie_header,
             } => {
                 assert_eq!(passport_uid.expose_secret(), "12345678");
                 assert!(!passport_cid.expose_secret().is_empty());
+                assert!(
+                    cookie_header
+                        .expose_secret()
+                        .contains("ngaPassportUid=12345678")
+                );
             }
             _ => panic!("expected cookie candidate"),
         }
@@ -841,10 +893,20 @@ mod tests {
                 .parse()
                 .expect("header must parse"),
         );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "login_session=fresh; Path=/; HttpOnly"
+                .parse()
+                .expect("header must parse"),
+        );
         adapter.capture_cookies(&headers);
         assert_eq!(
             adapter.cookie_candidate(),
             Some(("123456".to_owned(), "candidate-token".to_owned()))
+        );
+        assert_eq!(
+            adapter.cookie_header_for_candidate("123456", "candidate-token"),
+            "ngaPassportUid=123456; ngaPassportCid=candidate-token; login_session=fresh"
         );
     }
 

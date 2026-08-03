@@ -80,7 +80,7 @@ export NGA_REMINDER__CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 docker compose -f compose.production.yml up -d
 ```
 
-模板绑定 `127.0.0.1:12888`，预期由 Nginx 反向代理。升级或回滚时，在执行 `docker compose ... up -d` 前将 `NGA_REMINDER_IMAGE` 设置为不可变的 GHCR 标签；不要执行 `docker compose down -v`，否则会删除 SQLite 数据卷。备份和恢复流程见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+模板绑定 `127.0.0.1:12888`，预期由 Nginx 反向代理。容器内服务固定以 UID/GID `999:999` 运行；若将 `/data` 改为宿主机或 NFS 绑定目录，必须预先授予该数值用户读写权限。升级或回滚时，在执行 `docker compose ... up -d` 前将 `NGA_REMINDER_IMAGE` 设置为不可变的 GHCR 标签；不要执行 `docker compose down -v`，否则会删除 SQLite 数据卷。备份和恢复流程见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 运行角色：
 
@@ -105,6 +105,8 @@ Authorization: Bearer <NGA_REMINDER__API_TOKEN>
 ```
 
 最小管理页面位于 `GET /admin`。页面会建立带 HttpOnly、SameSite=Strict 属性的管理员 session，并可加密保存完整 NGA Cookie 或单独保存两个 Passport 值。跨用户 UID 搜索需要完整浏览器 Cookie 和对应的导航请求头；只配置 Passport UID/CID 仍可用于主题监控和账号自身查询。API 响应只暴露脱敏后的 UID 与完整 Cookie 是否已配置，绝不会返回凭据。
+
+自动续期成功时会收集登录流程返回的完整 cookie jar，与账号已有 Cookie 合并后加密写入 `cookie_encrypted`；候选中的新字段覆盖旧值，旧的其他字段保留，并强制以已验证的新 UID/CID 为准。即使账号此前只有两个 Passport 字段，续期后也会建立完整 Cookie 凭据。
 
 ## 主题和用户监控
 

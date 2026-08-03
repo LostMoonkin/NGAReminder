@@ -297,9 +297,11 @@ async fn captcha(
         Ok(crate::nga::login::LoginStep::CookieCandidate {
             passport_uid,
             passport_cid,
+            cookie_header,
         }) => {
             let uid = passport_uid.expose_secret().to_string();
             let cid = passport_cid.expose_secret().to_string();
+            let cookie = cookie_header.expose_secret().to_string();
             let moved = session::transition(
                 state,
                 &session.id,
@@ -312,7 +314,7 @@ async fn captcha(
             if !moved {
                 return Ok(vec!["续期请求状态已变化。".to_owned()]);
             }
-            match state.nga_client.check_credentials(&uid, &cid).await {
+            match state.nga_client.check_credentials(&uid, &cookie).await {
                 Ok(check) if check.uid.to_string() == uid => {
                     let restored = session::complete_success(
                         state,
@@ -320,6 +322,7 @@ async fn captcha(
                         &session.account_id,
                         &uid,
                         &cid,
+                        &cookie,
                     )
                     .await
                     .map_err(|_| CommandError::internal())?;

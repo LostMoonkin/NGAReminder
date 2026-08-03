@@ -17,6 +17,7 @@ pub const CONFIRMATION_TTL: time::Duration = time::Duration::seconds(15 * 60);
 pub const MAX_CAPTCHA_ATTEMPTS: i32 = 3;
 pub const FAILURE_COOLDOWN: time::Duration = time::Duration::seconds(15 * 60);
 pub const MAX_COOLDOWN: time::Duration = time::Duration::seconds(30 * 60);
+const MAX_COOKIE_HEADER_LENGTH: usize = 16_384;
 
 #[derive(Clone, Debug)]
 pub struct LoginSession {
@@ -593,6 +594,7 @@ pub async fn complete_success(
     account_id: &str,
     passport_uid: &str,
     passport_cid: &str,
+    candidate_cookie_header: &str,
 ) -> Result<usize, sqlx::Error> {
     let uid_encrypted = state
         .credential_cipher
@@ -607,18 +609,32 @@ pub async fn complete_success(
             .bind(account_id)
             .fetch_one(&state.pool)
             .await?;
-    let cookie_encrypted = existing_cookie
+    let existing_cookie = existing_cookie
         .map(|value| {
-            let cookie = state
-                .credential_cipher
-                .decrypt(&value)
-                .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
             state
                 .credential_cipher
-                .encrypt(&refresh_cookie_header(&cookie, passport_uid, passport_cid))
+                .decrypt(&value)
                 .map_err(|e| sqlx::Error::Protocol(format!("{e}")))
         })
         .transpose()?;
+    let cookie = merge_cookie_headers(
+        existing_cookie.as_deref(),
+        candidate_cookie_header,
+        passport_uid,
+        passport_cid,
+    );
+    if cookie.is_empty()
+        || cookie.len() > MAX_COOKIE_HEADER_LENGTH
+        || cookie.chars().any(char::is_control)
+    {
+        return Err(sqlx::Error::Protocol(
+            "invalid renewed cookie header".to_owned(),
+        ));
+    }
+    let cookie_encrypted = state
+        .credential_cipher
+        .encrypt(&cookie)
+        .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
 
     let mut tx = state.pool.begin().await?;
     // 1. Replace the Cookie and mark the account valid.
@@ -682,34 +698,45 @@ pub async fn complete_success(
     Ok(restored as usize)
 }
 
-fn refresh_cookie_header(cookie: &str, passport_uid: &str, passport_cid: &str) -> String {
-    let mut saw_uid = false;
-    let mut saw_cid = false;
-    let mut parts = cookie
-        .split(';')
-        .filter_map(|part| {
-            let (name, value) = part.trim().split_once('=')?;
-            let value = match name {
-                "ngaPassportUid" => {
-                    saw_uid = true;
-                    passport_uid
-                }
-                "ngaPassportCid" => {
-                    saw_cid = true;
-                    passport_cid
-                }
-                _ => value,
+fn merge_cookie_headers(
+    existing_cookie: Option<&str>,
+    candidate_cookie: &str,
+    passport_uid: &str,
+    passport_cid: &str,
+) -> String {
+    let mut parts = Vec::<(String, String)>::new();
+    for source in existing_cookie.into_iter().chain([candidate_cookie]) {
+        for part in source.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
             };
-            Some(format!("{name}={value}"))
-        })
-        .collect::<Vec<_>>();
-    if !saw_uid {
-        parts.push(format!("ngaPassportUid={passport_uid}"));
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            if let Some(existing) = parts.iter_mut().find(|(saved, _)| saved == name) {
+                existing.1 = value.to_owned();
+            } else {
+                parts.push((name.to_owned(), value.to_owned()));
+            }
+        }
     }
-    if !saw_cid {
-        parts.push(format!("ngaPassportCid={passport_cid}"));
+    for (name, value) in [
+        ("ngaPassportUid", passport_uid),
+        ("ngaPassportCid", passport_cid),
+    ] {
+        if let Some(existing) = parts.iter_mut().find(|(saved, _)| saved == name) {
+            existing.1 = value.to_owned();
+        } else {
+            parts.push((name.to_owned(), value.to_owned()));
+        }
     }
-    parts.join("; ")
+    parts
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn session_from_row(row: sqlx::any::AnyRow) -> Result<LoginSession, sqlx::Error> {
@@ -900,19 +927,33 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        LoginSessionStatus, complete_success, on_auth_failure, refresh_cookie_header,
+        LoginSessionStatus, complete_success, merge_cookie_headers, on_auth_failure,
         request_manual_renewal, transition,
     };
 
     #[test]
     fn cookie_renewal_replaces_passport_values_and_preserves_other_cookies() {
         assert_eq!(
-            refresh_cookie_header(
-                "session=keep; ngaPassportUid=old; ngaPassportCid=old-cid",
+            merge_cookie_headers(
+                Some("session=keep; ngaPassportUid=old; ngaPassportCid=old-cid"),
+                "login_session=fresh; ngaPassportCid=candidate-cid",
                 "new",
                 "new-cid",
             ),
-            "session=keep; ngaPassportUid=new; ngaPassportCid=new-cid"
+            "session=keep; ngaPassportUid=new; ngaPassportCid=new-cid; login_session=fresh"
+        );
+    }
+
+    #[test]
+    fn cookie_renewal_builds_a_full_cookie_without_an_existing_cookie() {
+        assert_eq!(
+            merge_cookie_headers(
+                None,
+                "login_session=fresh; ngaPassportUid=candidate; ngaPassportCid=candidate-cid",
+                "new",
+                "new-cid",
+            ),
+            "login_session=fresh; ngaPassportUid=new; ngaPassportCid=new-cid"
         );
     }
     use crate::{
@@ -1223,10 +1264,31 @@ mod tests {
         .await
         .expect("session must insert");
 
-        let restored = complete_success(&state, "sess", "acct", "123456", "new-cid")
-            .await
-            .expect("success must commit");
+        let restored = complete_success(
+            &state,
+            "sess",
+            "acct",
+            "123456",
+            "new-cid",
+            "login_session=fresh; ngaPassportUid=123456; ngaPassportCid=new-cid",
+        )
+        .await
+        .expect("success must commit");
         assert_eq!(restored, 1);
+
+        let encrypted_cookie: Vec<u8> =
+            sqlx::query_scalar("SELECT cookie_encrypted FROM nga_accounts WHERE id = 'acct'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("renewed full cookie must be stored");
+        let saved_cookie = state
+            .credential_cipher
+            .decrypt(&encrypted_cookie)
+            .expect("saved cookie must decrypt");
+        assert_eq!(
+            saved_cookie,
+            "login_session=fresh; ngaPassportUid=123456; ngaPassportCid=new-cid"
+        );
 
         let row =
             sqlx::query("SELECT enabled, pause_reason FROM watch_targets WHERE id = 'w-auth'")
