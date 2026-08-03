@@ -1,14 +1,12 @@
 use async_trait::async_trait;
 use secrecy::ExposeSecret;
+use tracing::warn;
 
 use crate::{
     app::AppState,
     bot::commands::{BotCommandHandler, CommandContext, CommandError, CommandErrorKind},
     bot::domain::{CommandDescriptor, ImagePayload},
-    bot::outbox,
-    bot::session::{
-        self, LoginProtocolContext, LoginSession, LoginSessionStatus, MAX_CAPTCHA_ATTEMPTS,
-    },
+    bot::session::{self, LoginSession, LoginSessionStatus, MAX_CAPTCHA_ATTEMPTS},
     nga::{AuthCheckError, login::NgaWebLoginV1},
     platform::integration::BotRole,
 };
@@ -172,31 +170,21 @@ async fn confirm(context: CommandContext, request_id: &str) -> Result<Vec<String
         ]);
     }
 
-    // Load renewal credentials (decrypted only now) and prepare the challenge.
-    let Some(credentials) = session::load_renewal_credentials(state, &session.account_id)
-        .await
-        .map_err(|_| CommandError::internal())?
-    else {
-        session::transition(
-            state,
-            &session.id,
-            &[LoginSessionStatus::Starting],
-            LoginSessionStatus::Failed,
-            Some("renewal_not_configured"),
-        )
-        .await
-        .map_err(|_| CommandError::internal())?;
-        session::clear_protocol_context(state, &session.id)
-            .await
-            .map_err(|_| CommandError::internal())?;
-        return Ok(vec!["续期凭据未配置，请到管理台设置。".to_owned()]);
-    };
-
+    // Challenge preparation does not need the password. Renewal credentials
+    // remain encrypted until the user submits the captcha.
     let mut adapter = NgaWebLoginV1::new(state.config.nga_user_agent.as_str())
         .map_err(|_| CommandError::internal())?;
     let challenge = match adapter.prepare_challenge().await {
         Ok(challenge) => challenge,
         Err(error) => {
+            warn!(
+                session_id = %session.id,
+                account_id = %session.account_id,
+                phase = "prepare_challenge",
+                error_kind = error.kind(),
+                error = %error,
+                "NGA Cookie renewal failed"
+            );
             fail_with_kind(state, &session, error.kind()).await?;
             return Ok(vec![
                 "验证码获取失败，续期已终止。请稍后重试或到管理台手动更新 Cookie。".to_owned(),
@@ -204,53 +192,27 @@ async fn confirm(context: CommandContext, request_id: &str) -> Result<Vec<String
         }
     };
 
-    // Persist context + enqueue captcha image + move to awaiting_captcha.
-    session::save_protocol_context(state, &session.id, &challenge.context)
-        .await
-        .map_err(|_| CommandError::internal())?;
-    let dedupe_key = format!(
-        "login:{}:captcha:{}",
-        session.id, challenge.context.captcha_revision
-    );
-    let image_payload = ImagePayload {
-        mime_type: challenge.image_mime.clone(),
-        bytes: challenge.image,
-    };
-    let enqueued = outbox::enqueue_image(
+    let moved = session::store_challenge_and_enqueue(
         state,
-        &session.integration_id,
-        None,
-        &session.conversation_id,
-        &dedupe_key,
-        image_payload,
+        &session,
+        LoginSessionStatus::Starting,
+        &challenge.context,
+        ImagePayload {
+            mime_type: challenge.image_mime,
+            bytes: challenge.image,
+        },
         challenge.expires_at,
     )
     .await
     .map_err(|_| CommandError::internal())?;
-    if !enqueued {
-        // Duplicate image already queued; keep the flow consistent.
-    }
-    let moved = session::transition(
-        state,
-        &session.id,
-        &[LoginSessionStatus::Starting],
-        LoginSessionStatus::AwaitingCaptcha,
-        None,
-    )
-    .await
-    .map_err(|_| CommandError::internal())?;
     if !moved {
-        session::clear_protocol_context(state, &session.id)
-            .await
-            .map_err(|_| CommandError::internal())?;
         return Ok(vec!["续期请求状态已变化，请重新确认。".to_owned()]);
     }
 
-    let _ = credentials;
-    Ok(vec![format!(
-        "验证码图片已发送。请在 10 分钟内回复：\n`/login captcha {} <验证码>`",
-        session.id
-    )])
+    // The worker sends the instruction only after Feishu confirms that the
+    // image was uploaded and delivered. Returning success text here would
+    // falsely claim delivery when the image outbox later fails.
+    Ok(Vec::new())
 }
 
 async fn captcha(
@@ -308,6 +270,10 @@ async fn captcha(
         .map_err(|_| CommandError::internal())?;
         return Ok(vec!["登录会话已失效，请重新发起续期。".to_owned()]);
     };
+    if !context_data.is_current_and_unexpired() {
+        fail_with_kind(state, &session, "captcha_expired").await?;
+        return Ok(vec!["登录会话或验证码已过期，请重新发起续期。".to_owned()]);
+    }
     let Some(credentials) = session::load_renewal_credentials(state, &session.account_id)
         .await
         .map_err(|_| CommandError::internal())?
@@ -362,6 +328,13 @@ async fn captcha(
                     )])
                 }
                 Ok(_) => {
+                    warn!(
+                        session_id = %session.id,
+                        account_id = %session.account_id,
+                        phase = "validate_cookie",
+                        error_kind = "candidate_uid_mismatch",
+                        "NGA Cookie renewal failed"
+                    );
                     session::mark_renewal_failure(
                         state,
                         &session.account_id,
@@ -377,6 +350,13 @@ async fn captcha(
                     ])
                 }
                 Err(AuthCheckError::Unauthorized) => {
+                    warn!(
+                        session_id = %session.id,
+                        account_id = %session.account_id,
+                        phase = "validate_cookie",
+                        error_kind = "candidate_cookie_invalid",
+                        "NGA Cookie renewal failed"
+                    );
                     session::mark_renewal_failure(
                         state,
                         &session.account_id,
@@ -390,7 +370,15 @@ async fn captcha(
                         "新 Cookie 验证未通过，已保留旧 Cookie。请到管理台手动更新。".to_owned(),
                     ])
                 }
-                Err(_) => {
+                Err(error) => {
+                    warn!(
+                        session_id = %session.id,
+                        account_id = %session.account_id,
+                        phase = "validate_cookie",
+                        error_kind = "candidate_cookie_check_failed",
+                        error = %error,
+                        "NGA Cookie renewal failed"
+                    );
                     session::mark_renewal_failure(
                         state,
                         &session.account_id,
@@ -430,6 +418,14 @@ async fn captcha(
             ])
         }
         Err(error) => {
+            warn!(
+                session_id = %session.id,
+                account_id = %session.account_id,
+                phase = "submit_login",
+                error_kind = error.kind(),
+                error = %error,
+                "NGA Cookie renewal failed"
+            );
             match error.kind() {
                 "captcha_invalid" | "captcha_expired" => {
                     let attempts = session.captcha_attempt_count + 1;
@@ -455,19 +451,11 @@ async fn captcha(
                         Ok(challenge) => {
                             let mut refreshed = challenge.context.clone();
                             refreshed.captcha_revision = context_data.captcha_revision + 1;
-                            session::save_protocol_context(state, &session.id, &refreshed)
-                                .await
-                                .map_err(|_| CommandError::internal())?;
-                            let dedupe_key = format!(
-                                "login:{}:captcha:{}",
-                                session.id, refreshed.captcha_revision
-                            );
-                            outbox::enqueue_image(
+                            let moved = session::store_challenge_and_enqueue(
                                 state,
-                                &session.integration_id,
-                                None,
-                                &session.conversation_id,
-                                &dedupe_key,
+                                &session,
+                                LoginSessionStatus::Submitting,
+                                &refreshed,
                                 ImagePayload {
                                     mime_type: challenge.image_mime,
                                     bytes: challenge.image,
@@ -476,28 +464,22 @@ async fn captcha(
                             )
                             .await
                             .map_err(|_| CommandError::internal())?;
-                            session::transition(
-                                state,
-                                &session.id,
-                                &[LoginSessionStatus::Submitting],
-                                LoginSessionStatus::AwaitingCaptcha,
-                                None,
-                            )
-                            .await
-                            .map_err(|_| CommandError::internal())?;
-                            Ok(vec![format!(
-                                "验证码{}，已重新发送新验证码（第 {} 次，最多 {} 次）。\n`/login captcha {} <验证码>`",
-                                if error.kind() == "captcha_expired" {
-                                    "已过期"
-                                } else {
-                                    "错误"
-                                },
-                                attempts + 1,
-                                MAX_CAPTCHA_ATTEMPTS,
-                                session.id
-                            )])
+                            if !moved {
+                                return Ok(vec!["续期请求状态已变化。".to_owned()]);
+                            }
+                            // As with the first challenge, the worker sends
+                            // instructions only after confirmed image delivery.
+                            Ok(Vec::new())
                         }
                         Err(prepare_error) => {
+                            warn!(
+                                session_id = %session.id,
+                                account_id = %session.account_id,
+                                phase = "refresh_challenge",
+                                error_kind = prepare_error.kind(),
+                                error = %prepare_error,
+                                "NGA Cookie renewal failed"
+                            );
                             fail_with_kind(state, &session, prepare_error.kind()).await?;
                             Ok(vec!["新验证码获取失败，续期已终止。请稍后重试或到管理台手动更新 Cookie。".to_owned()])
                         }
@@ -528,6 +510,16 @@ async fn captcha(
                     fail_with_kind(state, &session, error.kind()).await?;
                     Ok(vec![
                         "NGA 登录协议发生变化，自动续期已停止。请到管理台手动更新 Cookie。"
+                            .to_owned(),
+                    ])
+                }
+                "candidate_cookie_missing" => {
+                    session::mark_renewal_failure(state, &session.account_id, error.kind(), false)
+                        .await
+                        .map_err(|_| CommandError::internal())?;
+                    fail_with_kind(state, &session, error.kind()).await?;
+                    Ok(vec![
+                        "NGA 登录响应中没有找到可识别的新 Cookie，已保留旧 Cookie。错误类型：candidate_cookie_missing；请查看服务端结构化日志后重新发起续期。"
                             .to_owned(),
                     ])
                 }
@@ -614,7 +606,3 @@ async fn fail_with_kind(
         .map_err(|_| CommandError::internal())?;
     Ok(())
 }
-
-// Re-export the context type so this module compiles with the import above.
-#[allow(unused_imports)]
-use LoginProtocolContext as _ContextType;

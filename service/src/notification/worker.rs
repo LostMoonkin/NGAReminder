@@ -1,15 +1,20 @@
 use sqlx::Row;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     app::AppState,
-    bot::adapter::{BotAdapter, BotSendError},
-    bot::adapters::FeishuAdapter,
-    bot::domain::{BotMessageKind, BotOutboundMessage},
+    bot::{
+        adapter::{BotAdapter, BotSendError},
+        adapters::FeishuAdapter,
+        domain::{BotMessageKind, BotOutboundMessage},
+        outbox,
+        session::{self, LoginSessionStatus},
+    },
     config::DatabaseBackend,
     notification::alerts,
     notification::sender::{Notification, SendError, send_configured},
-    platform::integration::FeishuCredentials,
+    platform::integration::{IntegrationCredentials, parse_stored_credentials},
 };
 
 const BOT_MAX_ATTEMPTS: i32 = 3;
@@ -33,8 +38,9 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
     let expired = format!(
         "UPDATE bot_outbox SET status = 'dead', payload_encrypted = {clear_payload},
          last_error_kind = 'expired', delivered_at = CURRENT_TIMESTAMP
-         WHERE status IN ('pending', 'failed')
-           AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP"
+         WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP
+           AND (status IN ('pending', 'failed')
+                OR (status = 'sending' AND lease_until <= CURRENT_TIMESTAMP))"
     );
     sqlx::query(&expired).execute(&state.pool).await?;
 
@@ -47,7 +53,7 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
          attempt_count = attempt_count + 1, lease_until = {lease}
          WHERE id = (
            SELECT o.id FROM bot_outbox o
-           WHERE o.status IN ('pending', 'failed')
+           WHERE o.status IN ('pending', 'failed', 'sending')
              AND o.next_attempt_at <= CURRENT_TIMESTAMP
              AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP)
              AND (o.lease_until IS NULL OR o.lease_until <= CURRENT_TIMESTAMP)
@@ -82,22 +88,42 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
         _ => BotMessageKind::Text,
     };
     let encrypted: Vec<u8> = row.get("payload_encrypted");
-    let payload = state
-        .credential_cipher
-        .decrypt(&encrypted)
-        .map_err(|_| anyhow::anyhow!("bot outbox payload decryption failed"))?;
+    let payload = match state.credential_cipher.decrypt(&encrypted) {
+        Ok(payload) => payload,
+        Err(_) => {
+            fail_claimed_bot(
+                state,
+                &outbox_id,
+                attempt,
+                "payload_decryption_failed",
+                false,
+            )
+            .await?;
+            return Ok(true);
+        }
+    };
     let credentials_encrypted: Vec<u8> = row.get("credentials_encrypted");
-    let credentials_json = state
-        .credential_cipher
-        .decrypt(&credentials_encrypted)
-        .map_err(|_| anyhow::anyhow!("integration credentials decryption failed"))?;
+    let credentials_json = match state.credential_cipher.decrypt(&credentials_encrypted) {
+        Ok(credentials) => credentials,
+        Err(_) => {
+            fail_claimed_bot(
+                state,
+                &outbox_id,
+                attempt,
+                "credential_decryption_failed",
+                true,
+            )
+            .await?;
+            return Ok(true);
+        }
+    };
     let dedupe_key: String = row.get("dedupe_key");
     let inbound_event_id: Option<String> = row.get("inbound_event_id");
     let platform: String = row.get("platform");
 
     let message = BotOutboundMessage {
         integration_id: integration_id.clone(),
-        conversation_id,
+        conversation_id: conversation_id.clone(),
         reply_to_message_id,
         message_kind,
         payload: payload.into_bytes(),
@@ -106,8 +132,14 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
 
     let delivery = match platform.as_str() {
         "feishu" => {
-            let credentials: FeishuCredentials = serde_json::from_str(&credentials_json)
-                .map_err(|_| anyhow::anyhow!("invalid Feishu credentials"))?;
+            let credentials = match parse_stored_credentials(&credentials_json) {
+                Ok(IntegrationCredentials::Feishu(credentials)) => credentials,
+                Ok(_) | Err(_) => {
+                    fail_claimed_bot(state, &outbox_id, attempt, "invalid_credentials", true)
+                        .await?;
+                    return Ok(true);
+                }
+            };
             let adapter = FeishuAdapter::new(integration_id.clone(), credentials);
             adapter.deliver(&message).await
         }
@@ -122,6 +154,13 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
 
     match delivery {
         Ok(receipt) => {
+            if message_kind == BotMessageKind::Image {
+                // Enqueue the follow-up before marking the image row complete.
+                // If this database write fails, the leased image is retried
+                // with the same platform UUID and outbox dedupe key.
+                enqueue_captcha_instruction(state, &integration_id, &conversation_id, &dedupe_key)
+                    .await?;
+            }
             sqlx::query(
                 "UPDATE bot_outbox SET status = 'delivered', lease_until = NULL,
                  delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
@@ -142,6 +181,16 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
         Err(error) => {
             let retryable = bot_error_retryable(&error) && attempt < BOT_MAX_ATTEMPTS;
             let kind = bot_error_kind(&error);
+            warn!(
+                outbox_id = %outbox_id,
+                integration_id = %integration_id,
+                message_kind = message_kind.as_str(),
+                attempt,
+                retryable,
+                error_kind = kind,
+                error_detail = %bot_error_detail(&error),
+                "bot message delivery failed"
+            );
             let next = match state.config.database_backend {
                 DatabaseBackend::Postgres => {
                     "CURRENT_TIMESTAMP + (CASE attempt_count WHEN 1 THEN 30 WHEN 2 THEN 120 ELSE 600 END * INTERVAL '1 second')"
@@ -166,6 +215,10 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
                 .bind(&outbox_id)
                 .execute(&state.pool)
                 .await?;
+            if !retryable && message_kind == BotMessageKind::Image {
+                fail_captcha_image_session(state, &integration_id, &conversation_id, &dedupe_key)
+                    .await?;
+            }
         }
     }
     Ok(true)
@@ -181,6 +234,123 @@ fn bot_error_kind(error: &BotSendError) -> &'static str {
         BotSendError::Platform(_) => "platform_error",
         BotSendError::ImageUpload(_) => "image_upload_error",
     }
+}
+
+fn bot_error_detail(error: &BotSendError) -> String {
+    let detail = match error {
+        BotSendError::InvalidPayload => "invalid outbound message payload",
+        BotSendError::Platform(detail) | BotSendError::ImageUpload(detail) => detail,
+    };
+    detail
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect()
+}
+
+fn captcha_session_id(dedupe_key: &str) -> Option<&str> {
+    let value = dedupe_key.strip_prefix("login:")?;
+    let (session_id, revision) = value.split_once(":captcha:")?;
+    if session_id.is_empty() || revision.parse::<u32>().is_err() {
+        return None;
+    }
+    Some(session_id)
+}
+
+async fn enqueue_captcha_instruction(
+    state: &AppState,
+    integration_id: &str,
+    conversation_id: &str,
+    image_dedupe_key: &str,
+) -> Result<(), sqlx::Error> {
+    let Some(session_id) = captcha_session_id(image_dedupe_key) else {
+        return Ok(());
+    };
+    let Some(login_session) = session::get_session(state, session_id).await? else {
+        return Ok(());
+    };
+    if login_session.status != LoginSessionStatus::AwaitingCaptcha {
+        return Ok(());
+    }
+    let text =
+        format!("验证码图片已发送。请在 10 分钟内回复：\n`/login captcha {session_id} <验证码>`");
+    outbox::enqueue_text_reply(
+        state,
+        integration_id,
+        None,
+        conversation_id,
+        None,
+        &format!("{image_dedupe_key}:instruction"),
+        &text,
+        Some(time::OffsetDateTime::now_utc() + time::Duration::minutes(10)),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn fail_captcha_image_session(
+    state: &AppState,
+    integration_id: &str,
+    conversation_id: &str,
+    image_dedupe_key: &str,
+) -> Result<(), sqlx::Error> {
+    let Some(session_id) = captcha_session_id(image_dedupe_key) else {
+        return Ok(());
+    };
+    let failed = session::transition(
+        state,
+        session_id,
+        &[LoginSessionStatus::AwaitingCaptcha],
+        LoginSessionStatus::Failed,
+        Some("captcha_image_delivery_failed"),
+    )
+    .await?;
+    if !failed {
+        return Ok(());
+    }
+    session::clear_protocol_context(state, session_id).await?;
+    outbox::enqueue_text_reply(
+        state,
+        integration_id,
+        None,
+        conversation_id,
+        None,
+        &format!("{image_dedupe_key}:delivery-failed"),
+        "验证码图片上传失败，本次续期已终止。请查看服务端日志中的飞书错误码，检查请求参数、`im:resource` 权限和应用发布状态后重新发起续期。",
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn fail_claimed_bot(
+    state: &AppState,
+    outbox_id: &str,
+    attempt: i32,
+    kind: &str,
+    retryable: bool,
+) -> Result<(), sqlx::Error> {
+    let should_retry = retryable && attempt < BOT_MAX_ATTEMPTS;
+    let next = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '30 seconds'",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+30 seconds')",
+    };
+    let clear_payload = match state.config.database_backend {
+        DatabaseBackend::Postgres => "'\\x00'::bytea",
+        DatabaseBackend::Sqlite => "X'00'",
+    };
+    sqlx::query(&format!(
+        "UPDATE bot_outbox SET status = $1, lease_until = NULL,
+         next_attempt_at = {next}, last_error_kind = $2,
+         payload_encrypted = CASE WHEN $1 = 'dead' THEN {clear_payload} ELSE payload_encrypted END
+         WHERE id = $3"
+    ))
+    .bind(if should_retry { "failed" } else { "dead" })
+    .bind(kind)
+    .bind(outbox_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
@@ -199,7 +369,7 @@ async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
            JOIN platform_integrations i ON i.id = c.integration_id
            WHERE a.resolved_at IS NULL AND c.enabled = 1
              AND i.enabled = 1 AND i.delivery_enabled = 1
-             AND o.status IN ('pending', 'failed')
+             AND o.status IN ('pending', 'failed', 'sending')
              AND o.next_attempt_at <= CURRENT_TIMESTAMP
              AND (o.lease_until IS NULL OR o.lease_until <= CURRENT_TIMESTAMP)
            ORDER BY o.next_attempt_at, o.created_at LIMIT 1
@@ -309,7 +479,7 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
            JOIN notification_channels c ON c.id = o.channel_id
            JOIN platform_integrations i ON i.id = c.integration_id
            WHERE c.enabled = 1 AND i.enabled = 1 AND i.delivery_enabled = 1
-             AND o.status IN ('pending', 'failed')
+             AND o.status IN ('pending', 'failed', 'sending')
              AND next_attempt_at <= CURRENT_TIMESTAMP
              AND (o.lease_until IS NULL OR o.lease_until <= CURRENT_TIMESTAMP)
            ORDER BY o.next_attempt_at, o.created_at LIMIT 1
@@ -489,7 +659,8 @@ fn post_url(tid: i64, page: i32, pid: Option<i64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::post_url;
+    use super::{bot_error_detail, captcha_session_id, post_url};
+    use crate::bot::adapter::BotSendError;
 
     #[test]
     fn reply_url_opens_thread_page_at_post_anchor() {
@@ -505,5 +676,23 @@ mod tests {
             post_url(47_264_819, 1, None),
             "https://bbs.nga.cn/read.php?tid=47264819"
         );
+    }
+
+    #[test]
+    fn captcha_dedupe_key_yields_only_valid_session_ids() {
+        assert_eq!(
+            captcha_session_id("login:session-id:captcha:2"),
+            Some("session-id")
+        );
+        assert_eq!(captcha_session_id("login:session-id:captcha:nope"), None);
+        assert_eq!(captcha_session_id("command:captcha:2"), None);
+    }
+
+    #[test]
+    fn bot_error_detail_is_single_line_and_bounded() {
+        let detail = format!("permission denied\n{}", "x".repeat(600));
+        let sanitized = bot_error_detail(&BotSendError::ImageUpload(detail));
+        assert!(!sanitized.contains('\n'));
+        assert_eq!(sanitized.chars().count(), 512);
     }
 }

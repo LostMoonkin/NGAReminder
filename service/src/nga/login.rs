@@ -8,6 +8,7 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rsa::{RsaPublicKey, pkcs1v15::Pkcs1v15Encrypt, pkcs8::DecodePublicKey};
 use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -22,6 +23,8 @@ const MAX_CAPTCHA_BYTES: usize = 1_000_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REDIRECTS: usize = 3;
 const PROTOCOL_VERSION: &str = "nga_web_login_v1";
+const MAX_CANDIDATE_SEARCH_DEPTH: usize = 4;
+const MAX_CANDIDATE_SEARCH_NODES: usize = 128;
 
 #[derive(Debug, Error)]
 pub enum NgaLoginError {
@@ -51,8 +54,8 @@ pub enum NgaLoginError {
     Http,
     #[error("NGA login protocol changed")]
     ProtocolChanged,
-    #[error("candidate cookie missing")]
-    CandidateCookieMissing,
+    #[error("candidate cookie missing ({response_shape})")]
+    CandidateCookieMissing { response_shape: String },
     #[error("candidate cookie invalid")]
     CandidateCookieInvalid,
     #[error("candidate UID mismatch")]
@@ -77,7 +80,7 @@ impl NgaLoginError {
             Self::Busy => "nga_login_busy",
             Self::Http => "nga_login_http_error",
             Self::ProtocolChanged => "nga_login_protocol_changed",
-            Self::CandidateCookieMissing => "candidate_cookie_missing",
+            Self::CandidateCookieMissing { .. } => "candidate_cookie_missing",
             Self::CandidateCookieInvalid => "candidate_cookie_invalid",
             Self::CandidateUidMismatch => "candidate_uid_mismatch",
             Self::Request(_) => "nga_login_http_error",
@@ -292,11 +295,37 @@ impl NgaWebLoginV1 {
         if !response.status().is_success() {
             return Err(NgaLoginError::Http);
         }
+        self.capture_cookies(response.headers());
         let body = response.bytes().await.map_err(NgaLoginError::Request)?;
         if body.len() > MAX_PAGE_BYTES {
             return Err(NgaLoginError::ProtocolChanged);
         }
-        parse_login_response(&body)
+        match parse_login_response(&body) {
+            Err(NgaLoginError::CandidateCookieMissing { response_shape }) => self
+                .cookie_candidate()
+                .map(|(uid, cid)| LoginStep::CookieCandidate {
+                    passport_uid: SecretString::from(uid),
+                    passport_cid: SecretString::from(cid),
+                })
+                .ok_or(NgaLoginError::CandidateCookieMissing { response_shape }),
+            result => result,
+        }
+    }
+
+    fn cookie_candidate(&self) -> Option<(String, String)> {
+        let uid = self
+            .cookie_jar
+            .iter()
+            .find(|pair| pair.name == "ngaPassportUid")?
+            .value
+            .as_str();
+        let cid = self
+            .cookie_jar
+            .iter()
+            .find(|pair| pair.name == "ngaPassportCid")?
+            .value
+            .as_str();
+        valid_cookie_candidate(uid, cid)
     }
 }
 
@@ -316,17 +345,21 @@ fn parse_login_response(body: &[u8]) -> Result<LoginStep, NgaLoginError> {
     }
 
     // data may be an array or an object with numeric keys.
-    let data = value.get("data").ok_or(NgaLoginError::ProtocolChanged)?;
-    let data3 = if let Some(array) = data.as_array() {
+    let data = value.get("data");
+    let data3 = if let Some(array) = data.and_then(serde_json::Value::as_array) {
         array.get(3)
-    } else if let Some(object) = data.as_object() {
+    } else if let Some(object) = data.and_then(serde_json::Value::as_object) {
         object.get("3")
     } else {
         None
-    }
-    .ok_or(NgaLoginError::ProtocolChanged)?;
+    };
+    let Some(data3) = data3 else {
+        return Err(NgaLoginError::CandidateCookieMissing {
+            response_shape: response_shape(&value, &serde_json::Value::Null),
+        });
+    };
 
-    if let Some(candidate) = extract_cookie_candidate(data3) {
+    if let Some(candidate) = extract_cookie_candidate_bounded(data3) {
         return Ok(LoginStep::CookieCandidate {
             passport_uid: SecretString::from(candidate.0),
             passport_cid: SecretString::from(candidate.1),
@@ -337,7 +370,9 @@ fn parse_login_response(body: &[u8]) -> Result<LoginStep, NgaLoginError> {
     if let Some(kind) = kind {
         return Ok(LoginStep::UnsupportedChallenge { kind });
     }
-    Err(NgaLoginError::CandidateCookieMissing)
+    Err(NgaLoginError::CandidateCookieMissing {
+        response_shape: response_shape(&value, data3),
+    })
 }
 
 fn map_login_error(error: &serde_json::Value) -> Result<LoginStep, NgaLoginError> {
@@ -419,21 +454,142 @@ fn extract_cookie_candidate(data3: &serde_json::Value) -> Option<(String, String
         ("access_uid", "access_token"),
         ("ngaPassportUid", "ngaPassportCid"),
     ] {
-        let Some(uid) = object.get(uid_key).and_then(|value| value.as_str()) else {
+        let Some(uid) = object.get(uid_key).and_then(candidate_uid_value) else {
             continue;
         };
         let Some(cid) = object.get(cid_key).and_then(|value| value.as_str()) else {
             continue;
         };
-        if uid.chars().all(|ch| ch.is_ascii_digit())
-            && !uid.is_empty()
-            && !cid.is_empty()
-            && cid.len() <= 512
-        {
-            return Some((uid.to_owned(), cid.to_owned()));
+        if let Some(candidate) = valid_cookie_candidate(&uid, cid) {
+            return Some(candidate);
         }
     }
     None
+}
+
+fn candidate_uid_value(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|uid| uid.to_string()))
+}
+
+fn valid_cookie_candidate(uid: &str, cid: &str) -> Option<(String, String)> {
+    if uid.chars().all(|ch| ch.is_ascii_digit())
+        && !uid.is_empty()
+        && !cid.is_empty()
+        && cid.len() <= 512
+    {
+        Some((uid.to_owned(), cid.to_owned()))
+    } else {
+        None
+    }
+}
+
+/// Search only below the documented `data[3]` success node. The limits keep a
+/// changed or hostile response from causing unbounded traversal, while still
+/// accepting the wrapper objects used by NGA's web scripts.
+fn extract_cookie_candidate_bounded(data3: &serde_json::Value) -> Option<(String, String)> {
+    fn visit(
+        value: &serde_json::Value,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Option<(String, String)> {
+        if *remaining == 0 || depth > MAX_CANDIDATE_SEARCH_DEPTH {
+            return None;
+        }
+        *remaining -= 1;
+        if let Some(candidate) = extract_cookie_candidate(value) {
+            return Some(candidate);
+        }
+        match value {
+            serde_json::Value::Array(items) => items
+                .iter()
+                .find_map(|item| visit(item, depth + 1, remaining)),
+            serde_json::Value::Object(object) => object
+                .values()
+                .find_map(|item| visit(item, depth + 1, remaining)),
+            _ => None,
+        }
+    }
+
+    let mut remaining = MAX_CANDIDATE_SEARCH_NODES;
+    visit(data3, 0, &mut remaining)
+}
+
+/// Return field names and a stable structural fingerprint without response
+/// values. This is safe to put in diagnostics when the login protocol changes.
+fn response_shape(value: &serde_json::Value, data3: &serde_json::Value) -> String {
+    fn keys(value: &serde_json::Value) -> String {
+        value
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .take(16)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| value_type(value).to_owned())
+    }
+
+    fn describe(value: &serde_json::Value, depth: usize, remaining: &mut usize, out: &mut String) {
+        if *remaining == 0 || depth > MAX_CANDIDATE_SEARCH_DEPTH {
+            out.push('!');
+            return;
+        }
+        *remaining -= 1;
+        match value {
+            serde_json::Value::Null => out.push('n'),
+            serde_json::Value::Bool(_) => out.push('b'),
+            serde_json::Value::Number(_) => out.push('#'),
+            serde_json::Value::String(_) => out.push('s'),
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for item in items {
+                    describe(item, depth + 1, remaining, out);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            serde_json::Value::Object(object) => {
+                out.push('{');
+                for (key, item) in object {
+                    out.push_str(key);
+                    out.push(':');
+                    describe(item, depth + 1, remaining, out);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+        }
+    }
+
+    let mut descriptor = String::new();
+    let mut remaining = MAX_CANDIDATE_SEARCH_NODES;
+    describe(value, 0, &mut remaining, &mut descriptor);
+    let digest = Sha256::digest(descriptor.as_bytes());
+    let fingerprint = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "shape={fingerprint}; top_keys=[{}]; data3_keys=[{}]",
+        keys(value),
+        keys(data3)
+    )
+}
+
+fn value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Extract the first PEM RSA public key from the account page HTML.
@@ -441,7 +597,17 @@ fn extract_public_key_pem(html: &str) -> Option<String> {
     let start = html.find("-----BEGIN PUBLIC KEY-----")?;
     let rest = &html[start..];
     let end = rest.find("-----END PUBLIC KEY-----")? + "-----END PUBLIC KEY-----".len();
-    Some(rest[..end].to_owned())
+    // NGA embeds the PEM in a JavaScript string. The current page uses both
+    // an escaped newline and a JavaScript physical-line continuation (`\n\` +
+    // CRLF/LF), while older fixtures use plain escaped newlines. Normalize
+    // those representations before handing the PEM to the RSA parser.
+    Some(
+        rest[..end]
+            .replace("\\n\\\r\n", "\n")
+            .replace("\\n\\\n", "\n")
+            .replace("\\n", "\n")
+            .replace('\r', ""),
+    )
 }
 
 fn validate_public_key(pem: &str) -> Result<(), NgaLoginError> {
@@ -503,8 +669,9 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use super::{
-        LoginStep, NgaLoginError, extract_cookie_candidate, extract_public_key_pem,
-        infer_account_type, map_login_error, parse_login_response,
+        LoginStep, NgaLoginError, NgaWebLoginV1, extract_cookie_candidate,
+        extract_cookie_candidate_bounded, extract_public_key_pem, infer_account_type,
+        map_login_error, parse_login_response, validate_public_key,
     };
 
     fn fixture(name: &str) -> Vec<u8> {
@@ -577,7 +744,11 @@ mod tests {
     fn missing_candidate_maps_to_protocol_changed() {
         let error =
             parse_login_response(&fixture("login_missing_candidate.json")).expect_err("must fail");
-        assert!(matches!(error, NgaLoginError::CandidateCookieMissing));
+        let NgaLoginError::CandidateCookieMissing { response_shape } = error else {
+            panic!("expected candidate-cookie-missing error");
+        };
+        assert!(response_shape.contains("shape="));
+        assert!(response_shape.contains("data3_keys=[]"));
     }
 
     #[test]
@@ -590,6 +761,24 @@ mod tests {
         let pem = extract_public_key_pem(&html).expect("public key must be found");
         assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----"));
         assert!(pem.ends_with("-----END PUBLIC KEY-----"));
+        assert!(!pem.contains("\\n"));
+        validate_public_key(&pem).expect("fixture public key must be a valid RSA key");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live access to NGA's public login and captcha endpoints"]
+    async fn live_login_challenge_protocol_is_supported() {
+        let mut adapter = NgaWebLoginV1::new("Mozilla/5.0 (compatible; NGA-Reminder-Test/0.1)")
+            .expect("login adapter must initialize");
+        let challenge = adapter
+            .prepare_challenge()
+            .await
+            .expect("live NGA challenge must remain parseable");
+
+        assert!(challenge.image_mime.starts_with("image/"));
+        assert!(!challenge.image.is_empty());
+        validate_public_key(&challenge.context.public_key_pem)
+            .expect("live public key must be valid");
     }
 
     #[test]
@@ -604,8 +793,59 @@ mod tests {
             extract_cookie_candidate(&object["3"]),
             Some(("9".to_owned(), "c".to_owned()))
         );
+        let numeric_uid = serde_json::json!({"uid": 123456, "token": "tok"});
+        assert_eq!(
+            extract_cookie_candidate(&numeric_uid),
+            Some(("123456".to_owned(), "tok".to_owned()))
+        );
         // Non-numeric uid is rejected.
         assert!(extract_cookie_candidate(&serde_json::json!({"uid": "x", "cid": "y"})).is_none());
+    }
+
+    #[test]
+    fn candidate_extraction_accepts_bounded_nested_wrappers() {
+        let nested = serde_json::json!({
+            "result": {
+                "account": {
+                    "uid": "123",
+                    "token": "candidate-token"
+                }
+            }
+        });
+        assert_eq!(
+            extract_cookie_candidate_bounded(&nested),
+            Some(("123".to_owned(), "candidate-token".to_owned()))
+        );
+
+        let too_deep = serde_json::json!({
+            "a": {"b": {"c": {"d": {"e": {
+                "uid": "123", "token": "candidate-token"
+            }}}}}
+        });
+        assert!(extract_cookie_candidate_bounded(&too_deep).is_none());
+    }
+
+    #[test]
+    fn candidate_can_fall_back_to_explicit_response_cookies() {
+        let mut adapter = NgaWebLoginV1::new("NGA-Reminder-Test").expect("adapter must initialize");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "ngaPassportUid=123456; Path=/; HttpOnly"
+                .parse()
+                .expect("header must parse"),
+        );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "ngaPassportCid=candidate-token; Path=/; HttpOnly"
+                .parse()
+                .expect("header must parse"),
+        );
+        adapter.capture_cookies(&headers);
+        assert_eq!(
+            adapter.cookie_candidate(),
+            Some(("123456".to_owned(), "candidate-token".to_owned()))
+        );
     }
 
     #[test]

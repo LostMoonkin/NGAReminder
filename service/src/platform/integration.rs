@@ -33,6 +33,10 @@ impl PlatformKind {
         !matches!(self, Self::Bark)
     }
 
+    pub fn bot_adapter_available(&self) -> bool {
+        matches!(self, Self::Feishu)
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "bark" => Some(Self::Bark),
@@ -135,6 +139,18 @@ pub enum NotificationTarget {
     Qq(serde_json::Value),
 }
 
+/// Decode the exact tagged representation persisted in
+/// `platform_integrations.credentials_encrypted`.
+pub fn parse_stored_credentials(json: &str) -> Result<IntegrationCredentials, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+/// Decode the exact tagged representation persisted in
+/// `notification_channels.target_encrypted`.
+pub fn parse_stored_target(json: &str) -> Result<NotificationTarget, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeishuTarget {
     #[serde(default = "default_feishu_receive_id_type")]
@@ -187,7 +203,6 @@ impl IntegrationView {
 pub struct BotBindingView {
     pub id: String,
     pub integration_id: String,
-    pub actor_id: String,
     pub actor_id_masked: String,
     pub conversation_id: Option<String>,
     pub conversation_type: Option<String>,
@@ -314,7 +329,7 @@ pub async fn insert_integration(
     let id = Uuid::new_v4().to_string();
     // Pre-check the one-bot-per-platform rule so the caller can map the
     // conflict precisely (the partial unique index remains the final guard).
-    if bot_enabled && platform.supports_bot() {
+    if bot_enabled && platform.bot_adapter_available() {
         let others: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM platform_integrations
              WHERE platform = $1 AND bot_enabled = 1",
@@ -400,7 +415,7 @@ pub async fn update_integration(
     // check produces a stable error before touching the row.
     if desired_bot
         && current_bot != 1
-        && PlatformKind::parse(&platform).is_some_and(|kind| kind.supports_bot())
+        && PlatformKind::parse(&platform).is_some_and(|kind| kind.bot_adapter_available())
     {
         let others: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM platform_integrations
@@ -469,7 +484,7 @@ pub async fn set_bot_integration(
     let platform: String = row.get("platform");
     let kind = PlatformKind::parse(&platform)
         .ok_or_else(|| sqlx::Error::Protocol("unsupported_platform".to_owned()))?;
-    if !kind.supports_bot() {
+    if !kind.bot_adapter_available() {
         return Err(sqlx::Error::Protocol("unsupported_platform".to_owned()));
     }
 
@@ -579,6 +594,17 @@ pub async fn update_binding(
     enabled: Option<bool>,
     label: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
+    if enabled == Some(false) || role.is_some_and(|value| value != "owner") {
+        let references: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM nga_account_renewal_settings WHERE bot_binding_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+        if references > 0 {
+            return Err(sqlx::Error::Protocol("binding_in_use".to_owned()));
+        }
+    }
     let role = match role {
         Some(value) => Some(
             BotRole::parse(value)
@@ -635,11 +661,13 @@ pub async fn create_pairing_token(
     role: &str,
     expires_in_seconds: i64,
 ) -> Result<Option<PairingTokenView>, sqlx::Error> {
-    let exists: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM platform_integrations WHERE id = $1")
-            .bind(integration_id)
-            .fetch_one(&state.pool)
-            .await?;
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM platform_integrations
+         WHERE id = $1 AND platform = 'feishu' AND enabled = 1 AND bot_enabled = 1",
+    )
+    .bind(integration_id)
+    .fetch_one(&state.pool)
+    .await?;
     if exists == 0 {
         return Ok(None);
     }
@@ -678,36 +706,56 @@ pub async fn create_pairing_token(
     }))
 }
 
-/// Consume a pairing token for the given integration. Returns the requested
-/// role on success (atomically marking the token used).
-pub async fn verify_pairing_token(
+/// Consume a pairing token and create its private-chat binding in one
+/// transaction. A failed/duplicate binding insert rolls token consumption
+/// back, and concurrent consumers cannot both claim the same token.
+pub async fn consume_pairing_token_and_insert_binding(
     state: &AppState,
     integration_id: &str,
     code: &str,
-) -> Result<Option<BotRole>, sqlx::Error> {
+    actor_id: &str,
+    conversation_id: &str,
+    label: &str,
+) -> Result<Option<(String, BotRole)>, sqlx::Error> {
     let token_hash = hash_token(code);
     let mut tx = state.pool.begin().await?;
     let row = sqlx::query(
-        "SELECT id, requested_role
-         FROM bot_pairing_tokens
-         WHERE integration_id = $1 AND token_hash = $2
-           AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP",
+        "UPDATE bot_pairing_tokens SET used_at = CURRENT_TIMESTAMP
+         WHERE id = (
+             SELECT id FROM bot_pairing_tokens
+             WHERE integration_id = $1 AND token_hash = $2
+               AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+             LIMIT 1
+         )
+         AND used_at IS NULL
+         RETURNING requested_role",
     )
     .bind(integration_id)
     .bind(&token_hash)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
+        tx.rollback().await?;
         return Ok(None);
     };
     let role = BotRole::parse(&row.get::<String, _>("requested_role"))
         .ok_or_else(|| sqlx::Error::Protocol("invalid_role".to_owned()))?;
-    sqlx::query("UPDATE bot_pairing_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = $1")
-        .bind(row.get::<String, _>("id"))
-        .execute(&mut *tx)
-        .await?;
+    let binding_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO bot_bindings
+         (id, integration_id, actor_id, conversation_id, conversation_type, role, label)
+         VALUES ($1, $2, $3, $4, 'private', $5, $6)",
+    )
+    .bind(&binding_id)
+    .bind(integration_id)
+    .bind(actor_id)
+    .bind(conversation_id)
+    .bind(role.as_str())
+    .bind(label)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(Some(role))
+    Ok(Some((binding_id, role)))
 }
 
 pub async fn insert_binding(
@@ -768,7 +816,6 @@ fn bot_binding_view(row: &sqlx::any::AnyRow) -> BotBindingView {
     BotBindingView {
         id: row.get("id"),
         integration_id: row.get("integration_id"),
-        actor_id: actor_id.clone(),
         actor_id_masked: mask_actor(&actor_id),
         conversation_id: row.get("conversation_id"),
         conversation_type: row.get("conversation_type"),

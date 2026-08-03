@@ -469,6 +469,23 @@ pub async fn claim_by_id(
     claim(pool, backend, Some(id)).await
 }
 
+/// Ask the regular worker to run a watch as soon as possible without doing
+/// collector I/O in the caller (notably the single bot inbound consumer).
+pub async fn request_run(pool: &AnyPool, id: &str) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query(
+        "UPDATE watch_targets SET next_run_at = CURRENT_TIMESTAMP,
+         status = CASE WHEN status = 'running' THEN status ELSE 'pending' END,
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND enabled = 1 AND deleted_at IS NULL
+           AND (status <> 'running' OR lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
 async fn claim(
     pool: &AnyPool,
     backend: DatabaseBackend,

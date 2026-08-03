@@ -48,6 +48,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/settings/nga-account/renewal/test",
             post(account::test_renewal),
         )
+        .route(
+            "/api/v1/settings/nga-account/renewal/trigger",
+            post(account::trigger_renewal),
+        )
         .route("/api/v1/watches", get(watch::list))
         .route("/api/v1/watches/threads", post(watch::create_thread))
         .route("/api/v1/watches/users", post(watch::create_user))

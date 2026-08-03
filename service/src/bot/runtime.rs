@@ -214,8 +214,12 @@ async fn load_bot_integrations(
                 continue;
             }
         };
-        let credentials = match serde_json::from_str::<FeishuCredentials>(&plaintext) {
-            Ok(value) => value,
+        let credentials = match crate::platform::integration::parse_stored_credentials(&plaintext) {
+            Ok(crate::platform::integration::IntegrationCredentials::Feishu(value)) => value,
+            Ok(_) => {
+                warn!(integration_id = %id, "skipping bot integration with mismatched platform credentials");
+                continue;
+            }
             Err(error) => {
                 warn!(integration_id = %id, error = %error, "skipping malformed bot integration credentials");
                 continue;

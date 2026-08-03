@@ -11,7 +11,7 @@ use sqlx::Row;
 
 use crate::{
     app::AppState,
-    platform::integration::{PlatformKind, validate_credentials},
+    platform::integration::{BotRole, PlatformKind, validate_credentials},
 };
 
 #[derive(Deserialize)]
@@ -91,7 +91,7 @@ pub async fn create(
     if request.label.trim().is_empty() || !validate_credentials(platform, &request.credentials) {
         return Err(bad_request());
     }
-    if request.bot_enabled && !platform.supports_bot() {
+    if request.bot_enabled && !platform.bot_adapter_available() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
@@ -157,7 +157,26 @@ pub async fn update(
     {
         return Err(bad_request());
     }
-    let integration = crate::platform::integration::update_integration(
+    let current = crate::platform::integration::get_integration(&state, &id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    if request
+        .credentials
+        .as_ref()
+        .is_some_and(|value| !validate_credentials(current.platform, value))
+    {
+        return Err(bad_request());
+    }
+    if request.bot_enabled == Some(true) && !current.platform.bot_adapter_available() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "bot_not_supported".to_owned(),
+            }),
+        ));
+    }
+    let integration = match crate::platform::integration::update_integration(
         &state,
         &id,
         request.enabled,
@@ -167,8 +186,21 @@ pub async fn update(
         request.credentials.as_ref(),
     )
     .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    {
+        Ok(Some(integration)) => integration,
+        Ok(None) => return Err(not_found()),
+        Err(error)
+            if error
+                .to_string()
+                .contains("bot_already_enabled_for_platform") =>
+        {
+            return Err(conflict("bot_already_enabled_for_platform"));
+        }
+        Err(error) if error.to_string().to_lowercase().contains("unique") => {
+            return Err(conflict("label_already_exists"));
+        }
+        Err(_) => return Err(internal_api_error()),
+    };
     notify_platform_change(&state);
     Ok(Json(integration_view(&integration)))
 }
@@ -225,13 +257,20 @@ pub async fn set_bot(
     Json(request): Json<SetBotIntegration>,
 ) -> ApiResult<crate::platform::integration::IntegrationView> {
     let kind = PlatformKind::parse(&platform).ok_or_else(bad_request)?;
-    if !kind.supports_bot() {
+    if !kind.bot_adapter_available() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
                 error: "bot_not_supported".to_owned(),
             }),
         ));
+    }
+    let selected = crate::platform::integration::get_integration(&state, &request.integration_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    if selected.platform != kind {
+        return Err(bad_request());
     }
     let integration =
         crate::platform::integration::set_bot_integration(&state, &request.integration_id)
@@ -246,7 +285,7 @@ pub async fn clear_bot(
     Path(platform): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let kind = PlatformKind::parse(&platform).ok_or_else(bad_request)?;
-    if !kind.supports_bot() {
+    if !kind.bot_adapter_available() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
@@ -289,6 +328,24 @@ pub async fn create_pairing_token(
     ),
     (StatusCode, Json<ApiError>),
 > {
+    let integration = crate::platform::integration::get_integration(&state, &id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    if BotRole::parse(&request.role).is_none() {
+        return Err(bad_request());
+    }
+    if !integration.enabled
+        || !integration.bot_enabled
+        || !integration.platform.bot_adapter_available()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "bot_not_enabled".to_owned(),
+            }),
+        ));
+    }
     let ttl = request.expires_in_seconds.clamp(60, 3600);
     let token = crate::platform::integration::create_pairing_token(&state, &id, &request.role, ttl)
         .await
@@ -312,7 +369,7 @@ pub async fn update_binding(
     Path(id): Path<String>,
     Json(request): Json<UpdateBinding>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let updated = crate::platform::integration::update_binding(
+    let updated = match crate::platform::integration::update_binding(
         &state,
         &id,
         request.role.as_deref(),
@@ -320,7 +377,14 @@ pub async fn update_binding(
         request.label.as_deref(),
     )
     .await
-    .map_err(internal)?;
+    {
+        Ok(updated) => updated,
+        Err(error) if error.to_string().contains("binding_in_use") => {
+            return Err(conflict("binding_in_use"));
+        }
+        Err(error) if error.to_string().contains("invalid_role") => return Err(bad_request()),
+        Err(_) => return Err(internal_api_error()),
+    };
     if !updated {
         return Err(not_found());
     }

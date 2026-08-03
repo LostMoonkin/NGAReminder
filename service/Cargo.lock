@@ -1580,6 +1580,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "openlark",
+ "openlark-core",
  "reqwest 0.12.28",
  "rsa",
  "rustls",

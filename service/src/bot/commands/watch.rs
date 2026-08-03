@@ -3,6 +3,7 @@ use sqlx::Row;
 
 use crate::{
     app::AppState,
+    bot::authorization::has_minimum_role,
     bot::commands::{BotCommandHandler, CommandContext, CommandError, CommandErrorKind},
     bot::domain::CommandDescriptor,
     platform::integration::BotRole,
@@ -38,6 +39,18 @@ impl BotCommandHandler for WatchHandler {
         arguments: &[String],
     ) -> Result<Vec<String>, CommandError> {
         let sub = arguments.first().map(String::as_str).unwrap_or("list");
+        let required_role = subcommand_min_role(sub);
+        let role = context
+            .binding
+            .as_ref()
+            .map(|binding| binding.role)
+            .ok_or_else(CommandError::internal)?;
+        if !has_minimum_role(role, required_role) {
+            return Err(CommandError::new(
+                CommandErrorKind::Conflict,
+                "当前命令对你不可用。",
+            ));
+        }
         match sub {
             "list" => list(context).await,
             "run" => {
@@ -54,6 +67,14 @@ impl BotCommandHandler for WatchHandler {
                 "用法：/watch list | /watch run <watch_id>",
             )),
         }
+    }
+}
+
+fn subcommand_min_role(subcommand: &str) -> BotRole {
+    if subcommand == "run" {
+        BotRole::Operator
+    } else {
+        BotRole::ReadOnly
     }
 }
 
@@ -94,26 +115,26 @@ async fn list(context: CommandContext) -> Result<Vec<String>, CommandError> {
 
 async fn run(context: CommandContext, id: &str) -> Result<Vec<String>, CommandError> {
     let state = &context.state;
-    let claimed =
-        crate::repository::watch::claim_by_id(&state.pool, state.config.database_backend, id)
-            .await
-            .map_err(|_| CommandError::internal())?;
-    let Some(claimed) = claimed else {
-        return Ok(vec!["监控目标不存在或正在运行中。".to_owned()]);
-    };
-    let result: Result<(), String> = match claimed.target_type.as_str() {
-        "thread" => crate::collector::thread::run(state, claimed)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("{error:?}")),
-        "user" => crate::collector::user::run(state, claimed)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("{error:?}")),
-        _ => return Ok(vec!["不支持的监控类型。".to_owned()]),
-    };
-    match result {
-        Ok(()) => Ok(vec!["运行完成。".to_owned()]),
-        Err(_) => Ok(vec!["运行失败，请查看管理台的运行记录。".to_owned()]),
+    let requested = crate::repository::watch::request_run(&state.pool, id)
+        .await
+        .map_err(|_| CommandError::internal())?;
+    if requested {
+        Ok(vec![
+            "已安排立即运行，可稍后通过 /watch list 查看状态。".to_owned(),
+        ])
+    } else {
+        Ok(vec!["监控目标不存在、未启用或正在运行中。".to_owned()])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subcommand_min_role;
+    use crate::platform::integration::BotRole;
+
+    #[test]
+    fn run_requires_operator_while_list_is_read_only() {
+        assert_eq!(subcommand_min_role("list"), BotRole::ReadOnly);
+        assert_eq!(subcommand_min_role("run"), BotRole::Operator);
     }
 }

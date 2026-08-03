@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 openlark = { version = "0.20", default-features = false, features = ["auth", "communication", "websocket"] }
+openlark-core = "0.20"
 
 [dev-dependencies]
 http-body-util = "0.1"

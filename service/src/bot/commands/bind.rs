@@ -4,7 +4,7 @@ use crate::{
     app::AppState,
     bot::commands::{BotCommandHandler, CommandContext, CommandError, CommandErrorKind},
     bot::domain::CommandDescriptor,
-    platform::integration::{BotRole, ConversationType},
+    platform::integration::BotRole,
 };
 
 pub struct BindHandler {
@@ -55,34 +55,29 @@ impl BotCommandHandler for BindHandler {
 
         let state = &context.state;
         let integration_id = &context.event.integration_id;
-        let Some(role) =
-            crate::platform::integration::verify_pairing_token(state, integration_id, code)
-                .await
-                .map_err(|_| CommandError::internal())?
+        let label = context
+            .event
+            .actor_display_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("已绑定用户");
+        let Some((_binding_id, role)) =
+            crate::platform::integration::consume_pairing_token_and_insert_binding(
+                state,
+                integration_id,
+                code,
+                &context.event.actor_id,
+                &context.event.conversation_id,
+                label,
+            )
+            .await
+            .map_err(|_| CommandError::internal())?
         else {
             return Ok(vec![
                 "绑定码无效或已过期。请到管理台重新生成绑定码。".to_owned(),
             ]);
         };
 
-        // Bind at the private-chat level so login flows can target this exact
-        // conversation for confirmation and captcha messages.
-        let binding_id = crate::platform::integration::insert_binding(
-            state,
-            integration_id,
-            &context.event.actor_id,
-            Some(&context.event.conversation_id),
-            ConversationType::Private,
-            role,
-            &context
-                .event
-                .actor_display_name
-                .clone()
-                .unwrap_or_else(|| context.event.actor_id.clone()),
-        )
-        .await
-        .map_err(|_| CommandError::internal())?;
-        let _ = binding_id;
         Ok(vec![format!(
             "绑定成功！你的角色是 {}。发送 /help 查看可用命令。",
             role.as_str()

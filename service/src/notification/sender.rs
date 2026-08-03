@@ -6,20 +6,22 @@ use open_lark::Config as OpenLarkConfig;
 use open_lark::auth::AuthTokenProvider;
 use open_lark::communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
 use open_lark::communication::im::v1::message::models::ReceiveIdType;
-use open_lark::communication::{CommunicationClient, MediaImageUpload};
 use reqwest::{
     Client, StatusCode, Url,
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     redirect,
 };
-use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::{
     markup,
-    platform::integration::{BarkCredentials, BarkTarget, FeishuCredentials, FeishuTarget},
+    platform::feishu::FeishuImageUploader,
+    platform::integration::{
+        BarkCredentials, BarkTarget, FeishuCredentials, FeishuTarget, IntegrationCredentials,
+        NotificationTarget, parse_stored_credentials, parse_stored_target,
+    },
 };
 
 const FEISHU_API_BASE_URL: &str = "https://open.feishu.cn";
@@ -107,8 +109,16 @@ pub async fn send_configured(
 ) -> Result<DeliveryReceipt, SendError> {
     match platform {
         "bark" => {
-            let credentials: BarkCredentials = parse_credentials(credentials_json)?;
-            let target: BarkTarget = parse_target(target_json)?;
+            let IntegrationCredentials::Bark(credentials) =
+                parse_stored_credentials(credentials_json).map_err(|_| SendError::InvalidConfig)?
+            else {
+                return Err(SendError::InvalidConfig);
+            };
+            let NotificationTarget::Bark(target) =
+                parse_stored_target(target_json).map_err(|_| SendError::InvalidConfig)?
+            else {
+                return Err(SendError::InvalidConfig);
+            };
             let client = Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
@@ -118,22 +128,22 @@ pub async fn send_configured(
                 .await
         }
         "feishu" => {
-            let credentials: FeishuCredentials = parse_credentials(credentials_json)?;
-            let target: FeishuTarget = parse_target(target_json)?;
+            let IntegrationCredentials::Feishu(credentials) =
+                parse_stored_credentials(credentials_json).map_err(|_| SendError::InvalidConfig)?
+            else {
+                return Err(SendError::InvalidConfig);
+            };
+            let NotificationTarget::Feishu(target) =
+                parse_stored_target(target_json).map_err(|_| SendError::InvalidConfig)?
+            else {
+                return Err(SendError::InvalidConfig);
+            };
             FeishuSender::new(credentials, target)?
                 .send(notification)
                 .await
         }
         _ => Err(SendError::InvalidConfig),
     }
-}
-
-fn parse_credentials<T: for<'de> Deserialize<'de>>(json: &str) -> Result<T, SendError> {
-    serde_json::from_str(json).map_err(|_| SendError::InvalidConfig)
-}
-
-fn parse_target<T: for<'de> Deserialize<'de>>(json: &str) -> Result<T, SendError> {
-    serde_json::from_str(json).map_err(|_| SendError::InvalidConfig)
 }
 
 pub struct BarkSender {
@@ -186,7 +196,7 @@ pub struct FeishuSender {
     credentials: FeishuCredentials,
     target: FeishuTarget,
     openlark_config: OpenLarkConfig,
-    communication: CommunicationClient,
+    image_uploader: FeishuImageUploader,
 }
 
 impl FeishuSender {
@@ -213,13 +223,16 @@ impl FeishuSender {
             .build()
             .map_err(SendError::Request)?;
         let openlark_config = openlark_config(&credentials);
-        let communication = CommunicationClient::new(openlark_config.clone());
+        let image_uploader =
+            FeishuImageUploader::new(&credentials).map_err(|error| SendError::OpenLark {
+                summary: summarize(&error.to_string()),
+            })?;
         Ok(Self {
             image_client,
             credentials,
             target,
             openlark_config,
-            communication,
+            image_uploader,
         })
     }
 
@@ -349,17 +362,16 @@ impl FeishuSender {
         }
 
         let image_key = self
-            .communication
-            .im
-            .upload_image(MediaImageUpload::new(bytes).file_name(format!(
-                "nga-image.{}",
-                content_type.trim_start_matches("image/")
-            )))
+            .image_uploader
+            .upload_message_image(
+                bytes,
+                &content_type,
+                &format!("nga-image.{}", content_type.trim_start_matches("image/")),
+            )
             .await
             .map_err(|error| SendError::OpenLark {
                 summary: summarize(&error.to_string()),
-            })?
-            .image_key;
+            })?;
         feishu_image_cache()
             .lock()
             .await
@@ -555,11 +567,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_sender_reports_old_webhook_config_as_invalid_config() {
+    async fn configured_sender_accepts_the_persisted_tagged_format() {
         let error = send_configured(
             "feishu",
-            r#"{"app_id":"cli_test","app_secret":"secret"}"#,
-            r#"{"receive_id":"oc_test"}"#,
+            r#"{"platform":"feishu","credentials":{"app_id":"cli_test","app_secret":"secret"}}"#,
+            r#"{"platform":"feishu","target":{"receive_id":"oc_test"}}"#,
             &Notification {
                 title: "title".to_owned(),
                 body: "body".to_owned(),
@@ -571,6 +583,32 @@ mod tests {
         // A valid config reaches the network layer (connection refused /
         // timeout), not InvalidConfig.
         assert!(!matches!(error, SendError::InvalidConfig));
+    }
+
+    #[tokio::test]
+    async fn configured_sender_rejects_legacy_bare_and_cross_platform_values() {
+        let notification = Notification {
+            title: "title".to_owned(),
+            body: "body".to_owned(),
+            url: "https://bbs.nga.cn/".to_owned(),
+        };
+        let bare = send_configured(
+            "feishu",
+            r#"{"app_id":"cli_test","app_secret":"secret"}"#,
+            r#"{"receive_id":"oc_test"}"#,
+            &notification,
+        )
+        .await;
+        assert!(matches!(bare, Err(SendError::InvalidConfig)));
+
+        let mismatch = send_configured(
+            "feishu",
+            r#"{"platform":"bark","credentials":{"server_url":"https://api.day.app","group":"nga"}}"#,
+            r#"{"platform":"feishu","target":{"receive_id":"oc_test"}}"#,
+            &notification,
+        )
+        .await;
+        assert!(matches!(mismatch, Err(SendError::InvalidConfig)));
     }
 
     #[test]

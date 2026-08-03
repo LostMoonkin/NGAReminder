@@ -64,7 +64,25 @@ pub async fn dispatch(state: &AppState, event: &BotEvent) -> Result<DispatchOutc
     )
     .await?;
     if dedup == InboundDedup::Duplicate {
+        crate::metrics::bot_inbound_duplicate();
         return Ok(DispatchOutcome::Duplicate);
+    }
+    if repository::is_rate_limited(state, &event.integration_id, &event.actor_id, &parsed.name)
+        .await?
+    {
+        enqueue_reply(
+            state,
+            event,
+            &inbound_id,
+            &parsed.name,
+            0,
+            "命令请求过于频繁，请稍后再试。",
+        )
+        .await?;
+        repository::mark_inbound_processed(state, &inbound_id, "rejected", Some("rate_limited"))
+            .await?;
+        crate::metrics::bot_inbound_rejected();
+        return Ok(DispatchOutcome::Handled);
     }
 
     let binding = repository::find_binding(
@@ -105,6 +123,7 @@ pub async fn dispatch(state: &AppState, event: &BotEvent) -> Result<DispatchOutc
             Some(rejection_kind(rejection)),
         )
         .await?;
+        crate::metrics::bot_inbound_rejected();
         return Ok(DispatchOutcome::Handled);
     }
 
@@ -131,6 +150,7 @@ pub async fn dispatch(state: &AppState, event: &BotEvent) -> Result<DispatchOutc
             .await?;
         }
     }
+    crate::metrics::bot_inbound_handled();
     Ok(DispatchOutcome::Handled)
 }
 
@@ -151,7 +171,15 @@ async fn reply_unknown_command(
     )
     .await?;
     if dedup == InboundDedup::Duplicate {
+        crate::metrics::bot_inbound_duplicate();
         return Ok(DispatchOutcome::Duplicate);
+    }
+    if repository::is_rate_limited(state, &event.integration_id, &event.actor_id, "unknown").await?
+    {
+        repository::mark_inbound_processed(state, &inbound_id, "rejected", Some("rate_limited"))
+            .await?;
+        crate::metrics::bot_inbound_rejected();
+        return Ok(DispatchOutcome::Handled);
     }
     enqueue_reply(
         state,
@@ -163,6 +191,7 @@ async fn reply_unknown_command(
     )
     .await?;
     repository::mark_inbound_processed(state, &inbound_id, "succeeded", None).await?;
+    crate::metrics::bot_inbound_handled();
     Ok(DispatchOutcome::Handled)
 }
 

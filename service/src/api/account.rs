@@ -30,6 +30,7 @@ pub struct AccountResponse {
     renewal_enabled: bool,
     renewal_credentials_configured: bool,
     renewal_bot_binding_configured: bool,
+    renewal_bot_binding_id: Option<String>,
     renewal_credential_status: Option<String>,
     renewal_cooldown_until: Option<String>,
     last_renewal_at: Option<String>,
@@ -61,6 +62,13 @@ pub struct TestAccountResponse {
 pub struct RenewalTestResponse {
     ok: bool,
     detail: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenewalTriggerResponse {
+    session_id: String,
+    status: &'static str,
+    created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,10 +112,11 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
         renewal_enabled: renewal.0,
         renewal_credentials_configured: renewal.1,
         renewal_bot_binding_configured: renewal.2,
-        renewal_credential_status: renewal.3,
-        renewal_cooldown_until: renewal.4,
-        last_renewal_at: renewal.5,
-        last_renewal_error_kind: renewal.6,
+        renewal_bot_binding_id: renewal.3,
+        renewal_credential_status: renewal.4,
+        renewal_cooldown_until: renewal.5,
+        last_renewal_at: renewal.6,
+        last_renewal_error_kind: renewal.7,
         active_login_session: active_session,
     }))
 }
@@ -178,10 +187,11 @@ pub async fn save(
         renewal_enabled: renewal.0,
         renewal_credentials_configured: renewal.1,
         renewal_bot_binding_configured: renewal.2,
-        renewal_credential_status: renewal.3,
-        renewal_cooldown_until: renewal.4,
-        last_renewal_at: renewal.5,
-        last_renewal_error_kind: renewal.6,
+        renewal_bot_binding_id: renewal.3,
+        renewal_credential_status: renewal.4,
+        renewal_cooldown_until: renewal.5,
+        last_renewal_at: renewal.6,
+        last_renewal_error_kind: renewal.7,
         active_login_session: active_session,
     }))
 }
@@ -207,7 +217,7 @@ pub async fn update_renewal(
     if let Some(binding_id) = &request.bot_binding_id {
         let binding = sqlx::query(
             "SELECT b.id, b.role, b.conversation_type, b.conversation_id,
-                    i.bot_enabled, i.enabled
+                    b.enabled AS binding_enabled, i.bot_enabled, i.enabled, i.platform
              FROM bot_bindings b
              JOIN platform_integrations i ON i.id = b.integration_id
              WHERE b.id = $1",
@@ -229,11 +239,15 @@ pub async fn update_renewal(
         let conversation_id: Option<String> = binding.get("conversation_id");
         let bot_enabled: i32 = binding.get("bot_enabled");
         let integration_enabled: i32 = binding.get("enabled");
+        let binding_enabled: i32 = binding.get("binding_enabled");
+        let platform: String = binding.get("platform");
         if role != "owner"
             || conversation_type.as_deref() != Some("private")
             || conversation_id.is_none()
             || bot_enabled == 0
             || integration_enabled == 0
+            || binding_enabled == 0
+            || platform != "feishu"
         {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -267,6 +281,31 @@ pub async fn update_renewal(
         ));
     }
     if request.clear_credentials {
+        if let Some(active) = session::active_session_for_account(&state, &account_id)
+            .await
+            .map_err(internal_error)?
+        {
+            let cancelled = session::transition(
+                &state,
+                &active.id,
+                &[
+                    LoginSessionStatus::AwaitingConfirmation,
+                    LoginSessionStatus::Starting,
+                    LoginSessionStatus::AwaitingCaptcha,
+                    LoginSessionStatus::Submitting,
+                    LoginSessionStatus::ValidatingCookie,
+                ],
+                LoginSessionStatus::Cancelled,
+                Some("renewal_credentials_deleted"),
+            )
+            .await
+            .map_err(internal_error)?;
+            if cancelled {
+                session::clear_protocol_context(&state, &active.id)
+                    .await
+                    .map_err(internal_error)?;
+            }
+        }
         sqlx::query("DELETE FROM nga_account_renewal_settings WHERE account_id = $1")
             .bind(&account_id)
             .execute(&state.pool)
@@ -275,10 +314,15 @@ pub async fn update_renewal(
         return get(State(state)).await;
     }
 
-    let has_new_credentials = request.login_name.is_some() || request.password.is_some();
-    let new_login = request.login_name.as_deref().unwrap_or("");
-    let new_password = request.password.as_deref().unwrap_or("");
-    if has_new_credentials && (new_login.trim().is_empty() || new_password.is_empty()) {
+    if request
+        .login_name
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+        || request
+            .password
+            .as_ref()
+            .is_some_and(|value| value.is_empty())
+    {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
@@ -289,7 +333,10 @@ pub async fn update_renewal(
 
     if !exists {
         // Creating the setting requires credentials + binding at once.
-        if !has_new_credentials || request.bot_binding_id.is_none() {
+        if request.login_name.is_none()
+            || request.password.is_none()
+            || request.bot_binding_id.is_none()
+        {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ApiError {
@@ -345,13 +392,15 @@ pub async fn update_renewal(
              password_encrypted = COALESCE($3, password_encrypted),
              bot_binding_id = COALESCE($4, bot_binding_id),
              credential_status = CASE
-                WHEN $2 IS NOT NULL OR $3 IS NOT NULL OR $4 IS NOT NULL THEN 'ready'
+                WHEN $2 IS NOT NULL OR $3 IS NOT NULL THEN 'ready'
                 ELSE credential_status END,
              consecutive_failure_count = CASE
-                WHEN $2 IS NOT NULL OR $3 IS NOT NULL OR $4 IS NOT NULL THEN 0
+                WHEN $2 IS NOT NULL OR $3 IS NOT NULL THEN 0
                 ELSE consecutive_failure_count END,
-             cooldown_until = NULL,
-             last_error_kind = NULL,
+             cooldown_until = CASE
+                WHEN $2 IS NOT NULL OR $3 IS NOT NULL THEN NULL ELSE cooldown_until END,
+             last_error_kind = CASE
+                WHEN $2 IS NOT NULL OR $3 IS NOT NULL THEN NULL ELSE last_error_kind END,
              updated_at = CURRENT_TIMESTAMP
              WHERE account_id = $5",
         )
@@ -363,6 +412,23 @@ pub async fn update_renewal(
         .execute(&state.pool)
         .await
         .map_err(internal_error)?;
+    }
+
+    if desired_enabled {
+        let account_status: String =
+            sqlx::query_scalar("SELECT status FROM nga_accounts WHERE id = $1")
+                .bind(&account_id)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(internal_error)?;
+        if matches!(account_status.as_str(), "paused" | "invalid") {
+            // Authentication may have failed before renewal credentials or a
+            // bot owner binding were configured. Re-entering the idempotent
+            // auth-failure flow here fills that notification gap.
+            session::on_auth_failure(&state)
+                .await
+                .map_err(internal_error)?;
+        }
     }
 
     get(State(state)).await
@@ -497,13 +563,46 @@ pub async fn test_renewal(
             );
             Ok(Json(RenewalTestResponse { ok: true, detail }))
         }
-        Err(error) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ApiError {
-                error: error.kind(),
-            }),
-        )),
+        Err(error) => {
+            tracing::warn!(
+                error_kind = error.kind(),
+                error = %error,
+                "NGA renewal protocol probe failed"
+            );
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError {
+                    error: error.kind(),
+                }),
+            ))
+        }
     }
+}
+
+/// POST /api/v1/settings/nga-account/renewal/trigger
+/// Opens a bot confirmation session without declaring the current Cookie
+/// invalid or pausing watches.
+pub async fn trigger_renewal(State(state): State<AppState>) -> ApiResult<RenewalTriggerResponse> {
+    let confirmation = session::request_manual_renewal(&state)
+        .await
+        .map_err(internal_error)?
+        .ok_or((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "renewal_not_ready",
+            }),
+        ))?;
+
+    let status = if confirmation.created {
+        "awaiting_confirmation"
+    } else {
+        "active"
+    };
+    Ok(Json(RenewalTriggerResponse {
+        session_id: confirmation.session_id,
+        status,
+        created: confirmation.created,
+    }))
 }
 
 pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountResponse> {
@@ -537,19 +636,36 @@ pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountRespons
             }))
         }
         Err(error) => {
-            let (kind, status, http_status) = match error {
-                AuthCheckError::Unauthorized => {
-                    ("unauthorized", "invalid", StatusCode::UNAUTHORIZED)
-                }
-                AuthCheckError::Busy => ("nga_busy", "unchecked", StatusCode::SERVICE_UNAVAILABLE),
-                AuthCheckError::Http(_) => ("nga_http_error", "unchecked", StatusCode::BAD_GATEWAY),
-                AuthCheckError::Request(_) => {
-                    ("nga_request_error", "unchecked", StatusCode::BAD_GATEWAY)
-                }
-            };
-            update_auth_status(&state, status, Some(kind)).await?;
+            let (kind, status, http_status) = map_auth_check_error(&error);
+            if matches!(error, AuthCheckError::Unauthorized) {
+                // A deliberate connection test is also a definitive auth
+                // check. Route it through the same pause/alert/bot flow as a
+                // collector rejection so renewal does not depend on waiting
+                // for the next scheduled crawl.
+                session::on_auth_failure(&state)
+                    .await
+                    .map_err(internal_error)?;
+            } else {
+                update_auth_status(&state, status, Some(kind)).await?;
+            }
             Err((http_status, Json(ApiError { error: kind })))
         }
+    }
+}
+
+fn map_auth_check_error(error: &AuthCheckError) -> (&'static str, &'static str, StatusCode) {
+    match error {
+        // A rejected NGA Cookie is an invalid external credential, not a failure of
+        // this API's administrator authentication. Keep 401 reserved for the API
+        // authentication middleware so browser clients do not discard their UI session.
+        AuthCheckError::Unauthorized => (
+            "nga_credentials_invalid",
+            "invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        AuthCheckError::Busy => ("nga_busy", "unchecked", StatusCode::SERVICE_UNAVAILABLE),
+        AuthCheckError::Http(_) => ("nga_http_error", "unchecked", StatusCode::BAD_GATEWAY),
+        AuthCheckError::Request(_) => ("nga_request_error", "unchecked", StatusCode::BAD_GATEWAY),
     }
 }
 
@@ -577,6 +693,7 @@ async fn unconfigured_response() -> AccountResponse {
         renewal_enabled: false,
         renewal_credentials_configured: false,
         renewal_bot_binding_configured: false,
+        renewal_bot_binding_id: None,
         renewal_credential_status: None,
         renewal_cooldown_until: None,
         last_renewal_at: None,
@@ -592,8 +709,8 @@ async fn needs_configuration_response() -> AccountResponse {
     response
 }
 
-/// (enabled, credentials_configured, binding_configured, credential_status,
-///  cooldown_until, last_renewal_at, last_error_kind)
+/// (enabled, credentials_configured, binding_configured, binding_id,
+///  credential_status, cooldown_until, last_renewal_at, last_error_kind)
 async fn renewal_summary(
     state: &AppState,
     account_id: &str,
@@ -601,6 +718,7 @@ async fn renewal_summary(
     bool,
     bool,
     bool,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -621,18 +739,19 @@ async fn renewal_summary(
     match row {
         Ok(Some(row)) => {
             let enabled = row.get::<i32, _>("enabled") == 1;
-            let binding_configured: Option<String> = row.get("binding_id");
+            let binding_id: Option<String> = row.get("binding_id");
             (
                 enabled,
                 true,
-                binding_configured.is_some(),
+                binding_id.is_some(),
+                binding_id,
                 Some(row.get("credential_status")),
                 row.get("cooldown_until"),
                 row.get("last_renewal_at"),
                 row.get("last_error_kind"),
             )
         }
-        _ => (false, false, false, None, None, None, None),
+        _ => (false, false, false, None, None, None, None, None),
     }
 }
 
@@ -717,7 +836,10 @@ fn internal_api_error() -> (StatusCode, Json<ApiError>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SaveAccountRequest, extract_credentials, mask_uid};
+    use axum::http::StatusCode;
+
+    use super::{SaveAccountRequest, extract_credentials, map_auth_check_error, mask_uid};
+    use crate::nga::AuthCheckError;
 
     #[test]
     fn masks_uid() {
@@ -739,5 +861,15 @@ mod tests {
             extract_credentials(request),
             Some(("123456".to_owned(), "secret".to_owned()))
         );
+    }
+
+    #[test]
+    fn rejected_nga_cookie_is_not_reported_as_admin_unauthorized() {
+        let (kind, account_status, http_status) =
+            map_auth_check_error(&AuthCheckError::Unauthorized);
+
+        assert_eq!(kind, "nga_credentials_invalid");
+        assert_eq!(account_status, "invalid");
+        assert_eq!(http_status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

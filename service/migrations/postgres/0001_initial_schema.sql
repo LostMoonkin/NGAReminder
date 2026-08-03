@@ -1,5 +1,5 @@
 CREATE TABLE nga_accounts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     label TEXT NOT NULL UNIQUE,
     passport_uid_encrypted BYTEA NOT NULL,
     passport_cid_encrypted BYTEA NOT NULL,
@@ -393,7 +393,7 @@ CREATE TABLE system_alert_deliveries (
 );
 
 CREATE TABLE nga_account_renewal_settings (
-    account_id UUID PRIMARY KEY REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    account_id TEXT PRIMARY KEY REFERENCES nga_accounts(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     login_name_encrypted BYTEA NOT NULL,
     password_encrypted BYTEA NOT NULL,
@@ -415,7 +415,7 @@ COMMENT ON COLUMN nga_account_renewal_settings.password_encrypted IS
 
 CREATE TABLE nga_login_sessions (
     id TEXT PRIMARY KEY,
-    account_id UUID NOT NULL REFERENCES nga_accounts(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL REFERENCES nga_accounts(id) ON DELETE CASCADE,
     bot_binding_id TEXT NOT NULL REFERENCES bot_bindings(id) ON DELETE RESTRICT,
     integration_id TEXT NOT NULL
         REFERENCES platform_integrations(id) ON DELETE RESTRICT,

@@ -128,6 +128,45 @@ pub async fn mark_inbound_processed(
     Ok(())
 }
 
+/// Database-backed per-actor command limit. The just-recorded event is
+/// included, so the 21st general command or 6th login command in one minute
+/// is rejected consistently across reconnects and service restarts.
+pub async fn is_rate_limited(
+    state: &AppState,
+    integration_id: &str,
+    actor_id: &str,
+    command_name: &str,
+) -> Result<bool, sqlx::Error> {
+    let since = match state.config.database_backend {
+        crate::config::DatabaseBackend::Postgres => "CURRENT_TIMESTAMP - INTERVAL '1 minute'",
+        crate::config::DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '-1 minute')",
+    };
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM bot_inbound_events
+         WHERE integration_id = $1 AND actor_id = $2 AND received_at >= {since}"
+    ))
+    .bind(integration_id)
+    .bind(actor_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if total > 20 {
+        return Ok(true);
+    }
+    if command_name == "login" {
+        let login_total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM bot_inbound_events
+             WHERE integration_id = $1 AND actor_id = $2
+               AND command_name = 'login' AND received_at >= {since}"
+        ))
+        .bind(integration_id)
+        .bind(actor_id)
+        .fetch_one(&state.pool)
+        .await?;
+        return Ok(login_total > 5);
+    }
+    Ok(false)
+}
+
 pub async fn update_inbound_command(
     state: &AppState,
     inbound_event_id: &str,

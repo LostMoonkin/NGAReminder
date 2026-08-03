@@ -479,7 +479,7 @@ fn map_thread_error(error: ThreadCollectorError) -> (StatusCode, Json<ApiError>)
             (StatusCode::NOT_FOUND, "nga_thread_not_found")
         }
         ThreadCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
-            (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+            (StatusCode::UNPROCESSABLE_ENTITY, "nga_credentials_invalid")
         }
         ThreadCollectorError::Nga(_) | ThreadCollectorError::Parse(_) => {
             (StatusCode::BAD_GATEWAY, "nga_crawl_failed")
@@ -498,7 +498,7 @@ fn map_user_error(error: UserCollectorError) -> (StatusCode, Json<ApiError>) {
             "nga_account_not_configured",
         ),
         UserCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
-            (StatusCode::UNAUTHORIZED, "nga_unauthorized")
+            (StatusCode::UNPROCESSABLE_ENTITY, "nga_credentials_invalid")
         }
         UserCollectorError::UserParse(
             crate::nga::user_parser::UserParseError::ProfileNotFound
@@ -651,5 +651,20 @@ mod tests {
         .expect("thread request should deserialize");
         assert!(valid_notification(&request.notification, true));
         assert!(request.notification.author_uids.is_none());
+    }
+
+    #[test]
+    fn collector_auth_failure_is_not_reported_as_admin_unauthorized() {
+        let (thread_status, thread_error) = map_thread_error(ThreadCollectorError::Nga(
+            crate::nga::NgaRequestError::Unauthorized,
+        ));
+        let (user_status, user_error) = map_user_error(UserCollectorError::Nga(
+            crate::nga::NgaRequestError::Unauthorized,
+        ));
+
+        assert_eq!(thread_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(thread_error.error, "nga_credentials_invalid");
+        assert_eq!(user_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(user_error.error, "nga_credentials_invalid");
     }
 }

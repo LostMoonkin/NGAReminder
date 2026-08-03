@@ -178,7 +178,7 @@ src/
     alerts.rs
 ```
 
-现有 `notification/receiver.rs` 的连接协调和飞书事件解析迁入 `bot/adapters/feishu.rs`。飞书 token provider、消息发送和图片上传等共用能力下沉到 `platform/feishu.rs`，避免通知 sender 与机器人 adapter 各维护一套鉴权逻辑。
+现有 `notification/receiver.rs` 的连接协调和飞书事件解析迁入 `bot/adapters/feishu.rs`。飞书 token provider、消息发送和图片上传等共用能力下沉到 `platform/feishu.rs`，避免通知 sender 与机器人 adapter 各维护一套鉴权逻辑。当前 OpenLark 0.20 的通用 multipart builder 固定使用 `file` 作为二进制字段名，而飞书图片接口要求 `image`；验证码和通知图片必须使用 `platform/feishu.rs` 中的兼容上传器，不得直接调用该 SDK 的 `upload_image` 封装。升级 SDK 后也必须以 multipart 字段回归测试确认问题已修复，才能移除兼容层。
 
 ### 5.1 标准化事件
 
@@ -589,7 +589,8 @@ pause_reason TEXT CHECK (pause_reason IN ('user', 'auth', 'error'))
 - 主动登录提醒使用 conversation/chat 目标发送新消息。
 - 请求使用 outbox ID 派生的稳定 UUID，利用平台去重能力。
 - 文本、卡片、图片共用现有 tenant token provider。
-- 验证码图片上传失败时不能把验证码 URL 暴露为公网链接；直接结束会话并提示管理台人工处理。
+- 只有飞书确认验证码图片上传并投递成功后，才发送 `/login captcha` 输入说明，不能在图片仅入队时宣称“图片已发送”。
+- 验证码图片上传失败时不能把验证码 URL 暴露为公网链接；重试耗尽后直接结束会话，清除 challenge 上下文，并返回稳定错误提示，引导用户根据日志中的飞书错误码排查请求参数、权限或应用发布状态，或到管理台人工处理。
 
 ### 8.4 权限要求
 
@@ -599,7 +600,7 @@ pause_reason TEXT CHECK (pause_reason IN ('user', 'auth', 'error'))
 - 已订阅接收消息事件。
 - 已授予单聊消息或群聊 @ 机器人消息权限。
 - 已授予以应用身份发送/回复消息权限。
-- 如需验证码图片，已授予图片资源上传权限。
+- 如需验证码图片，已授予 `im:resource`（获取与上传图片或文件资源）权限，并在新增权限后发布了应用新版本。
 - 用户在应用可用范围内；群聊场景机器人已入群。
 
 ## 9. NGA Cookie 续期设计
@@ -758,8 +759,9 @@ prid={prid}
    - `access_uid + access_token`
    - `ngaPassportUid + ngaPassportCid`
 4. 为兼容包装层，可以在限定深度和节点数内递归查找上述字段组合，但不能凭位置猜测任意字符串是 Cookie。
-5. UID 必须是十进制整数，CID/token 必须非空且满足长度上限。
-6. 响应没有 `error` 但找不到候选凭据时返回 `nga_login_protocol_changed`，记录响应结构指纹和字段名，不记录字段值。
+5. UID 字段兼容十进制字符串和 JSON 无符号整数，规范化后必须是十进制整数；CID/token 必须是非空字符串且满足长度上限。
+6. 如果正文没有 `error` 且 `data[3]` 未找到候选凭据，可以回退读取本次登录响应明确设置的 `ngaPassportUid/ngaPassportCid` Cookie；不能只依赖 `Set-Cookie`，也不能接受准备 challenge 前已有的任意 Cookie 名称。
+7. 正文和明确响应 Cookie 都找不到候选凭据时返回 `candidate_cookie_missing`，记录响应结构指纹和字段名，不记录字段值、验证码、账号、密码或 Cookie。机器人回复应包含稳定错误类型，不能只返回无法排查的“续期失败”。
 
 #### 9.3.4 候选 Cookie 验证
 
@@ -1021,6 +1023,8 @@ DELETE /api/v1/bot-bindings/{id}
 GET   /api/v1/settings/nga-account
 PATCH /api/v1/settings/nga-account/renewal
 POST  /api/v1/settings/nga-account/renewal/test
+POST  /api/v1/settings/nga-account/renewal/trigger
+POST  /api/v1/settings/nga-account/renewal/cancel
 ```
 
 ```json
@@ -1051,6 +1055,10 @@ POST  /api/v1/settings/nga-account/renewal/test
 ```
 
 `renewal/test` 不能直接提交密码登录，避免测试按钮导致账号风控。它只检查字段是否能解密、配置的 owner bot binding 是否仍然有效，并在不发送凭据的前提下读取账号页验证 RSA 公钥和基础协议结构。
+
+`renewal/trigger` 用于从管理台手动创建 `trigger_kind = manual` 的机器人确认会话。该操作不预先判定当前 Cookie 已失效，也不暂停正在运行的监控；用户仍需在 owner 私聊中执行 `/login confirm <request_id>` 后才会提交登录凭据。已有活动会话时返回现有会话，不重复创建或推送。
+
+“测试 NGA 连接”若明确收到 NGA 未授权，应进入与采集器相同的认证失败流程：暂停认证影响的监控、创建告警，并在续期配置可用时向 owner 推送确认消息，不需要等待下一次定时采集。
 
 ## 11. 管理页面设计
 
@@ -1094,9 +1102,10 @@ POST  /api/v1/settings/nga-account/renewal/test
 - 机器人 owner 是否就绪。
 - 续期凭据状态：可用、凭据无效或冷却中。
 - 冷却截止时间、最近续期时间和错误类型。
+- “立即发起续期”按钮，用于创建机器人确认会话；有活动会话时禁用。
 - 明确提示“采集仍使用 Cookie；密码仅在 Cookie 失效且你确认后用于申请新 Cookie”。
 
-关闭续期时提供“同时删除已保存续期凭据”选项，默认为删除。
+“停用并删除续期凭据”必须是独立危险按钮，不与普通保存共用复选框。点击后需要二次确认，并同时取消活动登录会话、清除短期协议上下文和待发送登录消息，再删除已保存的登录名、密码和机器人绑定配置。
 
 ### 11.4 活动登录会话
 

@@ -25,6 +25,7 @@ use crate::{
     },
     bot::parser::strip_self_mention,
     notification::sender::openlark_config,
+    platform::feishu::FeishuImageUploader,
     platform::integration::{ConversationType, FeishuCredentials},
 };
 
@@ -137,7 +138,7 @@ impl BotAdapter for FeishuAdapter {
             BotMessageKind::Image => {
                 let payload: ImagePayload =
                     serde_json::from_str(payload_json).map_err(|_| BotSendError::InvalidPayload)?;
-                send_image(&config, message, &uuid, payload).await
+                send_image(&config, &self.credentials, message, &uuid, payload).await
             }
             BotMessageKind::Card => Err(BotSendError::InvalidPayload),
         }
@@ -189,19 +190,18 @@ async fn send_text(
 
 async fn send_image(
     config: &open_lark::Config,
+    credentials: &FeishuCredentials,
     message: &BotOutboundMessage,
     uuid: &str,
     payload: ImagePayload,
 ) -> Result<BotDeliveryReceipt, BotSendError> {
-    let communication = open_lark::communication::CommunicationClient::new(config.clone());
-    let upload = open_lark::communication::MediaImageUpload::new(payload.bytes)
-        .file_name(format!("captcha.{}", mime_ext(&payload.mime_type)));
-    let image_key = communication
-        .im
-        .upload_image(upload)
+    let file_name = format!("captcha.{}", mime_ext(&payload.mime_type));
+    let uploader = FeishuImageUploader::new(credentials)
+        .map_err(|error| BotSendError::ImageUpload(error.to_string()))?;
+    let image_key = uploader
+        .upload_message_image(payload.bytes, &payload.mime_type, &file_name)
         .await
-        .map_err(|error| BotSendError::ImageUpload(error.to_string()))?
-        .image_key;
+        .map_err(|error| BotSendError::ImageUpload(error.to_string()))?;
     let content = serde_json::json!({ "image_key": image_key }).to_string();
     let response = if let Some(reply_to) = &message.reply_to_message_id {
         let body = ReplyMessageBody {
@@ -289,15 +289,28 @@ impl EventHandler for FeishuMessageEventHandler {
             _ => ConversationType::Group,
         };
 
-        // Strip a leading self mention in group chats before parsing commands.
-        let self_mention = envelope
-            .event
-            .message
-            .mentions
-            .iter()
-            .find(|mention| mention.mention_self())
-            .map(|mention| format!("@{}", mention.name.as_deref().unwrap_or("")));
-        let text = strip_self_mention(&content.text, self_mention.as_deref());
+        // Group commands must start with a real Feishu mention placeholder.
+        // Group delivery is scoped to @bot events; the payload itself does
+        // not reliably identify which mentioned ID belongs to the app.
+        let leading_mention =
+            envelope
+                .event
+                .message
+                .mentions
+                .iter()
+                .enumerate()
+                .find_map(|(index, mention)| {
+                    mention
+                        .leading_token(&content.text)
+                        .map(|token| (index, token))
+                });
+        if conversation_type == ConversationType::Group && leading_mention.is_none() {
+            return Ok(());
+        }
+        let text = strip_self_mention(
+            &content.text,
+            leading_mention.as_ref().map(|(_, token)| token.as_str()),
+        );
         if !text.starts_with('/') {
             return Ok(());
         }
@@ -327,7 +340,14 @@ impl EventHandler for FeishuMessageEventHandler {
                 .message
                 .mentions
                 .iter()
-                .filter_map(|mention| mention.to_bot_mention())
+                .enumerate()
+                .map(|(index, mention)| {
+                    mention.to_bot_mention(
+                        leading_mention
+                            .as_ref()
+                            .is_some_and(|(own, _)| *own == index),
+                    )
+                })
                 .collect(),
             occurred_at,
         };
@@ -384,24 +404,46 @@ struct Message {
 #[derive(Debug, Deserialize)]
 struct Mention {
     key: Option<String>,
+    id: Option<MentionId>,
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MentionId {
+    open_id: Option<String>,
+    user_id: Option<String>,
+    union_id: Option<String>,
+}
+
 impl Mention {
-    fn mention_self(&self) -> bool {
-        // Feishu marks the bot itself with a tenant_key in `key`; treat any
-        // key not starting with `ou_`/`on_` as an app-level mention.
-        self.key
+    fn leading_token(&self, text: &str) -> Option<String> {
+        let trimmed = text.trim_start();
+        if let Some(key) = self.key.as_deref().filter(|key| trimmed.starts_with(key)) {
+            return Some(key.to_owned());
+        }
+        self.name
             .as_deref()
-            .is_some_and(|key| !key.starts_with("ou_") && !key.starts_with("on_"))
+            .map(|name| format!("@{name}"))
+            .filter(|token| trimmed.starts_with(token))
     }
 
-    fn to_bot_mention(&self) -> Option<crate::bot::domain::BotMention> {
-        Some(crate::bot::domain::BotMention {
-            id: self.key.clone().unwrap_or_default(),
+    fn to_bot_mention(&self, is_self: bool) -> crate::bot::domain::BotMention {
+        let id = self
+            .id
+            .as_ref()
+            .and_then(|id| {
+                id.open_id
+                    .clone()
+                    .or_else(|| id.user_id.clone())
+                    .or_else(|| id.union_id.clone())
+            })
+            .or_else(|| self.key.clone())
+            .unwrap_or_default();
+        crate::bot::domain::BotMention {
+            id,
             name: self.name.clone().unwrap_or_default(),
-            is_self: self.mention_self(),
-        })
+            is_self,
+        }
     }
 }
 
@@ -444,21 +486,20 @@ mod tests {
     }
 
     #[test]
-    fn group_mention_detection_distinguishes_app_from_user() {
-        assert!(
-            Mention {
-                key: Some("cli_xxx".to_owned()),
-                name: Some("bot".to_owned()),
-            }
-            .mention_self()
+    fn group_mention_uses_real_feishu_placeholder_shape() {
+        let mention: Mention = serde_json::from_value(serde_json::json!({
+            "key": "@_user_1",
+            "id": {"open_id": "ou_bot"},
+            "name": "NGA Bot"
+        }))
+        .expect("mention must parse");
+        assert_eq!(
+            mention.leading_token("  @_user_1 /status").as_deref(),
+            Some("@_user_1")
         );
-        assert!(
-            !Mention {
-                key: Some("ou_user".to_owned()),
-                name: Some("user".to_owned()),
-            }
-            .mention_self()
-        );
+        let normalized = mention.to_bot_mention(true);
+        assert_eq!(normalized.id, "ou_bot");
+        assert!(normalized.is_self);
     }
 
     #[test]
