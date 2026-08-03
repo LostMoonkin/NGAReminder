@@ -22,10 +22,11 @@ pub enum UserParseError {
 pub fn parse_topic_list(
     value: &Value,
     watched_uid: i64,
+    requested_page: i32,
 ) -> Result<UserListPage<UserTopicCandidate>, UserParseError> {
     let result = result_object(value)?;
-    let total_pages = total_pages(result, "__T__ROWS_PAGE")?;
     let entries = array(result, "__T")?;
+    let total_pages = total_pages(result, "__T__ROWS_PAGE", requested_page, entries.len())?;
     let mut candidates = Vec::new();
     for entry in entries {
         let object = entry.as_object().ok_or(UserParseError::Field("__T[]"))?;
@@ -35,8 +36,12 @@ pub fn parse_topic_list(
         if optional_i64(object, "authorid")? != Some(watched_uid) {
             continue;
         }
-        let tid = required_i64(object, "tid")?;
-        let postdate = required_i64(object, "postdate")?;
+        let (Some(tid), Some(postdate)) = (
+            optional_i64(object, "tid")?,
+            optional_i64(object, "postdate")?,
+        ) else {
+            continue;
+        };
         if tid > 0 && postdate > 0 {
             candidates.push(UserTopicCandidate { tid, postdate });
         }
@@ -50,10 +55,11 @@ pub fn parse_topic_list(
 pub fn parse_reply_list(
     value: &Value,
     watched_uid: i64,
+    requested_page: i32,
 ) -> Result<UserListPage<UserReplyCandidate>, UserParseError> {
     let result = result_object(value)?;
-    let total_pages = total_pages(result, "__R__ROWS_PAGE")?;
     let entries = array(result, "__T")?;
+    let total_pages = total_pages(result, "__R__ROWS_PAGE", requested_page, entries.len())?;
     let mut candidates = Vec::new();
     for entry in entries {
         let Some(post) = entry.get("__P").and_then(Value::as_object) else {
@@ -62,9 +68,13 @@ pub fn parse_reply_list(
         if optional_i64(post, "authorid")? != Some(watched_uid) {
             continue;
         }
-        let tid = required_i64(post, "tid")?;
-        let pid = required_i64(post, "pid")?;
-        let postdate = required_i64(post, "postdate")?;
+        let (Some(tid), Some(pid), Some(postdate)) = (
+            optional_i64(post, "tid")?,
+            optional_i64(post, "pid")?,
+            optional_i64(post, "postdate")?,
+        ) else {
+            continue;
+        };
         if tid > 0 && pid > 0 && postdate > 0 {
             candidates.push(UserReplyCandidate { tid, pid, postdate });
         }
@@ -158,14 +168,27 @@ fn array<'a>(
 fn total_pages(
     object: &Map<String, Value>,
     page_size_field: &'static str,
+    requested_page: i32,
+    rows_on_page: usize,
 ) -> Result<i32, UserParseError> {
-    let rows = required_i64(object, "__ROWS")?;
     let page_size = required_i64(object, page_size_field)?;
-    if rows < 0 || page_size < 1 {
+    if requested_page < 1 || page_size < 1 {
         return Err(UserParseError::Field(page_size_field));
     }
-    i32::try_from(((rows + page_size - 1) / page_size).max(1))
-        .map_err(|_| UserParseError::Field("__ROWS"))
+    if let Some(rows) = optional_i64(object, "__ROWS")? {
+        if rows < 0 {
+            return Err(UserParseError::Field("__ROWS"));
+        }
+        return i32::try_from(((rows + page_size - 1) / page_size).max(1))
+            .map_err(|_| UserParseError::Field("__ROWS"));
+    }
+    let rows_on_page =
+        i64::try_from(rows_on_page).map_err(|_| UserParseError::Field(page_size_field))?;
+    Ok(if rows_on_page < page_size {
+        requested_page
+    } else {
+        requested_page.saturating_add(1)
+    })
 }
 
 fn required_i64(object: &Map<String, Value>, field: &'static str) -> Result<i64, UserParseError> {
@@ -213,7 +236,7 @@ mod tests {
 
     #[test]
     fn topics_use_server_page_count_and_skip_denied_entries() {
-        let page = parse_topic_list(&fixture("user_topics_page_1.json"), 2001)
+        let page = parse_topic_list(&fixture("user_topics_page_1.json"), 2001, 1)
             .expect("fixture must parse");
         assert_eq!(page.total_pages, 2);
         assert_eq!(page.candidates.len(), 1);
@@ -222,10 +245,33 @@ mod tests {
 
     #[test]
     fn replies_only_accept_watched_author() {
-        let page = parse_reply_list(&fixture("user_replies_success.json"), 2001)
+        let page = parse_reply_list(&fixture("user_replies_success.json"), 2001, 1)
             .expect("fixture must parse");
         assert_eq!(page.candidates.len(), 1);
         assert_eq!(page.candidates[0].pid, 4002);
+    }
+
+    #[test]
+    fn replies_infer_an_open_next_page_when_total_rows_is_null() {
+        let mut value = fixture("user_replies_success.json");
+        value["result"]["__ROWS"] = Value::Null;
+        let template = value["result"]["__T"][0].clone();
+        value["result"]["__T"] = Value::Array(vec![template; 20]);
+        let page = parse_reply_list(&value, 2001, 1).expect("null total rows must parse");
+        assert_eq!(page.total_pages, 2);
+    }
+
+    #[test]
+    fn replies_skip_placeholder_posts_with_an_empty_date() {
+        let mut value = fixture("user_replies_success.json");
+        let mut placeholder = value["result"]["__T"][0].clone();
+        placeholder["__P"]["postdate"] = Value::String(String::new());
+        value["result"]["__T"]
+            .as_array_mut()
+            .expect("fixture entries must be an array")
+            .push(placeholder);
+        let page = parse_reply_list(&value, 2001, 1).expect("placeholder must be skipped");
+        assert_eq!(page.candidates.len(), 1);
     }
 
     #[test]

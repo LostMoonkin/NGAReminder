@@ -497,6 +497,9 @@ fn map_user_error(error: UserCollectorError) -> (StatusCode, Json<ApiError>) {
             StatusCode::PRECONDITION_FAILED,
             "nga_account_not_configured",
         ),
+        UserCollectorError::FullCookieRequired => {
+            (StatusCode::PRECONDITION_FAILED, "nga_full_cookie_required")
+        }
         UserCollectorError::Nga(crate::nga::NgaRequestError::Unauthorized) => {
             (StatusCode::UNPROCESSABLE_ENTITY, "nga_credentials_invalid")
         }

@@ -18,6 +18,8 @@ const BASE_URL: &str = "https://bbs.nga.cn";
 const REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 const USER_BUSY_ATTEMPTS: usize = 10;
 const USER_BUSY_DELAY: Duration = Duration::from_secs(1);
+const USER_SEARCH_UNAVAILABLE_ATTEMPTS: usize = 3;
+const USER_SEARCH_UNAVAILABLE_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct NgaClient {
@@ -45,6 +47,8 @@ pub enum NgaRequestError {
     Request(#[source] reqwest::Error),
     #[error("NGA returned HTTP {0}")]
     Http(StatusCode),
+    #[error("NGA rejected the user search request with an empty HTTP 503 response")]
+    UserSearchUnavailable,
     #[error("NGA credentials were rejected")]
     Unauthorized,
     #[error("NGA remained busy after retries")]
@@ -172,7 +176,7 @@ impl NgaClient {
                 ))
                 .form(&[("tid", tid.to_string()), ("pid", pid.to_string())]);
             let result = self.send_json(request, passport_uid, passport_cid).await;
-            let retryable = retryable_data_error(&result);
+            let retryable = retryable_request_error(&result);
             if !retryable || attempt == 2 {
                 return result;
             }
@@ -187,7 +191,7 @@ impl NgaClient {
         passport_cid: &str,
         uid: i64,
         page: i32,
-    ) -> Result<Value, NgaRequestError> {
+    ) -> Result<Option<Value>, NgaRequestError> {
         self.fetch_user_list(passport_uid, passport_cid, uid, page, false)
             .await
     }
@@ -198,22 +202,81 @@ impl NgaClient {
         passport_cid: &str,
         uid: i64,
         page: i32,
-    ) -> Result<Value, NgaRequestError> {
+    ) -> Result<Option<Value>, NgaRequestError> {
         self.fetch_user_list(passport_uid, passport_cid, uid, page, true)
             .await
     }
 
-    #[allow(dead_code)] // verified client contract; wired by later user-crawl enhancements
     pub async fn fetch_user_profile(
         &self,
         passport_uid: &str,
         passport_cid: &str,
         uid: i64,
     ) -> Result<Vec<u8>, NgaRequestError> {
-        self.wait_for_request_slot().await;
-        let request = self
-            .client
-            .get(format!("{}/nuke.php?func=ucp&uid={uid}", self.base_url));
+        for attempt in 0_u64..3 {
+            self.wait_for_request_slot().await;
+            let request = self
+                .client
+                .get(format!("{}/nuke.php?func=ucp&uid={uid}", self.base_url));
+            let result = self.send_bytes(request, passport_uid, passport_cid).await;
+            if !retryable_request_error(&result) || attempt == 2 {
+                return result;
+            }
+            self.retry_delay(uid, attempt).await;
+        }
+        unreachable!("user profile retry loop always returns")
+    }
+
+    async fn fetch_user_list(
+        &self,
+        passport_uid: &str,
+        passport_cid: &str,
+        uid: i64,
+        page: i32,
+        replies: bool,
+    ) -> Result<Option<Value>, NgaRequestError> {
+        for attempt in 0..USER_BUSY_ATTEMPTS {
+            self.wait_for_request_slot().await;
+            let request = self
+                .client
+                .get(user_list_url(&self.base_url, uid, page, replies));
+            let result = self
+                .send_user_list_json(request, passport_uid, passport_cid, page > 1)
+                .await;
+            let Some((attempts, delay)) = user_list_retry_policy(&result) else {
+                return result;
+            };
+            if attempt + 1 == attempts {
+                return result;
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Err(NgaRequestError::Busy)
+    }
+
+    async fn send_user_list_json(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid: &str,
+        allow_empty_end: bool,
+    ) -> Result<Option<Value>, NgaRequestError> {
+        let response = self
+            .user_list_headers(request, passport_uid, passport_cid)
+            .send()
+            .await
+            .map_err(NgaRequestError::Request)?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(NgaRequestError::Request)?;
+        decode_user_list_response(status, &bytes, allow_empty_end)
+    }
+
+    async fn send_bytes(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid: &str,
+    ) -> Result<Vec<u8>, NgaRequestError> {
         let response = self
             .common_headers(request, passport_uid, passport_cid)
             .send()
@@ -227,32 +290,6 @@ impl NgaClient {
             .await
             .map(|bytes| bytes.to_vec())
             .map_err(NgaRequestError::Request)
-    }
-
-    async fn fetch_user_list(
-        &self,
-        passport_uid: &str,
-        passport_cid: &str,
-        uid: i64,
-        page: i32,
-        replies: bool,
-    ) -> Result<Value, NgaRequestError> {
-        for attempt in 0..10 {
-            self.wait_for_request_slot().await;
-            let search = if replies { "searchpost=1&" } else { "" };
-            let request = self.client.get(format!(
-                "{}/thread.php?{search}authorid={uid}&__output=12&page={page}",
-                self.base_url
-            ));
-            let result = self.send_json(request, passport_uid, passport_cid).await;
-            match result {
-                Err(NgaRequestError::Busy) if attempt + 1 < USER_BUSY_ATTEMPTS => {
-                    tokio::time::sleep(USER_BUSY_DELAY).await;
-                }
-                result => return result,
-            }
-        }
-        Err(NgaRequestError::Busy)
     }
 
     async fn fetch_thread_page_once(
@@ -297,7 +334,7 @@ impl NgaClient {
         &self,
         request: RequestBuilder,
         passport_uid: &str,
-        passport_cid: &str,
+        passport_cid_or_cookie: &str,
     ) -> RequestBuilder {
         request
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -306,10 +343,22 @@ impl NgaClient {
             .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
             .header(
                 COOKIE,
-                format!("ngaPassportUid={passport_uid}; ngaPassportCid={passport_cid}"),
+                request_cookie_header(passport_uid, passport_cid_or_cookie),
             )
             .header(ORIGIN, &self.base_url)
             .header(REFERER, format!("{}/", self.base_url))
+    }
+
+    fn user_list_headers(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid_or_cookie: &str,
+    ) -> RequestBuilder {
+        request.header(USER_AGENT, &self.user_agent).header(
+            COOKIE,
+            user_search_cookie_header(passport_uid, passport_cid_or_cookie),
+        )
     }
 
     async fn wait_for_request_slot(&self) {
@@ -330,12 +379,79 @@ impl NgaClient {
     }
 }
 
-fn retryable_data_error(result: &Result<Value, NgaRequestError>) -> bool {
+fn request_cookie_header(passport_uid: &str, passport_cid_or_cookie: &str) -> String {
+    let has_uid = passport_cid_or_cookie
+        .split(';')
+        .any(|part| part.trim().starts_with("ngaPassportUid="));
+    let has_cid = passport_cid_or_cookie
+        .split(';')
+        .any(|part| part.trim().starts_with("ngaPassportCid="));
+    if has_uid && has_cid {
+        passport_cid_or_cookie.to_owned()
+    } else {
+        format!("ngaPassportUid={passport_uid}; ngaPassportCid={passport_cid_or_cookie}")
+    }
+}
+
+fn user_search_cookie_header(passport_uid: &str, passport_cid_or_cookie: &str) -> String {
+    let source = request_cookie_header(passport_uid, passport_cid_or_cookie);
+    [
+        "ngaPassportUid",
+        "ngaPassportUrlencodedUname",
+        "ngaPassportCid",
+    ]
+    .into_iter()
+    .filter_map(|wanted| {
+        source.split(';').find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == wanted).then(|| format!("{name}={value}"))
+        })
+    })
+    .collect::<Vec<_>>()
+    .join("; ")
+}
+
+fn retryable_request_error<T>(result: &Result<T, NgaRequestError>) -> bool {
     matches!(
         result,
         Err(NgaRequestError::Request(_))
+            | Err(NgaRequestError::Busy)
             | Err(NgaRequestError::Http(StatusCode::TOO_MANY_REQUESTS))
     ) || matches!(result, Err(NgaRequestError::Http(status)) if status.is_server_error())
+}
+
+fn user_list_retry_policy<T>(result: &Result<T, NgaRequestError>) -> Option<(usize, Duration)> {
+    if matches!(result, Err(NgaRequestError::UserSearchUnavailable)) {
+        return Some((
+            USER_SEARCH_UNAVAILABLE_ATTEMPTS,
+            USER_SEARCH_UNAVAILABLE_DELAY,
+        ));
+    }
+    retryable_request_error(result).then_some((USER_BUSY_ATTEMPTS, USER_BUSY_DELAY))
+}
+
+fn user_list_url(base_url: &str, uid: i64, page: i32, replies: bool) -> String {
+    let search = if replies { "searchpost=1&" } else { "" };
+    format!("{base_url}/thread.php?{search}authorid={uid}&__output=12&page={page}")
+}
+
+fn decode_user_list_response(
+    status: StatusCode,
+    bytes: &[u8],
+    allow_empty_end: bool,
+) -> Result<Option<Value>, NgaRequestError> {
+    if status == StatusCode::SERVICE_UNAVAILABLE && bytes.is_empty() {
+        if allow_empty_end {
+            return Ok(None);
+        }
+        return Err(NgaRequestError::UserSearchUnavailable);
+    }
+    if status != StatusCode::OK {
+        return Err(NgaRequestError::Http(status));
+    }
+    let value: Value = decode_json(bytes)?;
+    classify_data_envelope(&value)?;
+    Ok(Some(value))
 }
 
 fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, NgaRequestError> {
@@ -386,7 +502,8 @@ mod tests {
 
     use super::{
         AuthCheckError, NgaEnvelope, NgaRequestError, USER_BUSY_ATTEMPTS, classify_data_envelope,
-        classify_envelope,
+        classify_envelope, decode_user_list_response, request_cookie_header,
+        retryable_request_error, user_list_retry_policy, user_list_url, user_search_cookie_header,
     };
 
     #[test]
@@ -408,6 +525,70 @@ mod tests {
             classify_envelope(&login),
             Err(AuthCheckError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn request_cookie_header_preserves_a_full_cookie() {
+        let full = "other=value; ngaPassportUid=123; ngaPassportCid=secret; session=token";
+        assert_eq!(request_cookie_header("123", full), full);
+        assert_eq!(
+            request_cookie_header("123", "secret"),
+            "ngaPassportUid=123; ngaPassportCid=secret"
+        );
+    }
+
+    #[test]
+    fn user_search_cookie_keeps_only_the_verified_minimum() {
+        let full = "ngacn0comUserInfo=stale; ngaPassportUid=6112087; \
+                    ngaPassportUrlencodedUname=test-user; ngaPassportCid=secret; \
+                    lastvisit=stale; C3VK=optional";
+        assert_eq!(
+            user_search_cookie_header("6112087", full),
+            "ngaPassportUid=6112087; ngaPassportUrlencodedUname=test-user; ngaPassportCid=secret"
+        );
+    }
+
+    #[test]
+    fn user_list_request_matches_the_verified_minimum() {
+        let client = super::NgaClient::with_base_url(
+            "Mozilla/5.0 (compatible; NGA-Reminder/0.1)".to_owned(),
+            "https://bbs.nga.cn",
+        )
+        .unwrap();
+        let request = client
+            .user_list_headers(
+                client
+                    .client
+                    .get(user_list_url("https://bbs.nga.cn", 24_252_407, 1, true)),
+                "6112087",
+                "ngaPassportUid=6112087; ngaPassportCid=test; C3VK=test",
+            )
+            .build()
+            .unwrap();
+        let headers = request.headers();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers[reqwest::header::USER_AGENT],
+            "Mozilla/5.0 (compatible; NGA-Reminder/0.1)"
+        );
+        assert_eq!(
+            headers[reqwest::header::COOKIE],
+            "ngaPassportUid=6112087; ngaPassportCid=test"
+        );
+        assert!(headers.get(reqwest::header::ORIGIN).is_none());
+        assert!(headers.get(reqwest::header::REFERER).is_none());
+    }
+
+    #[test]
+    fn user_reply_pages_match_the_verified_browser_url() {
+        assert_eq!(
+            user_list_url("https://bbs.nga.cn", 24_252_407, 1, true),
+            "https://bbs.nga.cn/thread.php?searchpost=1&authorid=24252407&__output=12&page=1"
+        );
+        assert_eq!(
+            user_list_url("https://bbs.nga.cn", 24_252_407, 2, true),
+            "https://bbs.nga.cn/thread.php?searchpost=1&authorid=24252407&__output=12&page=2"
+        );
     }
 
     #[test]
@@ -444,6 +625,51 @@ mod tests {
             .count();
         assert_eq!(retry_attempts, 9);
         assert_eq!(USER_BUSY_ATTEMPTS, 10);
+    }
+
+    #[test]
+    fn request_retry_policy_includes_transient_http_errors() {
+        assert!(retryable_request_error::<()>(&Err(NgaRequestError::Http(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ))));
+        assert!(retryable_request_error::<()>(&Err(NgaRequestError::Http(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+        ))));
+        assert!(retryable_request_error::<()>(&Err(NgaRequestError::Busy)));
+        assert!(!retryable_request_error::<()>(&Err(NgaRequestError::Http(
+            reqwest::StatusCode::BAD_REQUEST,
+        ))));
+    }
+
+    #[test]
+    fn empty_user_search_503_has_a_bounded_slower_retry_policy() {
+        assert_eq!(
+            user_list_retry_policy::<()>(&Err(NgaRequestError::UserSearchUnavailable)),
+            Some((3, std::time::Duration::from_secs(2)))
+        );
+    }
+
+    #[test]
+    fn empty_503_is_a_distinct_user_search_error() {
+        assert!(matches!(
+            decode_user_list_response(reqwest::StatusCode::SERVICE_UNAVAILABLE, &[], false),
+            Err(NgaRequestError::UserSearchUnavailable)
+        ));
+        assert_eq!(
+            decode_user_list_response(reqwest::StatusCode::SERVICE_UNAVAILABLE, &[], true)
+                .expect("an empty response after a successful page ends pagination"),
+            None
+        );
+        assert!(matches!(
+            decode_user_list_response(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                b"temporary upstream failure",
+                false,
+            ),
+            Err(NgaRequestError::Http(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            ))
+        ));
     }
 
     #[test]

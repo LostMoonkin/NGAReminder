@@ -106,7 +106,7 @@ async fn collect(
     baseline: bool,
 ) -> Result<CrawlSummary, ThreadCollectorError> {
     let cursor = watch::thread_cursor(&state.pool, &watch_target.id).await?;
-    let (passport_uid, passport_cid) = load_credentials(state).await?;
+    let (passport_uid, passport_cid, _) = load_credentials(state).await?;
     let first_value = state
         .nga_client
         .fetch_thread_page(
@@ -437,9 +437,9 @@ fn natural_key(post: &ParsedPost) -> String {
 
 pub(crate) async fn load_credentials(
     state: &AppState,
-) -> Result<(secrecy::SecretString, secrecy::SecretString), ThreadCollectorError> {
+) -> Result<(secrecy::SecretString, secrecy::SecretString, bool), ThreadCollectorError> {
     let row = sqlx::query(
-        "SELECT passport_uid_encrypted, passport_cid_encrypted
+        "SELECT passport_uid_encrypted, passport_cid_encrypted, cookie_encrypted
          FROM nga_accounts WHERE label = 'default'",
     )
     .fetch_optional(&state.pool)
@@ -447,6 +447,7 @@ pub(crate) async fn load_credentials(
     .ok_or(ThreadCollectorError::Credentials)?;
     let uid: Vec<u8> = row.get("passport_uid_encrypted");
     let cid: Vec<u8> = row.get("passport_cid_encrypted");
+    let cookie: Option<Vec<u8>> = row.get("cookie_encrypted");
     let uid = state
         .credential_cipher
         .decrypt(&uid)
@@ -455,7 +456,17 @@ pub(crate) async fn load_credentials(
         .credential_cipher
         .decrypt(&cid)
         .map_err(|_| ThreadCollectorError::Credentials)?;
-    Ok((uid.into(), cid.into()))
+    let (request_cookie, full_cookie_configured) = match cookie {
+        Some(cookie) => (
+            state
+                .credential_cipher
+                .decrypt(&cookie)
+                .map_err(|_| ThreadCollectorError::Credentials)?,
+            true,
+        ),
+        None => (format!("ngaPassportUid={uid}; ngaPassportCid={cid}"), false),
+    };
+    Ok((uid.into(), request_cookie.into(), full_cookie_configured))
 }
 
 async fn create_crawl_run(
@@ -809,6 +820,9 @@ async fn record_failure(
         ThreadCollectorError::Nga(NgaRequestError::Unauthorized)
         | ThreadCollectorError::Credentials => ("unauthorized", "paused"),
         ThreadCollectorError::Nga(NgaRequestError::Http(_)) => ("nga_http_error", "error"),
+        ThreadCollectorError::Nga(NgaRequestError::UserSearchUnavailable) => {
+            ("nga_user_search_unavailable", "error")
+        }
         ThreadCollectorError::Nga(NgaRequestError::Request(_)) => ("nga_request_error", "error"),
         ThreadCollectorError::Nga(NgaRequestError::Decode(_)) => ("nga_decode_error", "error"),
         ThreadCollectorError::Nga(NgaRequestError::Business { .. }) => {

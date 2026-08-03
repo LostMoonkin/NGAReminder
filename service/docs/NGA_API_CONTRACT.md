@@ -11,18 +11,18 @@ Content-Type: application/x-www-form-urlencoded
 User-Agent: <configured user agent>
 Accept: application/json, text/javascript, */*; q=0.01
 Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7
-Cookie: ngaPassportUid=<secret>; ngaPassportCid=<secret>
+Cookie: <encrypted full browser Cookie for cross-user searches>
 Origin: https://bbs.nga.cn
 Referer: https://bbs.nga.cn/
 ```
 
-浏览器 Cookie 字符串中只有 `ngaPassportUid` 和 `ngaPassportCid` 是必需的。它们绝不能出现在日志、fixture、API 响应、导出文件或错误 payload 中。
+主题抓取和登录账号自身的搜索只需要 `ngaPassportUid` 与 `ngaPassportCid`。2026-08-03 的用户侧与服务主机真实探测均确认：跨用户搜索使用显式 `page=1`、配置的 User-Agent，以及 `ngaPassportUid`、可选 `ngaPassportUrlencodedUname`、`ngaPassportCid` 三个 Cookie 字段即可稳定返回 JSON。附加的 `Accept`、`Accept-Language`、`C3VK`、`Sec-Fetch-*` 和 `sec-ch-ua*` 均不是必要条件。任何 Cookie 都绝不能出现在日志、fixture、API 响应或导出文件中。
 
 凭据校验必须使用用户回复接口，而不是用户资料页面。即使 `ngaPassportCid` 无效，真实 UID 的资料页仍可能公开可读。在回复接口中，`code=2048` 且 `msg` 包含“必须登录”表示凭据无效；`code=2048` 且消息包含“服务器忙”则按后文重试策略处理。
 
 每个响应按以下顺序检查：
 
-1. HTTP 状态和非空响应体。
+1. HTTP 状态和响应体。用户主题/回复第一页的空体 HTTP 503 不能证明列表为空，按 2 秒间隔最多尝试 3 次；耗尽后归类为 `nga_user_search_unavailable`，并放弃本次事务中的全部游标更新。
 2. `__output=12` 与 `app_api.php` 响应的 JSON 解码。
 3. NGA 顶层业务 `code`。
 
@@ -136,7 +136,9 @@ ceil(parse_int(__ROWS) / __T__ROWS_PAGE)
 tid, pid, authorid, postdate, subject, content, type
 ```
 
-已观察到 `result.__R__ROWS_PAGE` 的回复页容量为 20。相邻页面按 `postdate` 降序排列，PID 不重叠。
+已观察到 `result.__R__ROWS_PAGE` 的回复页容量为 20，但真实响应的 `result.__ROWS` 可以是 `null`。有总数时按总数计算末页；没有总数时，满页继续请求下一页，短页或成功页之后的空体 503 结束分页。相邻页面按 `postdate` 降序排列，PID 不重叠。
+
+`result.__T` 还可能混入 `__P.postdate=""` 的占位记录。缺少有效 `tid`、`pid` 或 `postdate` 的 `__P` 必须跳过，不能令整页失败或成为水位。
 
 采集器只接受 `__P.authorid == watched_uid` 的记录，然后使用 TID/PID 请求帖子接口，并在写入前校验 `result[0].author.uid == watched_uid`。它不会将发现的 TID 扩展为完整主题抓取。
 
@@ -169,7 +171,7 @@ Code 46 会暂停分配给该账号的任务，直到更新凭据并通过连通
 
 可用字段包括 `uid`、`username`、`groupid`、`avatar`、`regdate`、`lastpost`、`posts` 和 `sign`。
 
-对一个不存在的 UID 测试时，资料接口返回 HTTP 200 和不含 `__UCPUSER` 对象的 GBK 页面。新版 UID 采集器不会持久化资料，正常轮询也不要求调用此接口；它只作为可选诊断探针保留。不存在 UID 的用户主题列表接口返回空 HTTP 503；这应记录为已观察到的传输结果，不得视为空的成功列表或稳定的 NGA 业务码。
+对一个不存在的 UID 测试时，资料接口返回 HTTP 200 和不含 `__UCPUSER` 对象的 GBK 页面。UID 采集器先通过资料页确认目标存在，再分别请求主题和回复列表。空体 HTTP 503 既可能出现在不存在 UID 的列表请求，也可能出现在浏览器中实际有内容的有效 UID 跨用户搜索，因此不能将它解释为空列表。采集器必须记录 `nga_user_search_unavailable`，保持基线未完成，并且不提交主题或回复游标。带非空响应体的 503 仍按通用 HTTP 错误处理。
 
 ## 持久化与通知去重
 

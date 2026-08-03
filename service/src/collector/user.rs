@@ -39,6 +39,8 @@ pub enum UserCollectorError {
     InvalidWatch,
     #[error("NGA account is not configured or cannot be decrypted")]
     Credentials,
+    #[error("a full NGA Cookie is required for cross-user monitoring")]
+    FullCookieRequired,
     #[error("NGA detail did not contain the watched user's post")]
     InvalidDetail,
     #[error("database operation failed")]
@@ -118,9 +120,24 @@ async fn collect(
     baseline: bool,
 ) -> Result<UserCrawlSummary, UserCollectorError> {
     let cursor = watch::user_cursor(&state.pool, &watch_target.id).await?;
-    let (passport_uid, passport_cid) = thread::load_credentials(state)
+    let (passport_uid, passport_cid, full_cookie_configured) = thread::load_credentials(state)
         .await
         .map_err(|_| UserCollectorError::Credentials)?;
+    if passport_uid.expose_secret().parse::<i64>().ok() != Some(watch_target.target_id)
+        && !full_cookie_configured
+    {
+        return Err(UserCollectorError::FullCookieRequired);
+    }
+
+    let profile_bytes = state
+        .nga_client
+        .fetch_user_profile(
+            passport_uid.expose_secret(),
+            passport_cid.expose_secret(),
+            watch_target.target_id,
+        )
+        .await?;
+    user_parser::parse_profile_gbk(&profile_bytes, watch_target.target_id)?;
 
     let (topics, topic_pages) = discover_topics(
         state,
@@ -225,7 +242,8 @@ async fn collect(
     let discovery = Discovery {
         topics,
         replies,
-        pages_requested: topic_pages
+        pages_requested: 1
+            + topic_pages
             + reply_pages
             + i32::try_from(details.len()).unwrap_or(i32::MAX),
         details,
@@ -253,7 +271,10 @@ async fn discover_topics(
             .fetch_user_topics(passport_uid, passport_cid, uid, page_number)
             .await?;
         requested += 1;
-        let page = user_parser::parse_topic_list(&value, uid)?;
+        let Some(value) = value else {
+            break;
+        };
+        let page = user_parser::parse_topic_list(&value, uid, page_number)?;
         total_pages = page.total_pages;
         if baseline
             && page
@@ -300,7 +321,10 @@ async fn discover_replies(
             .fetch_user_replies(passport_uid, passport_cid, uid, page_number)
             .await?;
         requested += 1;
-        let page = user_parser::parse_reply_list(&value, uid)?;
+        let Some(value) = value else {
+            break;
+        };
+        let page = user_parser::parse_reply_list(&value, uid, page_number)?;
         total_pages = page.total_pages;
         if baseline
             && page
@@ -670,11 +694,15 @@ async fn record_failure(
         | UserCollectorError::Nga(NgaRequestError::Unauthorized) => {
             ("unauthorized", "paused", true)
         }
+        UserCollectorError::FullCookieRequired => ("nga_full_cookie_required", "error", false),
         UserCollectorError::UserParse(user_parser::UserParseError::ProfileNotFound)
         | UserCollectorError::UserParse(user_parser::UserParseError::UidMismatch) => {
             ("user_not_found", "not_found", true)
         }
         UserCollectorError::Nga(NgaRequestError::Http(_)) => ("nga_http_error", "error", false),
+        UserCollectorError::Nga(NgaRequestError::UserSearchUnavailable) => {
+            ("nga_user_search_unavailable", "error", false)
+        }
         UserCollectorError::Nga(NgaRequestError::Request(_)) => {
             ("nga_request_error", "error", false)
         }

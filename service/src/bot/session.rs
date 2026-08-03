@@ -602,17 +602,36 @@ pub async fn complete_success(
         .credential_cipher
         .encrypt(passport_cid)
         .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
+    let existing_cookie: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT cookie_encrypted FROM nga_accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(&state.pool)
+            .await?;
+    let cookie_encrypted = existing_cookie
+        .map(|value| {
+            let cookie = state
+                .credential_cipher
+                .decrypt(&value)
+                .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
+            state
+                .credential_cipher
+                .encrypt(&refresh_cookie_header(&cookie, passport_uid, passport_cid))
+                .map_err(|e| sqlx::Error::Protocol(format!("{e}")))
+        })
+        .transpose()?;
 
     let mut tx = state.pool.begin().await?;
     // 1. Replace the Cookie and mark the account valid.
     sqlx::query(
         "UPDATE nga_accounts SET passport_uid_encrypted = $1, passport_cid_encrypted = $2,
+         cookie_encrypted = $3,
          status = 'valid', last_auth_checked_at = CURRENT_TIMESTAMP,
          last_auth_error_kind = NULL, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $3",
+         WHERE id = $4",
     )
     .bind(uid_encrypted)
     .bind(cid_encrypted)
+    .bind(cookie_encrypted)
     .bind(account_id)
     .execute(&mut *tx)
     .await?;
@@ -661,6 +680,36 @@ pub async fn complete_success(
     .await?;
     tx.commit().await?;
     Ok(restored as usize)
+}
+
+fn refresh_cookie_header(cookie: &str, passport_uid: &str, passport_cid: &str) -> String {
+    let mut saw_uid = false;
+    let mut saw_cid = false;
+    let mut parts = cookie
+        .split(';')
+        .filter_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            let value = match name {
+                "ngaPassportUid" => {
+                    saw_uid = true;
+                    passport_uid
+                }
+                "ngaPassportCid" => {
+                    saw_cid = true;
+                    passport_cid
+                }
+                _ => value,
+            };
+            Some(format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>();
+    if !saw_uid {
+        parts.push(format!("ngaPassportUid={passport_uid}"));
+    }
+    if !saw_cid {
+        parts.push(format!("ngaPassportCid={passport_cid}"));
+    }
+    parts.join("; ")
 }
 
 fn session_from_row(row: sqlx::any::AnyRow) -> Result<LoginSession, sqlx::Error> {
@@ -851,8 +900,21 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        LoginSessionStatus, complete_success, on_auth_failure, request_manual_renewal, transition,
+        LoginSessionStatus, complete_success, on_auth_failure, refresh_cookie_header,
+        request_manual_renewal, transition,
     };
+
+    #[test]
+    fn cookie_renewal_replaces_passport_values_and_preserves_other_cookies() {
+        assert_eq!(
+            refresh_cookie_header(
+                "session=keep; ngaPassportUid=old; ngaPassportCid=old-cid",
+                "new",
+                "new-cid",
+            ),
+            "session=keep; ngaPassportUid=new; ngaPassportCid=new-cid"
+        );
+    }
     use crate::{
         app::AppState,
         config::{

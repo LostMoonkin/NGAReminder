@@ -21,14 +21,14 @@
 | `post_by_pid_success.json` | TID/PID 详情只返回一条帖子 |
 | `user_topics_page_1.json` | 可访问主题和无权访问占位记录 |
 | `user_topics_page_2.json` | 用户主题列表最后一页 |
-| `user_replies_success.json` | 包含 `__P` 中目标回复的主题摘要 |
+| `user_replies_success.json` | 包含 `__P` 中目标回复的主题摘要，并覆盖真实响应中 `__ROWS=null` |
 | `busy_2048.json` | HTTP 成功但 NGA 返回 busy 的响应 |
 | `thread_pending_review_51.json` | 主题待审核业务错误 |
 | `invalid_tid_14.json` | 未知 TID 业务错误 |
 | `missing_auth_46.json` | Passport Cookie 缺失业务错误 |
 | `user_profile_gbk.html` | 含 `__UCPUSER` 的合成 GBK 资料页 |
 | `invalid_uid_profile_gbk.html` | 不含 `__UCPUSER` 的合成 GBK 页面 |
-| `invalid_uid_http_503.json` | 无效 UID 列表请求观察到的空 HTTP 响应封装 |
+| `invalid_uid_http_503.json` | 用户列表观察到的空体 HTTP 503 响应封装；该响应不能证明列表为空，必须按搜索不可用处理 |
 
 延后补充：
 

@@ -24,6 +24,7 @@ pub struct SaveAccountRequest {
 pub struct AccountResponse {
     configured: bool,
     passport_uid_masked: Option<String>,
+    full_cookie_configured: bool,
     status: String,
     last_auth_checked_at: Option<String>,
     last_auth_error_kind: Option<String>,
@@ -78,9 +79,18 @@ pub struct ApiError {
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
+const MAX_COOKIE_HEADER_LENGTH: usize = 16_384;
+
+#[derive(Debug, PartialEq, Eq)]
+struct SavedCredentials {
+    passport_uid: String,
+    passport_cid: String,
+    cookie_header: Option<String>,
+}
+
 pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
     let row = sqlx::query(
-        "SELECT id, passport_uid_encrypted, passport_cid_encrypted, status,
+        "SELECT id, passport_uid_encrypted, passport_cid_encrypted, cookie_encrypted, status,
          CAST(last_auth_checked_at AS TEXT) AS last_auth_checked_at, last_auth_error_kind
          FROM nga_accounts WHERE label = 'default'",
     )
@@ -99,6 +109,16 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
     if state.credential_cipher.decrypt(&cid_encrypted).is_err() {
         return Ok(Json(needs_configuration_response().await));
     }
+    let cookie_encrypted: Option<Vec<u8>> = row.get("cookie_encrypted");
+    let full_cookie_configured = match cookie_encrypted {
+        Some(value) => {
+            if state.credential_cipher.decrypt(&value).is_err() {
+                return Ok(Json(needs_configuration_response().await));
+            }
+            true
+        }
+        None => false,
+    };
     let account_id: String = row.get("id");
     let renewal = renewal_summary(&state, &account_id).await;
     let active_session = active_login_session(&state, &account_id).await;
@@ -106,6 +126,7 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<AccountResponse> {
     Ok(Json(AccountResponse {
         configured: true,
         passport_uid_masked: Some(mask_uid(&uid)),
+        full_cookie_configured,
         status: row.get("status"),
         last_auth_checked_at: row.get("last_auth_checked_at"),
         last_auth_error_kind: row.get("last_auth_error_kind"),
@@ -125,16 +146,20 @@ pub async fn save(
     State(state): State<AppState>,
     Json(request): Json<SaveAccountRequest>,
 ) -> ApiResult<AccountResponse> {
-    let (passport_uid, passport_cid) = extract_credentials(request).ok_or((
+    let credentials = extract_credentials(request).ok_or((
         StatusCode::BAD_REQUEST,
         Json(ApiError {
             error: "invalid_nga_credentials",
         }),
     ))?;
-    if passport_uid.parse::<i64>().is_err()
-        || passport_uid.len() > 20
-        || passport_cid.trim().is_empty()
-        || passport_cid.len() > 512
+    if credentials.passport_uid.parse::<i64>().is_err()
+        || credentials.passport_uid.len() > 20
+        || credentials.passport_cid.trim().is_empty()
+        || credentials.passport_cid.len() > 512
+        || credentials
+            .cookie_header
+            .as_ref()
+            .is_some_and(|cookie| cookie.len() > MAX_COOKIE_HEADER_LENGTH)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -145,20 +170,27 @@ pub async fn save(
     }
     let uid_encrypted = state
         .credential_cipher
-        .encrypt(&passport_uid)
+        .encrypt(&credentials.passport_uid)
         .map_err(|_| internal_api_error())?;
     let cid_encrypted = state
         .credential_cipher
-        .encrypt(&passport_cid)
+        .encrypt(&credentials.passport_cid)
+        .map_err(|_| internal_api_error())?;
+    let cookie_encrypted = credentials
+        .cookie_header
+        .as_deref()
+        .map(|cookie| state.credential_cipher.encrypt(cookie))
+        .transpose()
         .map_err(|_| internal_api_error())?;
 
     sqlx::query(
         "INSERT INTO nga_accounts
-            (label, passport_uid_encrypted, passport_cid_encrypted)
-         VALUES ('default', $1, $2)
+            (label, passport_uid_encrypted, passport_cid_encrypted, cookie_encrypted)
+         VALUES ('default', $1, $2, $3)
          ON CONFLICT (label) DO UPDATE SET
             passport_uid_encrypted = EXCLUDED.passport_uid_encrypted,
             passport_cid_encrypted = EXCLUDED.passport_cid_encrypted,
+            cookie_encrypted = EXCLUDED.cookie_encrypted,
             status = 'unchecked',
             last_auth_checked_at = NULL,
             last_auth_error_kind = NULL,
@@ -166,6 +198,7 @@ pub async fn save(
     )
     .bind(uid_encrypted)
     .bind(cid_encrypted)
+    .bind(cookie_encrypted)
     .execute(&state.pool)
     .await
     .map_err(internal_error)?;
@@ -180,7 +213,8 @@ pub async fn save(
 
     Ok(Json(AccountResponse {
         configured: true,
-        passport_uid_masked: Some(mask_uid(&passport_uid)),
+        passport_uid_masked: Some(mask_uid(&credentials.passport_uid)),
+        full_cookie_configured: credentials.cookie_header.is_some(),
         status: "unchecked".to_owned(),
         last_auth_checked_at: None,
         last_auth_error_kind: None,
@@ -607,7 +641,7 @@ pub async fn trigger_renewal(State(state): State<AppState>) -> ApiResult<Renewal
 
 pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountResponse> {
     let row = sqlx::query(
-        "SELECT passport_uid_encrypted, passport_cid_encrypted
+        "SELECT passport_uid_encrypted, passport_cid_encrypted, cookie_encrypted
          FROM nga_accounts WHERE label = 'default'",
     )
     .fetch_optional(&state.pool)
@@ -623,8 +657,17 @@ pub async fn test(State(state): State<AppState>) -> ApiResult<TestAccountRespons
     })?;
     let uid = decrypt_column(&state, row.get("passport_uid_encrypted"))?;
     let cid = decrypt_column(&state, row.get("passport_cid_encrypted"))?;
+    let cookie_encrypted: Option<Vec<u8>> = row.get("cookie_encrypted");
+    let request_cookie = match cookie_encrypted {
+        Some(value) => decrypt_column(&state, value)?,
+        None => format!("ngaPassportUid={uid}; ngaPassportCid={cid}"),
+    };
 
-    match state.nga_client.check_credentials(&uid, &cid).await {
+    match state
+        .nga_client
+        .check_credentials(&uid, &request_cookie)
+        .await
+    {
         Ok(check) => {
             update_auth_status(&state, "valid", None).await?;
             notification::alerts::resolve_nga_credentials_invalid_alert(&state)
@@ -687,6 +730,7 @@ async fn unconfigured_response() -> AccountResponse {
     AccountResponse {
         configured: false,
         passport_uid_masked: None,
+        full_cookie_configured: false,
         status: "unconfigured".to_owned(),
         last_auth_checked_at: None,
         last_auth_error_kind: None,
@@ -802,23 +846,46 @@ fn mask_uid(uid: &str) -> String {
     format!("{}***{}", &uid[..2], &uid[uid.len() - 2..])
 }
 
-fn extract_credentials(request: SaveAccountRequest) -> Option<(String, String)> {
+fn extract_credentials(request: SaveAccountRequest) -> Option<SavedCredentials> {
     if let Some(cookie) = request.cookie {
+        let cookie = cookie.trim();
+        let cookie = cookie.strip_prefix("Cookie:").unwrap_or(cookie).trim();
+        if cookie.is_empty()
+            || cookie.len() > MAX_COOKIE_HEADER_LENGTH
+            || cookie.chars().any(char::is_control)
+        {
+            return None;
+        }
         let mut uid = None;
         let mut cid = None;
+        let mut parts = Vec::new();
         for part in cookie.split(';') {
             let Some((name, value)) = part.trim().split_once('=') else {
                 continue;
             };
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
             match name {
                 "ngaPassportUid" => uid = Some(value.to_owned()),
                 "ngaPassportCid" => cid = Some(value.to_owned()),
                 _ => {}
             }
+            parts.push(format!("{name}={value}"));
         }
-        return uid.zip(cid);
+        return Some(SavedCredentials {
+            passport_uid: uid?,
+            passport_cid: cid?,
+            cookie_header: Some(parts.join("; ")),
+        });
     }
-    request.passport_uid.zip(request.passport_cid)
+    Some(SavedCredentials {
+        passport_uid: request.passport_uid?,
+        passport_cid: request.passport_cid?,
+        cookie_header: None,
+    })
 }
 
 fn internal_error(_: sqlx::Error) -> (StatusCode, Json<ApiError>) {
@@ -838,7 +905,9 @@ fn internal_api_error() -> (StatusCode, Json<ApiError>) {
 mod tests {
     use axum::http::StatusCode;
 
-    use super::{SaveAccountRequest, extract_credentials, map_auth_check_error, mask_uid};
+    use super::{
+        SaveAccountRequest, SavedCredentials, extract_credentials, map_auth_check_error, mask_uid,
+    };
     use crate::nga::AuthCheckError;
 
     #[test]
@@ -848,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_required_values_from_full_cookie() {
+    fn extracts_credentials_and_preserves_the_full_cookie() {
         let request = SaveAccountRequest {
             passport_uid: None,
             passport_cid: None,
@@ -859,7 +928,14 @@ mod tests {
 
         assert_eq!(
             extract_credentials(request),
-            Some(("123456".to_owned(), "secret".to_owned()))
+            Some(SavedCredentials {
+                passport_uid: "123456".to_owned(),
+                passport_cid: "secret".to_owned(),
+                cookie_header: Some(
+                    "other=value; ngaPassportUid=123456; ngaPassportCid=secret; ignored=1"
+                        .to_owned()
+                ),
+            })
         );
     }
 

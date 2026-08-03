@@ -104,7 +104,7 @@ GET /metrics
 Authorization: Bearer <NGA_REMINDER__API_TOKEN>
 ```
 
-最小管理页面位于 `GET /admin`。页面会建立带 HttpOnly、SameSite=Strict 属性的管理员 session，并可保存或测试两个 NGA Passport 值。API 响应只暴露脱敏后的 UID，绝不会返回凭据。
+最小管理页面位于 `GET /admin`。页面会建立带 HttpOnly、SameSite=Strict 属性的管理员 session，并可加密保存完整 NGA Cookie 或单独保存两个 Passport 值。跨用户 UID 搜索需要完整浏览器 Cookie 和对应的导航请求头；只配置 Passport UID/CID 仍可用于主题监控和账号自身查询。API 响应只暴露脱敏后的 UID 与完整 Cookie 是否已配置，绝不会返回凭据。
 
 ## 主题和用户监控
 
@@ -200,7 +200,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/watches/users \
   }'
 ```
 
-用户监控不会导入历史。第一次运行只记录当前主题列表和回复列表的水位，不创建帖子或通知。后续运行保存该 UID 新发现的主题和单条回复，以支持可靠的投递重试与审计，但不会因为用户参与某个 TID 就扩展为完整主题抓取。列表扫描在已保存的 `(postdate, tid/pid)` 边界处停止，只请求新候选的详情。用户列表遇到 NGA busy 响应时每秒重试一次，最多十次；耗尽后记录 `skipped_busy`，且不推进两个游标。如果主题详情返回 `code=51`，本次用户抓取记录为 `skipped_pending_review`，游标保持不变，等待下一次定时运行。
+用户监控不会导入历史。回复列表使用 `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}`；请求只携带配置的 User-Agent，以及从完整 Cookie 中提取的 `ngaPassportUid`、可选 `ngaPassportUrlencodedUname` 和 `ngaPassportCid`。第一次运行只记录当前主题列表和回复列表的水位，不创建帖子或通知。后续运行保存该 UID 新发现的主题和单条回复，以支持可靠的投递重试与审计，但不会因为用户参与某个 TID 就扩展为完整主题抓取。跨用户查询必须先在服务设置中粘贴完整浏览器 Cookie；仅有 Passport UID/CID 时会返回 `nga_full_cookie_required`。若 NGA 对跨用户列表返回空体 HTTP 503，则按 2 秒间隔最多尝试 3 次，耗尽后记录 `nga_user_search_unavailable`。这两种失败都不会建立错误的空水位或推进任一游标。列表扫描在已保存的 `(postdate, tid/pid)` 边界处停止，只请求新候选的详情。用户列表遇到 NGA busy 响应时每秒重试一次，最多十次；耗尽后记录 `skipped_busy`，且不推进两个游标。如果主题详情返回 `code=51`，本次用户抓取记录为 `skipped_pending_review`，游标保持不变，等待下一次定时运行。
 
 ## 通知
 

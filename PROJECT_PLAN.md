@@ -386,7 +386,7 @@ Content-Type: application/x-www-form-urlencoded
 User-Agent: <configured user agent>
 Accept: application/json, text/javascript, */*; q=0.01
 Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7
-Cookie: ngaPassportUid=<uid>; ngaPassportCid=<cid>
+Cookie: <加密保存的完整浏览器 Cookie；仅主题抓取和账号自身查询可只用 Passport UID/CID>
 Origin: https://bbs.nga.cn
 Referer: https://bbs.nga.cn/
 ```
@@ -432,7 +432,7 @@ Referer: https://bbs.nga.cn/
 
 以下契约来自 `extension-standalone` 的现有调用、实际只读请求和
 [`ngapost2md`](https://github.com/ludoux/ngapost2md) 的实现交叉验证。测试请求只需要
-`ngaPassportUid` 与 `ngaPassportCid` 两个 Cookie；文档、fixture 和日志不得保存其值。
+主题抓取和账号自身查询可只使用 `ngaPassportUid` 与 `ngaPassportCid`；跨用户搜索从保存的完整 Cookie 中提取 UID、可选编码用户名和 CID，并使用已验证的最小请求头。文档、fixture 和日志不得保存任何 Cookie 值。
 
 | 用途 | 请求 | 当前验证状态 |
 | --- | --- | --- |
@@ -675,8 +675,8 @@ HTTPS、反向代理和请求体大小等入口限制。
 - Markdown/ZIP 导出任务及下载。
 - 只读展示 `assets.download_enabled`、`assets.storage_path` 等服务启动参数。
 
-NGA Cookie 页面允许粘贴完整 Cookie 字符串，但后端只提取并加密保存
-`ngaPassportUid`、`ngaPassportCid`。保存响应和后续页面均不回显原值，连通性测试只返回
+NGA Cookie 页面允许粘贴完整 Cookie 字符串，后端加密保存完整 Cookie，并单独提取
+`ngaPassportUid`、`ngaPassportCid` 用于认证状态与兼容流程。保存响应和后续页面均不回显原值，连通性测试只返回
 成功状态、账号 UID 和脱敏错误。
 
 ### 11.2 与 Chromium 扩展的边界
@@ -740,19 +740,21 @@ Cookie 原文或可逆的日志摘要。
 - 用户主题列表不包含 `__P` 回复详情，发现 TID 后仍需调用主题分页接口补全主楼。
 - 当前用户主题 `__ROWS=41`、`__T__ROWS_PAGE=35`，因此应抓取两页；第一页虽然只实际
   返回 30 项，也不能提前停止。
-- 用户回复接口为
-  `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}`。
+- 用户回复接口使用
+  `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}`。用户提供的精确浏览器 cURL 证明 `page=1` 可稳定返回 JSON；服务必须同时对齐完整 Cookie 和浏览器导航请求头，不能把不等价请求的 503 归因于分页参数或限流。
 - `__output=12` 返回 `text/json;charset=UTF-8`，响应可使用 gzip 压缩。
 - HTTP 200 不代表业务成功，必须继续判断顶层 `code`。
 - 成功响应为 `{"code": 0, "result": ...}`；`result.__T` 是结果数组。
 - 每个 `result.__T` 元素包含主题摘要，命中的用户回复位于 `__P`，字段包括
   `tid`、`pid`、`authorid`、`postdate`、`subject`、`content` 和 `type`。
 - `result.__R__ROWS_PAGE` 表示用户回复结果每页容量，当前验证值为 20。
+- 真实回复响应可返回 `result.__ROWS=null`；此时以满页继续、短页停止的方式扫描到已保存边界。
+- `result.__T` 可混入 `__P.postdate=""` 的占位记录；缺少有效 TID/PID/时间的条目直接跳过。
 - `page=2` 能返回下一页结果；已验证相邻两页 PID 无重叠且按 `postdate` 降序排列。
-- 已验证请求头集合为 `Content-Type`、`User-Agent`、`Accept`、`Accept-Language`、
-  `Cookie`、`Origin` 和 `Referer`，服务端统一保留。
-- Cookie 只保留 `ngaPassportUid`、`ngaPassportCid` 即可成功访问，不需要持久化整串
-  浏览器 Cookie。
+- 用户列表请求只携带 `User-Agent` 和最小 `Cookie`；Cookie 仅保留 UID、可选编码用户名和 CID，
+  不额外添加 `Accept`、`Accept-Language`、`Origin`、`Referer`、`Sec-Fetch-*` 或 `sec-ch-ua*`。
+- 2026-08-03 复测确认：跨用户搜索只需 `ngaPassportUid`、可选 `ngaPassportUrlencodedUname`、
+  `ngaPassportCid` 和 User-Agent；两个 Accept 头、`C3VK` 及其他浏览器导航头不影响结果。显式 `page=1` 是已验证的正确请求。
 - 已实际观察到 HTTP 200 + `{"code": 2048, "msg": "服务器忙,请稍后重试"}`；
   一次测试中前三次返回 2048，第 4 次成功，符合每秒重试、最多 10 次的处理策略。
 - 用户资料接口 `GET /nuke.php?func=ucp&uid={uid}` 返回 GBK HTML，可在转码后安全提取
@@ -768,7 +770,7 @@ Cookie 原文或可逆的日志摘要。
   不应被当作永久不存在或认证失败。
 - 失效 Passport Cookie 同样返回 HTTP 200 + `code=46`。
 - 无效 UID 的资料页返回 HTTP 200、GBK HTML 但不包含 `__UCPUSER`；主题列表探测返回
-  空体 HTTP 503，因此新增 UID watch 先通过资料页校验存在性。
+  空体 HTTP 503，因此新增 UID watch 先通过资料页校验存在性。有效 UID 的跨用户回复搜索也可能返回相同 503，采集器必须报 `nga_user_search_unavailable` 且不推进游标。
 - 已建立 `service/docs/NGA_API_CONTRACT.md` 和 `service/tests/fixtures/nga/`。
 - 本次验证未将真实 Cookie 或原始用户内容写入仓库。
 
@@ -796,8 +798,8 @@ Cookie 原文或可逆的日志摘要。
   反向代理示例。
 - 配置可选择 PostgreSQL URL 或 SQLite 文件路径；SQLite 已验证自动建目录、WAL 和
   migration。
-- 管理页可粘贴完整 Cookie 或分别录入 Passport 字段；后端只提取
-  `ngaPassportUid`、`ngaPassportCid`，使用 AES-256-GCM 和随机 nonce 加密保存。
+- 管理页可粘贴完整 Cookie 或分别录入 Passport 字段；后端为跨用户监控加密保存完整 Cookie，
+  并提取 `ngaPassportUid`、`ngaPassportCid`，全部使用 AES-256-GCM 和随机 nonce 加密保存。
 - Cookie 查询 API 只返回脱敏 UID、认证状态和检查时间，不回显凭据。
 - 连通性测试使用用户回复接口判断认证状态；用户资料页不用于认证，因为已验证无效 CID
   仍可能正常取得公开资料。
@@ -830,7 +832,7 @@ Cookie 原文或可逆的日志摘要。
 - PostgreSQL 模式可通过 Compose 一条命令启动；SQLite 模式无需外部数据库。
 - migrations 自动执行或有明确命令。
 - health、ready、鉴权和基础集成测试通过。
-- 用户可从最小管理页面录入 NGA Cookie，服务端只保存两个 Passport Cookie 且不回显。
+- 用户可从最小管理页面录入 NGA Cookie；服务端加密保存完整 Cookie 和两个 Passport 值且不回显。
 
 预计：4～6 个开发日。
 
@@ -844,7 +846,7 @@ Cookie 原文或可逆的日志摘要。
   和帖子事件 migration。
 - 强类型 thread parser 覆盖主楼、普通回复、楼中楼、`hot_post` 去重边界及附件原始
   payload 保留。
-- NGA thread HTTP client 统一使用已验证请求头，只传 Passport UID/CID，并实现
+- NGA thread HTTP client 统一使用已验证请求头；跨用户查询传完整 Cookie，其他请求兼容 Passport UID/CID，并实现
   账号级 500ms 请求间隔、超时、429/5xx/网络错误退避重试及业务码分类。
 - 新 watch 首次抓取全部可访问页面并建立无事件基线；后续仅抓取覆盖新楼层的页面范围，
   通过楼层游标和自然唯一键追加新记录。
@@ -892,8 +894,8 @@ Cookie 原文或可逆的日志摘要。
 已实现并验证：
 
 - PostgreSQL/SQLite 同步新增 `nga_users` 和独立 `user_watch_cursors` migration。
-- 用户主题、用户回复列表强类型 parser；页数始终按 `__ROWS/page_size` 计算，
-  `denied=true` 占位项和非目标 UID 条目不会成为候选。
+- 用户主题、用户回复列表强类型 parser；有 `__ROWS` 时按 `__ROWS/page_size` 计算，
+  `__ROWS=null` 时按满页/短页继续扫描；`denied=true`、缺少有效时间的占位项和非目标 UID 条目不会成为候选。
 - GBK 用户资料安全解码，只截取并解析 `__UCPUSER` JSON，不执行页面脚本。
 - 用户主题候选仅补全并保存作者 UID 匹配的主楼；用户回复候选按 TID/PID 补全并二次
   校验详情作者，只保存该单条回复及其可获取楼中楼。
