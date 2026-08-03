@@ -23,7 +23,9 @@ NGA Reminder 是一个面向 NGA 的主题与用户监控、内容持久化和�
 - Bark 和飞书国内版企业应用机器人通知；渠道与 TID 作者 UID 过滤直接配置在监控目标中。
 - Transactional outbox、投递 lease、重试、死信和通知去重。
 - Markdown 与 ZIP 导出，支持图片资源元数据、本地下载和 SHA-256 内容寻址。
-- 响应式 `/admin` 管理台：Cookie、监控目标与通知过滤、动态间隔、通知渠道、事件和导出管理。
+- 大主题分页流式 Markdown、磁盘临时 ZIP，以及资源缺失检查和过期孤儿/临时文件清理。
+- 响应式 `/admin` 管理台：Cookie、监控目标与通知过滤、动态间隔、通知渠道、事件、
+  UID 结果、安全富文本详情和导出管理。
 - 通用机器人能力：平台连接与通知目标分离、飞书长连接机器人适配器、`/指令` 命令路由、
   角色授权与私聊限制、一次性绑定码、消息幂等与回复 outbox。
 - NGA Cookie 自动续期（可选）：Cookie 失效自动暂停监控并通知 owner，owner 私聊确认 →
@@ -143,8 +145,10 @@ Standalone 扩展位于 [`extension-standalone/`](extension-standalone/)，无�
 - M5：Markdown/ZIP 导出与资源持久化——验收完成。
 - M6：Web 管理页面——验收完成。
 - M7：生产加固——按 homeserver 单机部署范围验收完成。
+- M8：飞书机器人交互与 NGA Cookie 自动续期——已完成 dev 环境整体端到端验收，可用于
+  homeserver 单机生产发布。
 
-后续增强包括更完整的音频/视频附件提取、大主题流式导出、资源孤儿清理，以及旧父帖楼中楼的独立变化检测。
+后续增强包括更完整的音频/视频附件提取、导出 golden fixtures，以及旧父帖楼中楼的独立变化检测。
 
 ## 开发与验证
 
@@ -172,6 +176,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - [运维手册](service/docs/OPERATIONS.md)
 - [NGA API 契约](service/docs/NGA_API_CONTRACT.md)
 - [机器人交互与 Cookie 续期设计](service/docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)
+- [流式导出、资源维护与内容管理设计](service/docs/EXPORT_RESOURCE_AND_CONTENT_UI_DESIGN.md)
 - [Standalone 扩展说明](extension-standalone/README.md)
 - [更新日志](service/CHANGELOG.md)（[English](service/CHANGELOG.en.md)）
 

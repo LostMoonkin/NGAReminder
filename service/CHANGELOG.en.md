@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+### Streaming exports, asset maintenance, and content management
+
+- Changed Markdown exports to stable cursor pagination and HTTP streaming; ZIP exports are built incrementally in temporary files and delete those files when the response completes or is dropped.
+- Added asset consistency scan and explicit cleanup APIs/UI for missing ready files, orphan metadata, and expired orphan/content temporary files.
+- Added watched-UID result summaries, user post queries, and user Markdown/ZIP actions in the admin console.
+- Added server-side safe HTML rendering for NGA markup in thread and user details.
+
 ### Bot interaction and Cookie renewal (M8)
 
 - Refactored the platform model with `platform_integrations` for application credentials and bot ownership, rebuilt `notification_channels` around integrations and independent targets, added a partial unique index allowing at most one bot connection per platform, and added platform-level atomic switching APIs.

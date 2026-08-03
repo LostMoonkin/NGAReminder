@@ -40,6 +40,24 @@ pub fn render_markdown(input: &str, assets: &HashMap<String, String>) -> String 
     normalise_output(&output)
 }
 
+/// Render NGA markup as a small, safe HTML subset for the embedded admin UI.
+///
+/// Text and attributes are escaped, and links/images are emitted only for URLs
+/// already accepted by the parser's HTTP(S)-only policy.
+pub fn render_html(input: &str) -> String {
+    let normalized = normalize_source_markup(input);
+    if let Some((quoted, body)) = split_nga_reply_quote(&normalized) {
+        let mut output = String::from("<blockquote>");
+        render_html_nodes(&parse_normalized(quoted), &mut output);
+        output.push_str("</blockquote>");
+        render_html_nodes(&parse_normalized(body), &mut output);
+        return output;
+    }
+    let mut output = String::new();
+    render_html_nodes(&parse_normalized(&normalized), &mut output);
+    output
+}
+
 /// Render post content for compact notification cards.
 ///
 /// This starts from the same renderer as Markdown exports, then removes code
@@ -348,6 +366,73 @@ fn render_nodes(nodes: &[MarkupNode], assets: &HashMap<String, String>, output: 
     }
 }
 
+fn render_html_nodes(nodes: &[MarkupNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            MarkupNode::Text(value) => output.push_str(&escape_html_text(value)),
+            MarkupNode::Bold(children) => {
+                output.push_str("<strong>");
+                render_html_nodes(children, output);
+                output.push_str("</strong>");
+            }
+            MarkupNode::Italic(children) => {
+                output.push_str("<em>");
+                render_html_nodes(children, output);
+                output.push_str("</em>");
+            }
+            MarkupNode::Underline(children) => {
+                output.push_str("<u>");
+                render_html_nodes(children, output);
+                output.push_str("</u>");
+            }
+            MarkupNode::Strike(children) => {
+                output.push_str("<del>");
+                render_html_nodes(children, output);
+                output.push_str("</del>");
+            }
+            MarkupNode::Quote(children) => {
+                output.push_str("<blockquote>");
+                render_html_nodes(children, output);
+                output.push_str("</blockquote>");
+            }
+            MarkupNode::Link { url, children } => {
+                output.push_str("<a href=\"");
+                output.push_str(&escape_html_attribute(url));
+                output.push_str("\" target=\"_blank\" rel=\"noopener noreferrer\">");
+                render_html_nodes(children, output);
+                output.push_str("</a>");
+            }
+            MarkupNode::Image(url) => {
+                output.push_str("<img src=\"");
+                output.push_str(&escape_html_attribute(url));
+                output.push_str(
+                    "\" alt=\"帖子图片\" loading=\"lazy\" referrerpolicy=\"no-referrer\">",
+                );
+            }
+            MarkupNode::Code(value) => {
+                output.push_str("<pre><code>");
+                output.push_str(&escape_html_text(value));
+                output.push_str("</code></pre>");
+            }
+            MarkupNode::LineBreak => output.push_str("<br>"),
+            MarkupNode::HorizontalRule => output.push_str("<hr>"),
+        }
+    }
+}
+
+fn escape_html_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    escape_html_text(value).replace(['\n', '\r'], "")
+}
+
 fn escape_text(value: &str) -> String {
     value.replace('\\', "\\\\").replace("\t", "    ")
 }
@@ -430,7 +515,7 @@ fn is_safe_url(value: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{MarkupNode, parse, render_compact_markdown, render_markdown};
+    use super::{MarkupNode, parse, render_compact_markdown, render_html, render_markdown};
 
     #[test]
     fn parses_nested_formatting_and_links() {
@@ -460,6 +545,19 @@ mod tests {
         assert!(output.contains("![image](assets/a.jpg)"));
         assert!(output.contains("```\na < b\n```"));
         assert!(!output.contains("javascript:"));
+    }
+
+    #[test]
+    fn renders_safe_admin_html_without_allowing_raw_html_or_script_urls() {
+        let output = render_html(
+            "<script>alert(1)</script>[b]粗体[/b][quote]引用[/quote][url=javascript:alert(1)]bad[/url][url=https://example.com?a=1&b=2]ok[/url][img]https://img.nga.cn/a.jpg[/img]",
+        );
+        assert!(output.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(output.contains("<strong>粗体</strong>"));
+        assert!(output.contains("<blockquote>引用</blockquote>"));
+        assert!(!output.contains("javascript:"));
+        assert!(output.contains("href=\"https://example.com?a=1&amp;b=2\""));
+        assert!(output.contains("src=\"https://img.nga.cn/a.jpg\""));
     }
 
     #[test]

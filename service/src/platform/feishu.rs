@@ -3,8 +3,9 @@
 
 use std::time::Duration;
 
-use open_lark::auth::AuthTokenProvider;
+use openlark_auth::AuthTokenProvider;
 use openlark_core::auth::{TokenProvider, TokenRequest};
+use openlark_core::config::Config as OpenLarkConfig;
 use reqwest::{Client, StatusCode, redirect};
 use serde::Deserialize;
 use thiserror::Error;
@@ -28,7 +29,7 @@ pub struct FeishuImageUploader {
 
 impl FeishuImageUploader {
     pub fn new(credentials: &FeishuCredentials) -> Result<Self, FeishuImageUploadError> {
-        let config = open_lark::Config::builder()
+        let config = OpenLarkConfig::builder()
             .app_id(credentials.app_id.clone())
             .app_secret(credentials.app_secret.clone())
             .base_url(FEISHU_API_BASE_URL)

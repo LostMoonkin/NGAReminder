@@ -95,6 +95,31 @@ tar --xattrs --same-owner -czf ./backups/20260728-020000/sqlite-data.tar.gz \
 然后启动服务并检查 `/ready`。SQLite 的 `-wal`/`-shm` 文件不应在服务停止后作为独立备份对象；
 若停机时仍存在，应连同数据库目录一起保留，避免只恢复主数据库文件。
 
+## 资源一致性检查与清理
+
+管理台“服务设置 → 资源一致性维护”可以执行只读扫描。也可以使用管理员 session 或 API token
+调用：
+
+```bash
+curl -fsS http://127.0.0.1:12888/api/v1/assets/maintenance \
+  -H "Authorization: Bearer $NGA_REMINDER__API_TOKEN"
+```
+
+报告包含 ready 记录缺失文件、无帖子引用的资源元数据、本地孤儿文件和超过 24 小时的导出临时
+文件。扫描不会修改数据库或磁盘。确认报告后执行：
+
+```bash
+curl -fsS -X POST http://127.0.0.1:12888/api/v1/assets/maintenance/cleanup \
+  -H "Authorization: Bearer $NGA_REMINDER__API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{}'
+```
+
+清理会让缺失 ready 文件重新进入下载队列（资源下载关闭时恢复为仅远程状态），删除无帖子引用
+且不在下载中的元数据，并删除超过保留期的孤儿内容文件和 `.tmp` 文件。它不会跟随符号链接，
+也不会删除仍被任一 ready 记录引用的共享内容文件。备份恢复后应先扫描；如果缺失文件本应存在于
+备份中，优先恢复完整资源目录，再决定是否执行清理。
+
 ## Docker 发布、升级与回滚
 
 ### SQLite 单容器生产模板

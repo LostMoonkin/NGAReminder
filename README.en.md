@@ -41,7 +41,7 @@ For PostgreSQL, Docker Compose, Nginx TLS termination, backups, upgrades, and ro
 
 ## Current status
 
-The first server release has completed acceptance for milestones M0 through M7, including Bark push delivery and the M5 Markdown/ZIP and asset workflow. Remaining work is limited to optional production exercises and enhancements such as broader media attachment extraction, streaming exports, orphan cleanup, and richer admin views.
+The first server release has completed acceptance for milestones M0 through M7, including Bark push delivery and the M5 Markdown/ZIP and asset workflow. Streaming exports, asset maintenance, watched-UID views, user export actions, and safe rich post details are also implemented. Remaining enhancements include broader media attachment extraction and independent change detection for nested comments on old parent posts.
 
 ## Development
 

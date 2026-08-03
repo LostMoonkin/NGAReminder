@@ -251,6 +251,21 @@ GET /api/v1/exports/users/{uid}?format=zip
 
 主题导出包含该 TID 已持久化的全部帖子。用户导出包含该 UID 发布的已持久化帖子，并按 TID 分组。ZIP 包含 Markdown 文件、`metadata.json` 以及下载状态为 `ready` 的本地资源；缺失或仅有远程地址的资源仍保留远程链接。
 
+Markdown 按稳定游标分页读取并直接流式响应。ZIP 在 `assets.storage_path/.tmp` 中生成临时
+文件后流式返回，正常完成或客户端下载中断时都会删除临时 ZIP，因此大主题导出不会把
+完整帖子集合、资源内容或 ZIP 全部加载到服务内存。
+
+资源一致性维护接口：
+
+```text
+GET  /api/v1/assets/maintenance
+POST /api/v1/assets/maintenance/cleanup
+```
+
+扫描只读地报告缺失文件、孤儿元数据、孤儿内容文件和过期导出临时文件。清理默认只删除
+超过 24 小时的孤儿/临时文件；缺失 ready 文件会重新进入下载队列，关闭资源下载时则恢复
+为仅远程状态。管理台“服务设置 → 资源一致性维护”提供相同操作。
+
 ## 资源持久化设计
 
 资源 worker 会将附件、图片、音频和视频的元数据保存到所选数据库，并将二进制内容保存到 `assets.storage_path`；不会使用 PostgreSQL `BYTEA` 或 SQLite `BLOB`。关闭下载时只保留远程 URL 和元数据。
@@ -261,10 +276,13 @@ GET /api/v1/exports/users/{uid}?format=zip
 <assets.storage_path>/<前两个 SHA-256 字符>/<完整 SHA-256>.<安全扩展名>
 ```
 
-这样可以去重内容，并控制数据库、WAL 和备份大小。数据库与资源目录是一个逻辑备份单元，必须一起备份和恢复。本节描述的是已冻结的设计；首个资源下载器和导出路径已作为 M5 的一部分实现并验收。更广泛的附件覆盖和资源清理属于 M5 之后的可选增强。
+这样可以去重内容，并控制数据库、WAL 和备份大小。数据库与资源目录是一个逻辑备份单元，必须一起备份和恢复。本节描述的是已冻结的设计；资源下载器、流式导出和显式资源维护已作为 M5 后续增强实现。更广泛的音频/视频附件覆盖仍属于可选增强。
 
 生产部署应让应用只监听内部地址，并以 [`deploy/nginx.conf`](deploy/nginx.conf) 为 TLS 终止配置起点。
 
 Prometheus 指标、结构化日志、Cookie 失效告警、PostgreSQL/SQLite 与资源备份恢复、Docker 发布/回滚以及 Nginx TLS/反向代理说明见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。通用机器人架构、斜杠命令协议、飞书适配器重构、身份绑定和用户确认的 NGA Cookie 续期设计见 [`docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md`](docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)。
+
+流式导出、临时文件生命周期、资源维护安全边界和 UID 内容管理设计见
+[`docs/EXPORT_RESOURCE_AND_CONTENT_UI_DESIGN.md`](docs/EXPORT_RESOURCE_AND_CONTENT_UI_DESIGN.md)。
 
 不要提交真实 NGA Cookie、API token、Bark key 或飞书应用密钥。

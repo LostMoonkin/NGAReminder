@@ -1,5 +1,4 @@
 use axum::{
-    body::Body,
     extract::{Path, Query, State},
     http::{HeaderValue, StatusCode, header},
     response::Response,
@@ -60,7 +59,7 @@ fn parse_format(query: &ExportQuery) -> Result<ExportFormat, (StatusCode, &'stat
 fn build_response(
     artifact: export::ExportArtifact,
 ) -> Result<Response, (StatusCode, &'static str)> {
-    let mut response = Response::new(Body::from(artifact.bytes));
+    let mut response = Response::new(artifact.body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(artifact.content_type),
@@ -71,6 +70,13 @@ fn build_response(
         HeaderValue::from_str(&disposition)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid_export_filename"))?,
     );
+    if let Some(content_length) = artifact.content_length {
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&content_length.to_string())
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid_export_size"))?,
+        );
+    }
     Ok(response)
 }
 
