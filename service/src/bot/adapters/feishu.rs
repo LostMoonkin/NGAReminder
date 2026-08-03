@@ -8,10 +8,13 @@ use std::time::Duration;
 use ::time::OffsetDateTime;
 use anyhow::Context;
 use async_trait::async_trait;
-use open_lark::communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
-use open_lark::communication::im::v1::message::models::ReceiveIdType;
-use open_lark::communication::im::v1::message::reply::{ReplyMessageBody, ReplyMessageRequest};
-use open_lark::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError};
+use openlark_client::ws_client::{
+    EventDispatcherHandler, EventHandler, LarkWsClient, WsClientError,
+};
+use openlark_communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
+use openlark_communication::im::v1::message::models::ReceiveIdType;
+use openlark_communication::im::v1::message::reply::{ReplyMessageBody, ReplyMessageRequest};
+use openlark_core::config::Config as OpenLarkConfig;
 use serde::Deserialize;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -146,7 +149,7 @@ impl BotAdapter for FeishuAdapter {
 }
 
 async fn send_text(
-    config: &open_lark::Config,
+    config: &OpenLarkConfig,
     message: &BotOutboundMessage,
     uuid: &str,
     text: &str,
@@ -189,7 +192,7 @@ async fn send_text(
 }
 
 async fn send_image(
-    config: &open_lark::Config,
+    config: &OpenLarkConfig,
     credentials: &FeishuCredentials,
     message: &BotOutboundMessage,
     uuid: &str,

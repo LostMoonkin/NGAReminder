@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use open_lark::Config as OpenLarkConfig;
-use open_lark::auth::AuthTokenProvider;
-use open_lark::communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
-use open_lark::communication::im::v1::message::models::ReceiveIdType;
+use openlark_auth::AuthTokenProvider;
+use openlark_communication::im::v1::message::create::{CreateMessageBody, CreateMessageRequest};
+use openlark_communication::im::v1::message::models::ReceiveIdType;
+use openlark_core::config::Config as OpenLarkConfig;
 use reqwest::{
     Client, StatusCode, Url,
     header::{CONTENT_LENGTH, CONTENT_TYPE},

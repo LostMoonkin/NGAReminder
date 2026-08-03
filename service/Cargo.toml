@@ -9,23 +9,23 @@ publish = false
 aes-gcm = "0.10"
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
-clap = { version = "4", features = ["derive", "env"] }
-config = "0.15"
+clap = { version = "4", features = ["derive"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
 encoding_rs = "0.8"
 futures-util = "0.3"
 sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "multipart", "rustls", "stream"] }
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "any", "postgres", "sqlite", "uuid", "time", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "any", "postgres", "sqlite", "macros", "migrate"] }
 subtle = "2"
 thiserror = "2"
-time = { version = "0.3", features = ["formatting", "serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["request-id", "trace"] }
@@ -33,8 +33,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-openlark = { version = "0.20", default-features = false, features = ["auth", "communication", "websocket"] }
 openlark-core = "0.20"
+openlark-auth = "0.20"
+openlark-client = { version = "0.20", default-features = false, features = ["websocket"] }
+openlark-communication = { version = "0.20", default-features = false, features = ["im"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -42,6 +44,8 @@ tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"
+opt-level = "s"
+panic = "abort"
 strip = "symbols"
 
 [patch.crates-io]
