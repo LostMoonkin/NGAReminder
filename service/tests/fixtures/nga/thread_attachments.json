@@ -1,0 +1,57 @@
+{
+  "code": 0,
+  "msg": "",
+  "currentPage": 1,
+  "totalPage": 1,
+  "perPage": 20,
+  "vrows": 1,
+  "fid": 3001,
+  "forum_name": "[redacted forum]",
+  "tsubject": "[redacted subject]",
+  "tauthor": "[redacted user 1]",
+  "tauthorid": 2001,
+  "attachPrefix": "https://example.invalid/attachments/",
+  "hot_post": null,
+  "result": [
+    {
+      "tid": 1004,
+      "pid": 0,
+      "fid": 3001,
+      "lou": 0,
+      "postdatetimestamp": 1767225600,
+      "content": "[redacted topic with attachments]",
+      "author": {
+        "uid": 2001,
+        "username": "[redacted user 1]"
+      },
+      "attches": [
+        {
+          "attachurl": "synthetic/asset-1.jpg",
+          "path": "synthetic/asset-1.jpg",
+          "name": "asset-1.jpg",
+          "ext": "jpg",
+          "type": "img",
+          "size": 12345,
+          "subid": 1,
+          "thumb": "synthetic/asset-1.thumb.jpg",
+          "dscp": "[redacted description]",
+          "hash": "",
+          "url_utf8_org_name": "asset-1.jpg"
+        },
+        {
+          "attachurl": "synthetic/asset-2.jpg",
+          "path": "synthetic/asset-2.jpg",
+          "name": "asset-2.jpg",
+          "ext": "jpg",
+          "type": "img",
+          "size": 23456,
+          "subid": 2,
+          "thumb": "synthetic/asset-2.thumb.jpg",
+          "dscp": "",
+          "hash": "",
+          "url_utf8_org_name": "asset-2.jpg"
+        }
+      ]
+    }
+  ]
+}

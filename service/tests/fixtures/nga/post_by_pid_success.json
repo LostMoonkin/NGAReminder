@@ -1,0 +1,37 @@
+{
+  "code": 0,
+  "msg": "",
+  "currentPage": 1,
+  "totalPage": 1,
+  "perPage": 20,
+  "vrows": 1,
+  "fid": 3001,
+  "forum_name": "[redacted forum]",
+  "tsubject": "[redacted subject]",
+  "tauthor": "[redacted user 1]",
+  "tauthorid": 2001,
+  "attachPrefix": "https://example.invalid/attachments/",
+  "hot_post": null,
+  "result": [
+    {
+      "tid": 1001,
+      "pid": 4001,
+      "fid": 3001,
+      "lou": 1,
+      "postdate": "2026-01-01 00:01",
+      "postdatetimestamp": 1767225660,
+      "subject": "",
+      "content": "[redacted reply content]",
+      "type": 0,
+      "author": {
+        "uid": 2002,
+        "username": "[redacted user 2]"
+      },
+      "attches": null,
+      "comment_to_id": "",
+      "vote": 0,
+      "vote_good": 1,
+      "vote_bad": 0
+    }
+  ]
+}

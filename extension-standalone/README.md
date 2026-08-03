@@ -1,62 +1,61 @@
-# NGA Reminder (Standalone)
+# NGA Reminder（Standalone 独立扩展）
 
-A Chrome extension that monitors NGA threads and sends notifications - **No server required!**
+一个监控 NGA 主题并发送通知的 Chrome 扩展，**无需服务端**。
 
-This standalone version works entirely within your browser by reading your NGA cookies directly, eliminating the need for a separate Python server.
+Standalone 版本完全运行在浏览器中，直接读取浏览器里的 NGA Cookie，不需要另外部署 Python 或 Rust 服务。
 
-## ✨ Features
+## 功能
 
-- 🔐 **Automatic Authentication** - Uses your browser's NGA cookies
-- 🔔 **Real-time Notifications** - Get notified of new posts instantly
-- ⏰ **Time-based Intervals** - Different check frequencies for different times/days
-- 👤 **Author Filtering** - Only get notified for specific authors
-- 📊 **Multi-thread Monitoring** - Monitor multiple threads simultaneously
-- 🚀 **Zero Setup** - Just install and configure threads
+- 🔐 **自动认证**：使用浏览器中的 NGA Cookie。
+- 🔔 **实时通知**：发现新回复后发送通知。
+- ⏰ **按时间段设置间隔**：可为不同时间和日期配置不同的检查频率。
+- 👤 **作者过滤**：只接收指定作者的通知。
+- 📊 **多主题监控**：同时监控多个主题。
+- 🚀 **零部署**：安装扩展后即可配置主题。
 
-## 🆚 vs Server Version
+## 与服务端版本的区别
 
-| Feature | Standalone | Server-based |
-|---------|------------|--------------|
-| Setup Required | Extension only | Server + Extension |
-| Authentication | Browser cookies | Config file |
-| Historical Data | No | Yes (SQLite) |
-| Resource Usage | Low | Medium |
-| Works When | Browser open | Server running |
+| 特性 | Standalone 独立扩展 | 服务端版本 |
+| --- | --- | --- |
+| 所需部署 | 仅需安装扩展 | 服务端及相关配置 |
+| 认证方式 | 浏览器 Cookie | 服务端配置 |
+| 历史数据 | 不保存 | 保存到 SQLite/PostgreSQL |
+| 资源占用 | 低 | 中等 |
+| 运行条件 | 浏览器保持开启 | 服务端持续运行 |
 
-**Choose Standalone if:** You want simple setup and only need new posts  
-**Choose Server if:** You want historical data and server-based automation
+如果只想简单接收新回复，请选择 Standalone；如果需要历史数据和服务端自动化，请选择服务端版本。
 
-## 📦 Installation
+## 安装
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable **Developer mode** (toggle in top right)
-3. Click **Load unpacked**
-4. Select the `extension-standalone` folder
+1. 打开 Chrome，访问 `chrome://extensions/`。
+2. 开启右上角的**开发者模式**。
+3. 点击**加载已解压的扩展程序**。
+4. 选择本项目中的 `extension-standalone` 目录。
 
-## 🔧 Setup
+## 配置
 
-### Step 1: Login to NGA
+### 第一步：登录 NGA
 
-1. Click the extension icon
-2. If you see "Not logged in to NGA", click **Open NGA to Login**
-3. Log in to bbs.nga.cn
-4. Return to extension - should show "✓ Logged in as UID XXXXX"
+1. 点击扩展图标。
+2. 如果显示“未登录 NGA”，点击**打开 NGA 并登录**。
+3. 登录 `bbs.nga.cn`。
+4. 返回扩展，确认页面显示“✓ 已登录，UID XXXXX”。
 
-### Step 2: Add Threads
+### 第二步：添加主题
 
-1. Click **+ Add** button
-2. Fill in thread configuration:
-   - **Thread ID (TID)**: Get from thread URL (e.g., `45974302`)
-   - **Author UIDs to Notify**: Optional, comma-separated (e.g., `150058,123456`)
-   - **Check Interval**: How often to check (in seconds, minimum 60)
+1. 点击**添加**按钮。
+2. 填写主题配置：
+   - **主题 ID（TID）**：从主题 URL 中获取，例如 `45974302`。
+   - **需要通知的作者 UID**：可选，使用逗号分隔，例如 `150058,123456`。
+   - **检查间隔**：检查频率，单位为秒，最小值为 60。
+3. 可选：配置按时间段运行的计划。
 
-3. *Optional:* Configure time-based schedule
+### 第三步：配置按时间段的检查间隔（可选）
 
-### Step 3: Configure Time-based Intervals (Optional)
+勾选“使用按时间段计划”，然后填写 JSON 配置。
 
-Check "Use Time-based Schedule" and add JSON configuration:
+示例一：工作日/周末计划
 
-**Example 1: Weekday/Weekend Schedule**
 ```json
 [
   {
@@ -64,136 +63,143 @@ Check "Use Time-based Schedule" and add JSON configuration:
     "start_time": "09:00",
     "end_time": "18:00",
     "interval": 300,
-    "description": "Weekday business hours - every 5 min"
+    "description": "工作日工作时间 - 每 5 分钟"
   },
   {
     "days": ["weekdays"],
     "start_time": "18:00",
     "end_time": "09:00",
     "interval": 900,
-    "description": "Weekday nights - every 15 min"
+    "description": "工作日夜间 - 每 15 分钟"
   },
   {
     "days": ["weekends"],
     "start_time": "00:00",
     "end_time": "23:59",
     "interval": 1800,
-    "description": "Weekends - every 30 min"
+    "description": "周末 - 每 30 分钟"
   }
 ]
 ```
 
-**Example 2: Day/Night Only**
+示例二：仅区分白天和夜间
+
 ```json
 [
   {
     "start_time": "08:00",
     "end_time": "22:00",
     "interval": 300,
-    "description": "Daytime - every 5 min"
+    "description": "白天 - 每 5 分钟"
   },
   {
     "start_time": "22:00",
     "end_time": "08:00",
     "interval": 1800,
-    "description": "Nighttime - every 30 min"
+    "description": "夜间 - 每 30 分钟"
   }
 ]
 ```
 
-**Day Aliases:**
-- `weekdays` = Monday - Friday
-- `weekends` = Saturday - Sunday
+日期别名：
 
-## 📖 Usage
+- `weekdays`：周一至周五。
+- `weekends`：周六和周日。
 
-### Managing Threads
+## 使用
 
-- **Toggle On/Off**: Use the switch next to each thread
-- **Edit**: Click "Edit" to modify configuration
-- **Delete**: Click "Delete" to remove thread
-- **Test**: Click "Test" to manually trigger a check
+### 管理主题
 
-### Notifications
+- **启用/停用**：使用主题旁边的开关。
+- **编辑**：点击“编辑”修改配置。
+- **删除**：点击“删除”移除主题。
+- **测试**：点击“测试”手动触发一次检查。
 
-- Notifications appear when new posts are found
-- Click notification to dismiss
-- Only posts from specified authors (if configured) trigger notifications
-- If no authors specified, all new posts trigger notifications
+### 通知
 
-## 🔍 How It Works
+- 发现新回复后显示通知。
+- 点击通知可将其关闭。
+- 如果配置了作者过滤，只会通知指定作者的回复。
+- 未配置作者时，所有新回复都会触发通知。
 
-1. **Cookie Reading**: Extension uses Chrome's privileged `cookies` API to read `ngaPassportUid` and `ngaPassportCid` (even though they're httpOnly)
-2. **API Calls**: Makes direct requests to NGA's API with your cookies
-3. **Page Calculation**: Automatically calculates which pages contain new posts
-4. **Multi-page Fetching**: Fetches all necessary pages to get complete new posts
-5. **Notifications**: Sends Chrome notifications for new posts
+## 工作原理
 
-## 🔒 Privacy & Security
+1. **读取 Cookie**：通过 Chrome 的特权 `cookies` API 读取 `ngaPassportUid` 和 `ngaPassportCid`，即使它们是 `httpOnly` Cookie 也可以读取。
+2. **调用 API**：携带 Cookie 直接请求 NGA API。
+3. **计算页码**：自动计算包含新回复的页面。
+4. **获取多页内容**：获取所有必要页面，确保拿到完整的新回复。
+5. **发送通知**：使用 Chrome 通知 API 通知新回复。
 
-- ✅ All data stays in your browser (chrome.storage.local)
-- ✅ No external servers contacted except NGA
-- ✅ No data collection or analytics
-- ✅ Open source - verify the code yourself
+## 隐私与安全
 
-## ⚠️ Limitations
+- ✅ 所有数据都保存在浏览器的 `chrome.storage.local` 中。
+- ✅ 除 NGA 外不会连接其他外部服务。
+- ✅ 不收集数据，也不进行分析统计。
+- ✅ 项目开源，可以自行检查代码。
 
-- Browser must be open for monitoring to work
-- No historical post storage (only tracks last seen post number)
-- Limited by chrome.storage quota (should be fine for typical use)
-- Per-browser configuration (doesn't sync across devices)
+## 限制
 
-## 🐛 Troubleshooting
+- 浏览器必须保持开启，监控才会运行。
+- 不保存历史回复，只记录上次看到的楼层号。
+- 受 Chrome storage 配额限制，但通常足够日常使用。
+- 配置按浏览器保存，不会在设备之间同步。
 
-### "Not logged in to NGA"
-- Make sure you're logged in at bbs.nga.cn
-- Try logging out and back in
-- Check if cookies are enabled for nga.cn
+## 故障排查
 
-### No notifications appearing
-- Check if Chrome notifications are enabled for the extension
-- Verify thread is toggled ON
-- Check if enough time has passed since last check
-- Use "Test" button to trigger manual check
+### “未登录 NGA”
 
-### "Error checking thread"
-- Check browser console (F12) for detailed errors
-- Verify thread ID is correct
-- Check if you're still logged in to NGA
+- 确认已登录 `bbs.nga.cn`。
+- 尝试退出后重新登录。
+- 检查是否允许 `nga.cn` 使用 Cookie。
 
-## 🛠️ Development
+### 没有收到通知
 
-### File Structure
-```
+- 检查 Chrome 是否允许该扩展发送通知。
+- 确认主题开关已打开。
+- 确认距离上次检查已经过了足够时间。
+- 使用“测试”按钮手动触发检查。
+
+### “检查主题时出错”
+
+- 按 F12 打开浏览器控制台查看详细错误。
+- 确认主题 ID 正确。
+- 确认 NGA 登录状态仍然有效。
+
+## 开发
+
+### 文件结构
+
+```text
 extension-standalone/
-├── manifest.json       # Extension configuration
-├── nga-api.js         # NGA API client
-├── background.js      # Background service worker
-├── popup.html         # Popup UI
-├── popup.js           # Popup logic
-├── styles.css         # Popup styles
-├── icons/             # Extension icons
-└── README.md          # This file
+├── manifest.json       # 扩展配置
+├── nga-api.js          # NGA API 客户端
+├── background.js       # 后台 service worker
+├── popup.html          # 弹窗页面
+├── popup.js            # 弹窗逻辑
+├── styles.css          # 弹窗样式
+├── icons/              # 扩展图标
+└── README.md           # 本文件
 ```
 
-### Testing
-1. Load extension in developer mode
-2. Check background service worker console for logs
-3. Use "Test" button to trigger checks manually
-4. Monitor background logs for API calls and errors
+### 测试
 
-## 📝 License
+1. 在开发者模式下加载扩展。
+2. 打开后台 service worker 控制台查看日志。
+3. 使用“测试”按钮手动触发检查。
+4. 查看后台日志中的 API 请求。
 
-Same as parent project
+## 许可证
 
-## 🤝 Contributing
+与父项目相同，见 [`../LICENSE`](../LICENSE)。
 
-Contributions welcome! Please test thoroughly before submitting PRs.
+## 贡献
 
-## 📮 Support
+欢迎提交贡献。提交 Pull Request 前请先充分测试。
 
-For issues or questions, please open an issue on the main project repository.
+## 支持
+
+如有问题，请在主项目仓库提交 Issue。
 
 ---
 
-**Note:** This extension reads your NGA authentication cookies to make API calls. This is safe and necessary for the extension to work, as it's making requests on your behalf. However, be aware that any extension with cookie access permissions has this capability.
+**注意：** 此扩展会读取 NGA 身份认证 Cookie 来请求 API，这是扩展正常工作的必要条件，因为请求是代表你本人发出的。请注意，任何拥有 Cookie 访问权限的扩展都具备类似能力。

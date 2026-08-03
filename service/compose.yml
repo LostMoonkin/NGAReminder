@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: nga_reminder
+      POSTGRES_USER: nga_reminder
+      POSTGRES_PASSWORD: nga_reminder
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nga_reminder -d nga_reminder"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  app:
+    image: ${NGA_REMINDER_IMAGE:-nga-reminder:local}
+    build:
+      context: .
+    command: ["all"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NGA_REMINDER__DATABASE_URL: ${NGA_REMINDER__DATABASE_URL}
+      NGA_REMINDER__DATABASE_BACKEND: ${NGA_REMINDER__DATABASE_BACKEND:-postgres}
+      NGA_REMINDER__BIND_ADDR: ${NGA_REMINDER__BIND_ADDR:-0.0.0.0:12888}
+    ports:
+      - "12888:12888"
+
+volumes:
+  postgres-data:

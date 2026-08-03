@@ -1,0 +1,94 @@
+{
+  "code": 0,
+  "msg": "",
+  "currentPage": 1,
+  "totalPage": 1,
+  "perPage": 20,
+  "vrows": 2,
+  "fid": 3001,
+  "forum_name": "[redacted forum]",
+  "tsubject": "[redacted subject]",
+  "tauthor": "[redacted user 1]",
+  "tauthorid": 2001,
+  "attachPrefix": "https://example.invalid/attachments/",
+  "result": [
+    {
+      "tid": 1001,
+      "pid": 0,
+      "fid": 3001,
+      "lou": 0,
+      "postdatetimestamp": 1767225600,
+      "content": "[redacted topic content]",
+      "author": {
+        "uid": 2001,
+        "username": "[redacted user 1]"
+      },
+      "attches": null
+    },
+    {
+      "tid": 1001,
+      "pid": 4001,
+      "fid": 3001,
+      "lou": 1,
+      "postdatetimestamp": 1767225660,
+      "content": "[redacted reply content]",
+      "author": {
+        "uid": 2002,
+        "username": "[redacted user 2]"
+      },
+      "attches": null,
+      "comments": [
+        {
+          "tid": 1001,
+          "pid": 5001,
+          "fid": 3001,
+          "lou": 0,
+          "comment_to_id": 4001,
+          "postdatetimestamp": 1767225670,
+          "content": "[redacted comment 1]",
+          "author": {
+            "uid": 2003,
+            "username": "[redacted user 3]"
+          },
+          "type": 0,
+          "vote": 0,
+          "vote_good": 0,
+          "vote_bad": 0
+        },
+        {
+          "tid": 1001,
+          "pid": 5002,
+          "fid": 3001,
+          "lou": 0,
+          "comment_to_id": 2002,
+          "postdatetimestamp": 1767225680,
+          "content": "[redacted comment 2]",
+          "author": {
+            "uid": 2004,
+            "username": "[redacted user 4]"
+          },
+          "type": 0,
+          "vote": 0,
+          "vote_good": 1,
+          "vote_bad": 0
+        }
+      ]
+    }
+  ],
+  "hot_post": [
+    {
+      "tid": 1001,
+      "pid": 4001,
+      "fid": 3001,
+      "lou": 1,
+      "postdatetimestamp": 1767225660,
+      "content": "[redacted reply content]",
+      "author": {
+        "uid": 2002,
+        "username": "[redacted user 2]"
+      },
+      "attches": null,
+      "comments": []
+    }
+  ]
+}

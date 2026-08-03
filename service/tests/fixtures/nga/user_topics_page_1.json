@@ -1,0 +1,41 @@
+{
+  "code": 0,
+  "result": {
+    "__ROWS": "3",
+    "__T__ROWS": 2,
+    "__T__ROWS_PAGE": 2,
+    "__R__ROWS_PAGE": 20,
+    "__F": [],
+    "__CU": {},
+    "__GLOBAL": {},
+    "__T": [
+      {
+        "tid": 1001,
+        "fid": 3001,
+        "author": "[redacted user 1]",
+        "authorid": 2001,
+        "subject": "[redacted subject 1]",
+        "content": "[redacted topic summary]",
+        "postdate": 1767225600,
+        "lastpost": 1767225660,
+        "lastposter": "[redacted user 2]",
+        "replies": 1,
+        "type": 0,
+        "tpcurl": "/read.php?tid=1001"
+      },
+      {
+        "tid": 0,
+        "fid": 0,
+        "author": "",
+        "authorid": 0,
+        "subject": "",
+        "postdate": 0,
+        "lastpost": 0,
+        "replies": 0,
+        "type": 0,
+        "denied": true,
+        "error": "[redacted inaccessible topic]"
+      }
+    ]
+  }
+}

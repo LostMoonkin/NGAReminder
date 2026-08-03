@@ -1,0 +1,22 @@
+bind_addr = "127.0.0.1:8080"
+database_backend = "postgres"
+database_url = "postgres://nga_reminder:nga_reminder@127.0.0.1:5432/nga_reminder"
+sqlite_path = "./data/nga-reminder.db"
+database_max_connections = 10
+run_migrations = true
+
+[scheduler]
+default_interval_seconds = 60
+timezone_offset = "+08:00"
+
+[persistence]
+store_raw_payload = false
+
+[assets]
+download_enabled = false
+storage_path = "./data/assets"
+max_download_bytes = 10485760
+
+[observability]
+log_filter = "info,sqlx=warn"
+log_json = false
