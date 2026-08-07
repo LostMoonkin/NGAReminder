@@ -355,10 +355,13 @@ impl NgaClient {
         passport_uid: &str,
         passport_cid_or_cookie: &str,
     ) -> RequestBuilder {
-        request.header(USER_AGENT, &self.user_agent).header(
-            COOKIE,
-            user_search_cookie_header(passport_uid, passport_cid_or_cookie),
-        )
+        request
+            .header(USER_AGENT, &self.user_agent)
+            .header("Sec-Fetch-User", "?1")
+            .header(
+                COOKIE,
+                user_search_cookie_header(passport_uid, passport_cid_or_cookie),
+            )
     }
 
     async fn wait_for_request_slot(&self) {
@@ -566,17 +569,30 @@ mod tests {
             .build()
             .unwrap();
         let headers = request.headers();
-        assert_eq!(headers.len(), 2);
+        assert_eq!(headers.len(), 3);
         assert_eq!(
             headers[reqwest::header::USER_AGENT],
             "Mozilla/5.0 (compatible; NGA-Reminder/0.1)"
         );
+        assert_eq!(headers["sec-fetch-user"], "?1");
         assert_eq!(
             headers[reqwest::header::COOKIE],
             "ngaPassportUid=6112087; ngaPassportCid=test"
         );
         assert!(headers.get(reqwest::header::ORIGIN).is_none());
         assert!(headers.get(reqwest::header::REFERER).is_none());
+
+        let topic_request = client
+            .user_list_headers(
+                client
+                    .client
+                    .get(user_list_url("https://bbs.nga.cn", 24_252_407, 1, false)),
+                "6112087",
+                "ngaPassportUid=6112087; ngaPassportCid=test",
+            )
+            .build()
+            .unwrap();
+        assert_eq!(topic_request.headers()["sec-fetch-user"], "?1");
     }
 
     #[test]

@@ -211,15 +211,7 @@ async fn collect(
                 )
                 .await?;
             let page = thread_parser::parse_thread_page(&value, candidate.tid)?;
-            let Some(reply) = page
-                .posts
-                .iter()
-                .find(|post| {
-                    post.kind == PostKind::Reply
-                        && post.pid == Some(candidate.pid)
-                        && post.author_uid == watch_target.target_id
-                })
-                .cloned()
+            let Some(reply) = find_reply_detail(&page, candidate.pid, watch_target.target_id)
             else {
                 return Err(UserCollectorError::InvalidDetail);
             };
@@ -249,6 +241,30 @@ async fn collect(
         details,
     };
     persist(state, run_id, watch_target, &cursor, baseline, discovery).await
+}
+
+fn find_reply_detail(
+    page: &crate::domain::thread::ThreadPage,
+    pid: i64,
+    uid: i64,
+) -> Option<ParsedPost> {
+    page.posts
+        .iter()
+        .find(|post| {
+            post.kind != PostKind::Comment && post.pid == Some(pid) && post.author_uid == uid
+        })
+        .cloned()
+        .map(|mut post| {
+            // NGA's single-PID detail response can return the selected reply
+            // with `lou = 0`; the generic parser then labels it as a topic.
+            // The candidate PID and author are already verified above, so
+            // normalize that response back to a persistable reply.
+            if post.kind == PostKind::Topic && post.floor_number == 0 {
+                post.kind = PostKind::Reply;
+                post.floor_number = 1;
+            }
+            post
+        })
 }
 
 async fn discover_topics(
@@ -783,6 +799,7 @@ mod tests {
             AppConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig, SchedulerConfig,
         },
         crypto::CredentialCipher,
+        domain::thread::PostKind,
         domain::user::{UserReplyCandidate, UserTopicCandidate},
         nga::{NgaClient, thread_parser},
         repository::watch,
@@ -878,9 +895,14 @@ mod tests {
         let mut reply_json = fixture("post_by_pid_success.json");
         reply_json["result"][0]["tid"] = json!(1003);
         reply_json["result"][0]["pid"] = json!(4002);
+        reply_json["result"][0]["lou"] = json!(0);
         reply_json["result"][0]["author"]["uid"] = json!(2001);
         let reply_page =
             thread_parser::parse_thread_page(&reply_json, 1003).expect("reply detail must parse");
+        let reply = super::find_reply_detail(&reply_page, 4002, 2001)
+            .expect("single-PID detail must identify the reply");
+        assert_eq!(reply.kind, PostKind::Reply);
+        assert!(reply.floor_number > 0);
         let current_watch = watch::find(&pool, &watch.id)
             .await
             .expect("watch query must succeed")
@@ -900,7 +922,7 @@ mod tests {
             }],
             details: vec![UserDetail {
                 metadata: reply_page.metadata.clone(),
-                posts: vec![reply_page.posts[0].clone()],
+                posts: vec![reply.clone()],
             }],
             pages_requested: 4,
         };
@@ -942,7 +964,7 @@ mod tests {
                 }],
                 details: vec![UserDetail {
                     metadata: reply_page.metadata,
-                    posts: vec![reply_page.posts[0].clone()],
+                    posts: vec![reply],
                 }],
                 pages_requested: 4,
             },
