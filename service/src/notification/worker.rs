@@ -493,7 +493,10 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     let outbox_id: String = row.get("id");
     let row = sqlx::query(
         "SELECT o.attempt_count, c.target_encrypted, i.platform, i.credentials_encrypted,
-         p.tid, p.pid, p.floor_number, p.author_name, p.content_raw, t.title
+         p.tid, p.pid, p.floor_number, p.author_uid, p.author_name, p.content_raw, t.title,
+         (SELECT COUNT(*) FROM post_event_watch_matches m
+          JOIN watch_targets w ON w.id = m.watch_id
+          WHERE m.post_event_id = e.id AND w.target_type = 'user') AS user_watch_count
          FROM notification_outbox o
          JOIN notification_channels c ON c.id = o.channel_id
          JOIN platform_integrations i ON i.id = c.integration_id
@@ -518,12 +521,14 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
         .map_err(|_| anyhow::anyhow!("notification target decryption failed"))?;
     let tid: i64 = row.get("tid");
     let pid: Option<i64> = row.get("pid");
+    let author_uid: i64 = row.get("author_uid");
     let author: String = row.get("author_name");
     let content: String = row.get("content_raw");
     let title: String = row.get("title");
+    let user_watch_count: i64 = row.get("user_watch_count");
     let floor: Option<i32> = row.get("floor_number");
     let notification = Notification {
-        title,
+        title: notification_title(&title, &author, author_uid, user_watch_count),
         body: format!("{} · #{}\n\n{}", author, floor.unwrap_or_default(), content),
         url: post_url(tid, pid),
     };
@@ -651,9 +656,27 @@ fn post_url(tid: i64, pid: Option<i64>) -> String {
     }
 }
 
+fn notification_title(
+    thread_title: &str,
+    author_name: &str,
+    author_uid: i64,
+    user_watch_count: i64,
+) -> String {
+    if user_watch_count > 0 {
+        let nickname = if author_name.trim().is_empty() {
+            format!("UID {author_uid}")
+        } else {
+            author_name.to_owned()
+        };
+        format!("用户监控：{nickname}")
+    } else {
+        thread_title.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bot_error_detail, captcha_session_id, post_url};
+    use super::{bot_error_detail, captcha_session_id, notification_title, post_url};
     use crate::bot::adapter::BotSendError;
 
     #[test]
@@ -669,6 +692,22 @@ mod tests {
         assert_eq!(
             post_url(47_264_819, None),
             "https://bbs.nga.cn/read.php?tid=47264819"
+        );
+    }
+
+    #[test]
+    fn user_watch_title_highlights_author_nickname() {
+        assert_eq!(
+            notification_title("原主题标题", "铁锤狂砸盘", 24_252_407, 1),
+            "用户监控：铁锤狂砸盘"
+        );
+        assert_eq!(
+            notification_title("原主题标题", "", 24_252_407, 1),
+            "用户监控：UID 24252407"
+        );
+        assert_eq!(
+            notification_title("原主题标题", "铁锤狂砸盘", 24_252_407, 0),
+            "原主题标题"
         );
     }
 

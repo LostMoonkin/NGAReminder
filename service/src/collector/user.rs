@@ -137,7 +137,7 @@ async fn collect(
             watch_target.target_id,
         )
         .await?;
-    user_parser::parse_profile_gbk(&profile_bytes, watch_target.target_id)?;
+    let profile = user_parser::parse_profile_gbk(&profile_bytes, watch_target.target_id)?;
 
     let (topics, topic_pages) = discover_topics(
         state,
@@ -240,7 +240,16 @@ async fn collect(
             + i32::try_from(details.len()).unwrap_or(i32::MAX),
         details,
     };
-    persist(state, run_id, watch_target, &cursor, baseline, discovery).await
+    persist(
+        state,
+        run_id,
+        watch_target,
+        &cursor,
+        baseline,
+        &profile.username,
+        discovery,
+    )
+    .await
 }
 
 fn find_reply_detail(
@@ -375,6 +384,7 @@ async fn persist(
     watch_target: &WatchTarget,
     cursor: &UserCursor,
     baseline: bool,
+    target_name: &str,
     discovery: Discovery,
 ) -> Result<UserCrawlSummary, UserCollectorError> {
     let mut tx = state.pool.begin().await?;
@@ -437,6 +447,8 @@ async fn persist(
     if active != 1 {
         return Err(UserCollectorError::InvalidWatch);
     }
+
+    watch::update_target_name(&mut tx, &watch_target.id, target_name).await?;
 
     let topic_key = discovery
         .topics
@@ -877,6 +889,7 @@ mod tests {
             &watch,
             &cursor,
             true,
+            "测试用户",
             Discovery {
                 topics: vec![UserTopicCandidate {
                     tid: 1001,
@@ -891,6 +904,14 @@ mod tests {
         .expect("baseline must persist");
         assert_eq!(baseline.posts_inserted, 0);
         assert_eq!(baseline.events_created, 0);
+        assert_eq!(
+            watch::find(&pool, &watch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .target_name,
+            "测试用户"
+        );
 
         let mut reply_json = fixture("post_by_pid_success.json");
         reply_json["result"][0]["tid"] = json!(1003);
@@ -932,12 +953,21 @@ mod tests {
             &current_watch,
             &cursor,
             false,
+            "更新用户",
             discovery,
         )
         .await
         .expect("increment must persist");
         assert_eq!(increment.posts_inserted, 1);
         assert_eq!(increment.events_created, 1);
+        assert_eq!(
+            watch::find(&pool, &watch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .target_name,
+            "更新用户"
+        );
 
         let current_watch = watch::find(&pool, &watch.id)
             .await
@@ -955,6 +985,7 @@ mod tests {
             &current_watch,
             &cursor,
             false,
+            "",
             Discovery {
                 topics: vec![],
                 replies: vec![UserReplyCandidate {
@@ -973,6 +1004,14 @@ mod tests {
         .expect("repeat must persist");
         assert_eq!(repeat.posts_inserted, 0);
         assert_eq!(repeat.events_created, 0);
+        assert_eq!(
+            watch::find(&pool, &watch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .target_name,
+            "2001"
+        );
 
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM post_events")
             .fetch_one(&pool)

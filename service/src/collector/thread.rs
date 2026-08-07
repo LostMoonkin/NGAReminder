@@ -348,6 +348,8 @@ async fn persist_pages(
         return Err(ThreadCollectorError::InvalidWatch);
     }
 
+    watch::update_target_name(&mut tx, &watch_target.id, &metadata.title).await?;
+
     update_cursor_and_finish(
         &mut tx,
         state.config.database_backend,
@@ -1035,6 +1037,14 @@ mod tests {
         assert!(baseline.baseline);
         assert_eq!(baseline.posts_inserted, 2);
         assert_eq!(baseline.events_created, 0);
+        assert_eq!(
+            watch::find(&pool, &created.id)
+                .await
+                .expect("watch must load")
+                .expect("watch must exist")
+                .target_name,
+            "[redacted subject]"
+        );
 
         let mut live = fixture("thread_page_success.json");
         live["vrows"] = json!(3);

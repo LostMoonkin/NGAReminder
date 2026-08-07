@@ -97,6 +97,7 @@ pub struct WatchResponse {
     id: String,
     target_type: String,
     target_id: i64,
+    target_name: String,
     enabled: bool,
     interval_seconds: i32,
     schedule: Option<Schedule>,
@@ -594,6 +595,11 @@ impl From<WatchTarget> for WatchResponse {
             id: value.id,
             target_type: value.target_type,
             target_id: value.target_id,
+            target_name: if value.target_name.trim().is_empty() {
+                value.target_id.to_string()
+            } else {
+                value.target_name
+            },
             enabled: value.enabled,
             interval_seconds: value.interval_seconds,
             schedule: value.schedule,

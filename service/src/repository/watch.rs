@@ -12,6 +12,7 @@ pub struct WatchTarget {
     pub id: String,
     pub target_type: String,
     pub target_id: i64,
+    pub target_name: String,
     pub enabled: bool,
     pub interval_seconds: i32,
     pub schedule: Option<Schedule>,
@@ -187,7 +188,7 @@ async fn insert_watch_target(
 
 pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, target_type, target_id, enabled, interval_seconds, schedule_json, status,
+        "SELECT id, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets WHERE deleted_at IS NULL
@@ -204,7 +205,7 @@ pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
 
 pub async fn find(pool: &AnyPool, id: &str) -> Result<Option<WatchTarget>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, target_type, target_id, enabled, interval_seconds, schedule_json, status,
+        "SELECT id, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets WHERE id = $1 AND deleted_at IS NULL",
@@ -545,6 +546,24 @@ pub async fn renew_lease(
         == 1)
 }
 
+pub async fn update_target_name(
+    tx: &mut Transaction<'_, Any>,
+    watch_id: &str,
+    candidate: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE watch_targets
+         SET target_name = COALESCE(NULLIF(TRIM($2), ''), CAST(target_id AS TEXT)),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(watch_id)
+    .bind(candidate)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn lease_expression(backend: DatabaseBackend) -> &'static str {
     match backend {
         DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '5 minutes'",
@@ -558,6 +577,7 @@ fn map_watch(row: &sqlx::any::AnyRow) -> WatchTarget {
         id: row.get("id"),
         target_type: row.get("target_type"),
         target_id: row.get("target_id"),
+        target_name: row.get("target_name"),
         enabled: row.get::<i32, _>("enabled") == 1,
         interval_seconds: row.get("interval_seconds"),
         schedule: schedule_json.and_then(|value| serde_json::from_str(&value).ok()),
