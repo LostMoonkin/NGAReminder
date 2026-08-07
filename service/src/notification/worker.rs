@@ -493,7 +493,7 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     let outbox_id: String = row.get("id");
     let row = sqlx::query(
         "SELECT o.attempt_count, c.target_encrypted, i.platform, i.credentials_encrypted,
-         p.tid, p.pid, p.floor_number, p.page_number, p.author_name, p.content_raw, t.title
+         p.tid, p.pid, p.floor_number, p.author_name, p.content_raw, t.title
          FROM notification_outbox o
          JOIN notification_channels c ON c.id = o.channel_id
          JOIN platform_integrations i ON i.id = c.integration_id
@@ -518,7 +518,6 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
         .map_err(|_| anyhow::anyhow!("notification target decryption failed"))?;
     let tid: i64 = row.get("tid");
     let pid: Option<i64> = row.get("pid");
-    let page: i32 = row.get("page_number");
     let author: String = row.get("author_name");
     let content: String = row.get("content_raw");
     let title: String = row.get("title");
@@ -526,7 +525,7 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     let notification = Notification {
         title,
         body: format!("{} · #{}\n\n{}", author, floor.unwrap_or_default(), content),
-        url: post_url(tid, page, pid),
+        url: post_url(tid, pid),
     };
     let platform: String = row.get("platform");
     match send_configured(&platform, &credentials, &target, &notification).await {
@@ -645,14 +644,9 @@ fn error_details(error: &SendError) -> (Option<i32>, Option<&str>) {
     }
 }
 
-fn post_url(tid: i64, page: i32, pid: Option<i64>) -> String {
+fn post_url(tid: i64, pid: Option<i64>) -> String {
     match pid {
-        Some(pid) => {
-            format!(
-                "https://bbs.nga.cn/read.php?tid={tid}&page={}#pid{pid}Anchor",
-                page.max(1)
-            )
-        }
+        Some(pid) => format!("https://bbs.nga.cn/read.php?tid={tid}&pid={pid}"),
         None => format!("https://bbs.nga.cn/read.php?tid={tid}"),
     }
 }
@@ -663,17 +657,17 @@ mod tests {
     use crate::bot::adapter::BotSendError;
 
     #[test]
-    fn reply_url_opens_thread_page_at_post_anchor() {
+    fn reply_url_opens_post_detail_by_tid_and_pid() {
         assert_eq!(
-            post_url(47_264_819, 3, Some(876_581_704)),
-            "https://bbs.nga.cn/read.php?tid=47264819&page=3#pid876581704Anchor"
+            post_url(47_264_819, Some(876_581_704)),
+            "https://bbs.nga.cn/read.php?tid=47264819&pid=876581704"
         );
     }
 
     #[test]
     fn topic_url_opens_thread_without_reply_anchor() {
         assert_eq!(
-            post_url(47_264_819, 1, None),
+            post_url(47_264_819, None),
             "https://bbs.nga.cn/read.php?tid=47264819"
         );
     }
