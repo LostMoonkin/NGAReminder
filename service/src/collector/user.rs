@@ -4,7 +4,7 @@ use secrecy::ExposeSecret;
 use sqlx::{Any, Transaction};
 use thiserror::Error;
 use time::OffsetDateTime;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -138,6 +138,18 @@ async fn collect(
         )
         .await?;
     let profile = user_parser::parse_profile_gbk(&profile_bytes, watch_target.target_id)?;
+    debug!(
+        watch_target = ?watch_target,
+        profile_uid = profile.uid,
+        profile_username = %profile.username,
+        profile_group_id = ?profile.group_id,
+        profile_avatar = ?profile.avatar,
+        profile_registered_at_unix = ?profile.registered_at_unix,
+        profile_last_post_at_unix = ?profile.last_post_at_unix,
+        profile_remote_post_count = ?profile.remote_post_count,
+        profile_signature = ?profile.signature,
+        "NGA user profile fetched"
+    );
 
     let (topics, topic_pages) = discover_topics(
         state,
@@ -240,16 +252,31 @@ async fn collect(
             + i32::try_from(details.len()).unwrap_or(i32::MAX),
         details,
     };
+    let target_name = normalized_target_name(&profile.username, watch_target.target_id);
     persist(
         state,
         run_id,
         watch_target,
         &cursor,
         baseline,
-        &profile.username,
+        target_name,
         discovery,
     )
     .await
+}
+
+fn normalized_target_name(username: &str, target_id: i64) -> &str {
+    let trimmed = username.trim();
+    let uid_name = format!("UID{target_id}");
+    let uid_name_with_space = format!("UID {target_id}");
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case(&uid_name)
+        || trimmed.eq_ignore_ascii_case(&uid_name_with_space)
+    {
+        ""
+    } else {
+        trimmed
+    }
 }
 
 fn find_reply_detail(
@@ -816,6 +843,17 @@ mod tests {
         nga::{NgaClient, thread_parser},
         repository::watch,
     };
+
+    #[test]
+    fn uid_shaped_usernames_use_numeric_fallback() {
+        assert_eq!(super::normalized_target_name("UID24252407", 24252407), "");
+        assert_eq!(super::normalized_target_name("uid 24252407", 24252407), "");
+        assert_eq!(
+            super::normalized_target_name("真实昵称", 24252407),
+            "真实昵称"
+        );
+        assert_eq!(super::normalized_target_name("   ", 24252407), "");
+    }
 
     #[tokio::test]
     async fn user_baseline_and_increment_share_global_post_deduplication() {

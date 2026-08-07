@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+use tracing::debug;
 
 const BASE_URL: &str = "https://bbs.nga.cn";
 const REQUEST_INTERVAL: Duration = Duration::from_millis(500);
@@ -215,10 +216,10 @@ impl NgaClient {
     ) -> Result<Vec<u8>, NgaRequestError> {
         for attempt in 0_u64..3 {
             self.wait_for_request_slot().await;
-            let request = self
-                .client
-                .get(format!("{}/nuke.php?func=ucp&uid={uid}", self.base_url));
-            let result = self.send_bytes(request, passport_uid, passport_cid).await;
+            let request = self.client.get(user_profile_url(&self.base_url, uid));
+            let result = self
+                .send_bytes(self.user_profile_headers(request, passport_uid, passport_cid, uid))
+                .await;
             if !retryable_request_error(&result) || attempt == 2 {
                 return result;
             }
@@ -271,25 +272,31 @@ impl NgaClient {
         decode_user_list_response(status, &bytes, allow_empty_end)
     }
 
-    async fn send_bytes(
-        &self,
-        request: RequestBuilder,
-        passport_uid: &str,
-        passport_cid: &str,
-    ) -> Result<Vec<u8>, NgaRequestError> {
-        let response = self
-            .common_headers(request, passport_uid, passport_cid)
-            .send()
-            .await
-            .map_err(NgaRequestError::Request)?;
-        if response.status() != StatusCode::OK {
-            return Err(NgaRequestError::Http(response.status()));
+    async fn send_bytes(&self, request: RequestBuilder) -> Result<Vec<u8>, NgaRequestError> {
+        if let Some(request_for_log) = request.try_clone().and_then(|request| request.build().ok())
+        {
+            debug!(
+                method = %request_for_log.method(),
+                url = %request_for_log.url(),
+                headers = ?headers_for_log(request_for_log.headers()),
+                "NGA user profile request"
+            );
         }
-        response
-            .bytes()
-            .await
-            .map(|bytes| bytes.to_vec())
-            .map_err(NgaRequestError::Request)
+        let response = request.send().await.map_err(NgaRequestError::Request)?;
+        let status = response.status();
+        let headers = headers_for_log(response.headers());
+        let bytes = response.bytes().await.map_err(NgaRequestError::Request)?;
+        let (body, _, _) = encoding_rs::GBK.decode(&bytes);
+        debug!(
+            status = %status,
+            headers = ?headers,
+            body = %body,
+            "NGA user profile response"
+        );
+        if status != StatusCode::OK {
+            return Err(NgaRequestError::Http(status));
+        }
+        Ok(bytes.to_vec())
     }
 
     async fn fetch_thread_page_once(
@@ -336,6 +343,21 @@ impl NgaClient {
         passport_uid: &str,
         passport_cid_or_cookie: &str,
     ) -> RequestBuilder {
+        self.headers_with_referer(
+            request,
+            passport_uid,
+            passport_cid_or_cookie,
+            format!("{}/", self.base_url),
+        )
+    }
+
+    fn headers_with_referer(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid_or_cookie: &str,
+        referer: String,
+    ) -> RequestBuilder {
         request
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(USER_AGENT, &self.user_agent)
@@ -346,7 +368,22 @@ impl NgaClient {
                 request_cookie_header(passport_uid, passport_cid_or_cookie),
             )
             .header(ORIGIN, &self.base_url)
-            .header(REFERER, format!("{}/", self.base_url))
+            .header(REFERER, referer)
+    }
+
+    fn user_profile_headers(
+        &self,
+        request: RequestBuilder,
+        passport_uid: &str,
+        passport_cid_or_cookie: &str,
+        uid: i64,
+    ) -> RequestBuilder {
+        self.headers_with_referer(
+            request,
+            passport_uid,
+            passport_cid_or_cookie,
+            user_profile_url(&self.base_url, uid),
+        )
     }
 
     fn user_list_headers(
@@ -438,6 +475,24 @@ fn user_list_url(base_url: &str, uid: i64, page: i32, replies: bool) -> String {
     format!("{base_url}/thread.php?{search}authorid={uid}&__output=12&page={page}")
 }
 
+fn user_profile_url(base_url: &str, uid: i64) -> String {
+    format!("{base_url}/nuke.php?func=ucp&uid={uid}")
+}
+
+fn headers_for_log(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let value = if name == COOKIE {
+                format!("<redacted; {} bytes>", value.as_bytes().len())
+            } else {
+                value.to_str().unwrap_or("<non-UTF8>").to_owned()
+            };
+            (name.to_string(), value)
+        })
+        .collect()
+}
+
 fn decode_user_list_response(
     status: StatusCode,
     bytes: &[u8],
@@ -506,7 +561,8 @@ mod tests {
     use super::{
         AuthCheckError, NgaEnvelope, NgaRequestError, USER_BUSY_ATTEMPTS, classify_data_envelope,
         classify_envelope, decode_user_list_response, request_cookie_header,
-        retryable_request_error, user_list_retry_policy, user_list_url, user_search_cookie_header,
+        retryable_request_error, user_list_retry_policy, user_list_url, user_profile_url,
+        user_search_cookie_header,
     };
 
     #[test]
@@ -604,6 +660,35 @@ mod tests {
         assert_eq!(
             user_list_url("https://bbs.nga.cn", 24_252_407, 2, true),
             "https://bbs.nga.cn/thread.php?searchpost=1&authorid=24252407&__output=12&page=2"
+        );
+    }
+
+    #[test]
+    fn user_profile_request_uses_the_profile_url_as_referer() {
+        let client = super::NgaClient::with_base_url(
+            "Mozilla/5.0 (compatible; NGA-Reminder/0.1)".to_owned(),
+            "https://bbs.nga.cn",
+        )
+        .unwrap();
+        let url = user_profile_url("https://bbs.nga.cn", 24_252_407);
+        let request = client
+            .user_profile_headers(
+                client.client.get(&url),
+                "6112087",
+                "ngaPassportUid=6112087; ngaPassportCid=test",
+                24_252_407,
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.url().as_str(), url);
+        assert_eq!(request.headers()[reqwest::header::REFERER], url);
+        assert_eq!(
+            request
+                .headers()
+                .get_all(reqwest::header::REFERER)
+                .iter()
+                .count(),
+            1
         );
     }
 
