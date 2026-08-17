@@ -72,9 +72,13 @@ pub async fn run(
     if watch_target.target_type != "user" {
         return Err(UserCollectorError::InvalidWatch);
     }
+    let lease_token = watch_target
+        .lease_token
+        .as_deref()
+        .ok_or(UserCollectorError::InvalidWatch)?;
     let baseline = !watch_target.baseline_completed;
     let run_id = Uuid::new_v4().to_string();
-    create_crawl_run(state, &run_id, &watch_target.id, baseline).await?;
+    create_crawl_run(state, &run_id, &watch_target.id, lease_token, baseline).await?;
 
     match collect(state, &run_id, &watch_target, baseline).await {
         Err(UserCollectorError::Nga(NgaRequestError::Busy)) => {
@@ -119,6 +123,10 @@ async fn collect(
     watch_target: &WatchTarget,
     baseline: bool,
 ) -> Result<UserCrawlSummary, UserCollectorError> {
+    let lease_token = watch_target
+        .lease_token
+        .as_deref()
+        .ok_or(UserCollectorError::InvalidWatch)?;
     let cursor = watch::user_cursor(&state.pool, &watch_target.id).await?;
     let (passport_uid, passport_cid, full_cookie_configured) = thread::load_credentials(state)
         .await
@@ -155,19 +163,26 @@ async fn collect(
         state,
         passport_uid.expose_secret(),
         passport_cid.expose_secret(),
-        watch_target.target_id,
+        watch_target,
         &cursor,
         baseline,
     )
     .await?;
-    if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id).await? {
+    if !watch::renew_lease(
+        &state.pool,
+        state.config.database_backend,
+        &watch_target.id,
+        lease_token,
+    )
+    .await?
+    {
         return Err(UserCollectorError::InvalidWatch);
     }
     let (replies, reply_pages) = discover_replies(
         state,
         passport_uid.expose_secret(),
         passport_cid.expose_secret(),
-        watch_target.target_id,
+        watch_target,
         &cursor,
         baseline,
     )
@@ -206,8 +221,13 @@ async fn collect(
                 metadata: page.metadata,
                 posts,
             });
-            if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id)
-                .await?
+            if !watch::renew_lease(
+                &state.pool,
+                state.config.database_backend,
+                &watch_target.id,
+                lease_token,
+            )
+            .await?
             {
                 return Err(UserCollectorError::InvalidWatch);
             }
@@ -235,8 +255,13 @@ async fn collect(
                 metadata: page.metadata,
                 posts,
             });
-            if !watch::renew_lease(&state.pool, state.config.database_backend, &watch_target.id)
-                .await?
+            if !watch::renew_lease(
+                &state.pool,
+                state.config.database_backend,
+                &watch_target.id,
+                lease_token,
+            )
+            .await?
             {
                 return Err(UserCollectorError::InvalidWatch);
             }
@@ -307,10 +332,11 @@ async fn discover_topics(
     state: &AppState,
     passport_uid: &str,
     passport_cid: &str,
-    uid: i64,
+    watch_target: &WatchTarget,
     cursor: &UserCursor,
     baseline: bool,
 ) -> Result<(Vec<UserTopicCandidate>, i32), UserCollectorError> {
+    let uid = watch_target.target_id;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     let mut requested = 0;
@@ -327,6 +353,16 @@ async fn discover_topics(
             break;
         };
         let page = user_parser::parse_topic_list(&value, uid, page_number)?;
+        if !watch::renew_lease(
+            &state.pool,
+            state.config.database_backend,
+            &watch_target.id,
+            watch_target.lease_token.as_deref().unwrap_or(""),
+        )
+        .await?
+        {
+            return Err(UserCollectorError::InvalidWatch);
+        }
         total_pages = page.total_pages;
         if baseline
             && page
@@ -357,10 +393,11 @@ async fn discover_replies(
     state: &AppState,
     passport_uid: &str,
     passport_cid: &str,
-    uid: i64,
+    watch_target: &WatchTarget,
     cursor: &UserCursor,
     baseline: bool,
 ) -> Result<(Vec<UserReplyCandidate>, i32), UserCollectorError> {
+    let uid = watch_target.target_id;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     let mut requested = 0;
@@ -377,6 +414,16 @@ async fn discover_replies(
             break;
         };
         let page = user_parser::parse_reply_list(&value, uid, page_number)?;
+        if !watch::renew_lease(
+            &state.pool,
+            state.config.database_backend,
+            &watch_target.id,
+            watch_target.lease_token.as_deref().unwrap_or(""),
+        )
+        .await?
+        {
+            return Err(UserCollectorError::InvalidWatch);
+        }
         total_pages = page.total_pages;
         if baseline
             && page
@@ -466,16 +513,32 @@ async fn persist(
 
     let active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM watch_targets
-         WHERE id = $1 AND deleted_at IS NULL AND status = 'running'",
+         WHERE id = $1 AND lease_token = $2
+           AND deleted_at IS NULL AND status = 'running'",
     )
     .bind(&watch_target.id)
+    .bind(
+        watch_target
+            .lease_token
+            .as_deref()
+            .ok_or(UserCollectorError::InvalidWatch)?,
+    )
     .fetch_one(&mut *tx)
     .await?;
     if active != 1 {
         return Err(UserCollectorError::InvalidWatch);
     }
 
-    watch::update_target_name(&mut tx, &watch_target.id, target_name).await?;
+    watch::update_target_name(
+        &mut tx,
+        &watch_target.id,
+        watch_target
+            .lease_token
+            .as_deref()
+            .ok_or(UserCollectorError::InvalidWatch)?,
+        target_name,
+    )
+    .await?;
 
     let topic_key = discovery
         .topics
@@ -581,22 +644,35 @@ async fn create_crawl_run(
     state: &AppState,
     run_id: &str,
     watch_id: &str,
+    lease_token: &str,
     baseline: bool,
 ) -> Result<(), UserCollectorError> {
-    sqlx::query(
-        "UPDATE watch_targets SET status = 'running', updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
+    let renewed_lease = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '5 minutes'",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+5 minutes')",
+    };
+    let mut tx = state.pool.begin().await?;
+    let owned = sqlx::query(&format!(
+        "UPDATE watch_targets SET status = 'running', lease_until = {renewed_lease},
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND lease_token = $2 AND status = 'running'
+           AND lease_until > CURRENT_TIMESTAMP AND deleted_at IS NULL"
+    ))
     .bind(watch_id)
-    .execute(&state.pool)
+    .bind(lease_token)
+    .execute(&mut *tx)
     .await?;
+    if owned.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Err(UserCollectorError::InvalidWatch);
+    }
     sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_expired',
          error_message = 'lease_expired', completed_at = CURRENT_TIMESTAMP
          WHERE watch_id = $1 AND status = 'running'",
     )
     .bind(watch_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
@@ -610,9 +686,24 @@ async fn create_crawl_run(
     } else {
         "incremental"
     })
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+async fn mark_run_lease_lost(state: &AppState, run_id: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_lost',
+         error_message = 'lease_lost', completed_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND status = 'running'",
+    )
+    .bind(run_id)
+    .execute(&state.pool)
+    .await
+    {
+        warn!(crawl_run_id = run_id, error = %error, "failed to close a user crawl after lease loss");
+    }
 }
 
 async fn mark_skipped_busy(
@@ -621,7 +712,7 @@ async fn mark_skipped_busy(
     watch_target: &WatchTarget,
 ) -> Result<(), UserCollectorError> {
     let mut tx = state.pool.begin().await?;
-    finish_watch(
+    if let Err(error) = finish_watch(
         &mut tx,
         state.config.database_backend,
         watch_target,
@@ -636,7 +727,12 @@ async fn mark_skipped_busy(
         0,
         state.config.scheduler.timezone_offset,
     )
-    .await?;
+    .await
+    {
+        tx.rollback().await?;
+        mark_run_lease_lost(state, run_id).await;
+        return Err(error.into());
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -659,16 +755,22 @@ async fn mark_skipped_pending_review(
     );
     let watch_query = format!(
         "UPDATE watch_targets SET status = 'active',
-         next_run_at = {next_run}, lease_until = NULL,
+         next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
          last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL"
+         WHERE id = $1 AND lease_token = $3 AND deleted_at IS NULL"
     );
-    sqlx::query(&watch_query)
+    let updated = sqlx::query(&watch_query)
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&mut *tx)
         .await?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await?;
+        mark_run_lease_lost(state, run_id).await;
+        return Err(UserCollectorError::InvalidWatch);
+    }
     sqlx::query(
         "UPDATE crawl_runs SET status = 'skipped', error_kind = 'nga_pending_review',
          error_message = 'nga_pending_review', completed_at = CURRENT_TIMESTAMP WHERE id = $1",
@@ -709,18 +811,22 @@ async fn finish_watch(
     let query = format!(
         "UPDATE watch_targets SET status = $1,
          baseline_completed = CASE WHEN $2 = 1 THEN 1 ELSE baseline_completed END,
-         next_run_at = {next_run}, lease_until = NULL,
+         next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
          last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $3 AND deleted_at IS NULL"
+         WHERE id = $3 AND lease_token = $5 AND deleted_at IS NULL"
     );
-    sqlx::query(&query)
+    let updated = sqlx::query(&query)
         .bind(watch_status)
         .bind(i32::from(baseline_completed))
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&mut **tx)
         .await?;
+    if updated.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     sqlx::query(
         "UPDATE crawl_runs SET status = $1, pages_requested = $2,
          posts_inserted = $3, events_created = $4, matches_created = $5,
@@ -788,20 +894,30 @@ async fn record_failure(
     let query = format!(
         "UPDATE watch_targets SET status = $1,
          enabled = CASE WHEN $2 = 1 THEN 0 ELSE enabled END,
-         lease_until = NULL, next_run_at = {next_run},
+         lease_until = NULL, lease_token = NULL, next_run_at = {next_run},
          last_error_kind = $3, last_error_message = $3,
-         updated_at = CURRENT_TIMESTAMP WHERE id = $4 AND deleted_at IS NULL"
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4 AND lease_token = $6 AND deleted_at IS NULL"
     );
-    if let Err(db_error) = sqlx::query(&query)
+    let watch_updated = sqlx::query(&query)
         .bind(status)
         .bind(i32::from(disable))
         .bind(kind)
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&state.pool)
-        .await
-    {
-        warn!(watch_id = %watch_target.id, error = %db_error, "failed to record user watch failure");
+        .await;
+    match watch_updated {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            mark_run_lease_lost(state, run_id).await;
+            return;
+        }
+        Err(db_error) => {
+            warn!(watch_id = %watch_target.id, error = %db_error, "failed to record user watch failure");
+            return;
+        }
     }
     if let Err(db_error) = sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = $1,
@@ -915,12 +1031,22 @@ mod tests {
         let watch = watch::create_user_watch(&pool, 2001, 60)
             .await
             .expect("watch must create");
+        let watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &watch.id)
+            .await
+            .expect("watch claim must succeed")
+            .expect("watch must be claimable");
         let cursor = watch::user_cursor(&pool, &watch.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "user-baseline", &watch.id, true)
-            .await
-            .expect("run must create");
+        create_crawl_run(
+            &state,
+            "user-baseline",
+            &watch.id,
+            watch.lease_token.as_deref().unwrap(),
+            true,
+        )
+        .await
+        .expect("run must create");
         let baseline = persist(
             &state,
             "user-baseline",
@@ -962,16 +1088,22 @@ mod tests {
             .expect("single-PID detail must identify the reply");
         assert_eq!(reply.kind, PostKind::Reply);
         assert!(reply.floor_number > 0);
-        let current_watch = watch::find(&pool, &watch.id)
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &watch.id)
             .await
             .expect("watch query must succeed")
             .expect("watch must exist");
         let cursor = watch::user_cursor(&pool, &watch.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "user-increment", &watch.id, false)
-            .await
-            .expect("run must create");
+        create_crawl_run(
+            &state,
+            "user-increment",
+            &watch.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+        )
+        .await
+        .expect("run must create");
         let discovery = Discovery {
             topics: vec![],
             replies: vec![UserReplyCandidate {
@@ -1007,16 +1139,22 @@ mod tests {
             "更新用户"
         );
 
-        let current_watch = watch::find(&pool, &watch.id)
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &watch.id)
             .await
             .expect("watch query must succeed")
             .expect("watch must exist");
         let cursor = watch::user_cursor(&pool, &watch.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "user-repeat", &watch.id, false)
-            .await
-            .expect("run must create");
+        create_crawl_run(
+            &state,
+            "user-repeat",
+            &watch.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+        )
+        .await
+        .expect("run must create");
         let repeat = persist(
             &state,
             "user-repeat",

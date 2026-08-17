@@ -6,20 +6,68 @@ on:
       - main
     tags:
       - 'v*'
+      - '!v*-standalone'
+  pull_request:
+    paths:
+      - 'service/**'
+      - '.github/workflows/service-image.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-service-image-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  verify:
+    name: Verify service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.92.0'
+          components: rustfmt, clippy
+
+      - name: Validate release tag
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          version="$(cargo metadata --manifest-path service/Cargo.toml --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "nga-reminder") | .version')"
+          expected="v${version}"
+          [[ "${GITHUB_REF_NAME}" == "${expected}" ]] || {
+            echo "Release tag ${GITHUB_REF_NAME} must match ${expected}" >&2
+            exit 1
+          }
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: service
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path service/Cargo.toml --all -- --check
+
+      - name: Run tests
+        run: cargo test --manifest-path service/Cargo.toml --locked --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path service/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
   publish:
     name: Build and publish service image
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Check out repository

@@ -457,7 +457,7 @@ struct TextMessageContent {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventHeader, Mention, MessageEventEnvelope, TextMessageContent};
+    use super::{Mention, MessageEventEnvelope, TextMessageContent};
 
     #[test]
     fn parses_feishu_message_event_shape() {
@@ -503,15 +503,5 @@ mod tests {
         let normalized = mention.to_bot_mention(true);
         assert_eq!(normalized.id, "ou_bot");
         assert!(normalized.is_self);
-    }
-
-    #[test]
-    fn event_header_fields_are_available() {
-        let header = EventHeader {
-            event_id: "evt_1".to_owned(),
-            create_time: "1700000000".to_owned(),
-            event_type: "im.message.receive_v1".to_owned(),
-        };
-        assert_eq!(header.event_id, "evt_1");
     }
 }

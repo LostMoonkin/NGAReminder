@@ -550,10 +550,14 @@ mod tests {
     use reqwest::{StatusCode, Url};
 
     use super::{
-        FEISHU_MAX_CARD_TEXT, FeishuTarget, Notification, SendError, feishu_message_body,
-        is_trusted_nga_image_url, parse_nga_images, render_feishu_text, send_configured,
+        FEISHU_MAX_CARD_TEXT, FeishuSender, FeishuTarget, Notification, SendError,
+        feishu_message_body, is_trusted_nga_image_url, parse_nga_images, render_feishu_text,
+        send_configured,
     };
-    use crate::platform::integration::{BarkCredentials, BarkTarget, FeishuCredentials};
+    use crate::platform::integration::{
+        BarkCredentials, BarkTarget, FeishuCredentials, IntegrationCredentials, NotificationTarget,
+        parse_stored_credentials, parse_stored_target,
+    };
 
     #[test]
     fn feishu_defaults_to_group_delivery() {
@@ -566,23 +570,24 @@ mod tests {
         assert_eq!(credentials.app_id, "cli_test");
     }
 
-    #[tokio::test]
-    async fn configured_sender_accepts_the_persisted_tagged_format() {
-        let error = send_configured(
-            "feishu",
+    #[test]
+    fn configured_sender_accepts_the_persisted_tagged_format() {
+        let credentials = parse_stored_credentials(
             r#"{"platform":"feishu","credentials":{"app_id":"cli_test","app_secret":"secret"}}"#,
-            r#"{"platform":"feishu","target":{"receive_id":"oc_test"}}"#,
-            &Notification {
-                title: "title".to_owned(),
-                body: "body".to_owned(),
-                url: "https://bbs.nga.cn/".to_owned(),
-            },
         )
-        .await
-        .expect_err("send must fail without a live endpoint");
-        // A valid config reaches the network layer (connection refused /
-        // timeout), not InvalidConfig.
-        assert!(!matches!(error, SendError::InvalidConfig));
+        .expect("tagged credentials must parse");
+        let target =
+            parse_stored_target(r#"{"platform":"feishu","target":{"receive_id":"oc_test"}}"#)
+                .expect("tagged target must parse");
+        let IntegrationCredentials::Feishu(credentials) = credentials else {
+            panic!("credentials must retain their Feishu tag");
+        };
+        let NotificationTarget::Feishu(target) = target else {
+            panic!("target must retain its Feishu tag");
+        };
+
+        FeishuSender::new(credentials, target)
+            .expect("valid stored config must construct a sender");
     }
 
     #[tokio::test]

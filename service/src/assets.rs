@@ -203,7 +203,11 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
     }
     let Some(row) = sqlx::query(
         "SELECT id, source_url, original_name FROM assets
-         WHERE download_status = 'pending' ORDER BY first_seen_at LIMIT 1",
+         WHERE download_status = 'pending'
+            OR (download_status = 'downloading'
+                AND (download_lease_until IS NULL
+                     OR download_lease_until <= CURRENT_TIMESTAMP))
+         ORDER BY first_seen_at LIMIT 1",
     )
     .fetch_optional(&state.pool)
     .await?
@@ -213,17 +217,29 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
     let id: String = row.get("id");
     let source_url: String = row.get("source_url");
     let original_name: Option<String> = row.get("original_name");
-    let claimed = sqlx::query(
-        "UPDATE assets SET download_status = 'downloading'
-         WHERE id = $1 AND download_status = 'pending'",
-    )
+    let claim_token = Uuid::new_v4().to_string();
+    let lease = match state.config.database_backend {
+        crate::config::DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '5 minutes'",
+        crate::config::DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+5 minutes')",
+    };
+    let claimed = sqlx::query(&format!(
+        "UPDATE assets SET download_status = 'downloading',
+         download_lease_until = {lease}, download_claim_token = $2
+         WHERE id = $1 AND (
+             download_status = 'pending'
+             OR (download_status = 'downloading'
+                 AND (download_lease_until IS NULL
+                      OR download_lease_until <= CURRENT_TIMESTAMP))
+         )"
+    ))
     .bind(&id)
+    .bind(&claim_token)
     .execute(&state.pool)
     .await?;
     if claimed.rows_affected() == 0 {
-        // Another worker claimed the row after our SELECT. Report progress so
-        // this worker continues looking for another pending asset.
-        return Ok(true);
+        // Lost the optimistic SELECT/claim race. This worker did no useful
+        // work, so do not consume its per-cycle budget or increment metrics.
+        return Ok(false);
     }
 
     let result = download_asset(&state.config.assets, &source_url, original_name.as_deref()).await;
@@ -232,23 +248,28 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
             let update = sqlx::query(
                 "UPDATE assets SET content_hash = $1, mime_type = $2, size_bytes = $3,
                  local_relative_path = $4, download_status = 'ready', downloaded_at = CURRENT_TIMESTAMP,
-                 last_error_kind = NULL WHERE id = $5",
+                 download_lease_until = NULL, download_claim_token = NULL,
+                 last_error_kind = NULL WHERE id = $5 AND download_claim_token = $6",
             )
             .bind(hash)
             .bind(mime_type)
             .bind(size as i64)
             .bind(relative_path)
             .bind(&id)
+            .bind(&claim_token)
             .execute(&state.pool)
             .await;
             if let Err(error) = update {
                 // The claim is committed before the network request. Make the
                 // job retryable if final metadata persistence fails.
                 let _ = sqlx::query(
-                    "UPDATE assets SET download_status = 'pending', last_error_kind = 'database_error'
-                     WHERE id = $1 AND download_status = 'downloading'",
+                    "UPDATE assets SET download_status = 'pending', last_error_kind = 'database_error',
+                     download_lease_until = NULL, download_claim_token = NULL
+                     WHERE id = $1 AND download_status = 'downloading'
+                       AND download_claim_token = $2",
                 )
                 .bind(&id)
+                .bind(&claim_token)
                 .execute(&state.pool)
                 .await;
                 return Err(error.into());
@@ -256,10 +277,13 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
         }
         Err(error) => {
             sqlx::query(
-                "UPDATE assets SET download_status = 'failed', last_error_kind = $1 WHERE id = $2",
+                "UPDATE assets SET download_status = 'failed', download_lease_until = NULL,
+                 download_claim_token = NULL, last_error_kind = $1
+                 WHERE id = $2 AND download_claim_token = $3",
             )
             .bind(asset_error_kind(&error))
-            .bind(id)
+            .bind(&id)
+            .bind(&claim_token)
             .execute(&state.pool)
             .await?;
         }
@@ -682,8 +706,8 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        AssetStore, cleanup_maintenance, hex_hash, maintenance_report, record_post_assets,
-        validate_relative_path, validate_remote_url,
+        AssetStore, cleanup_maintenance, hex_hash, maintenance_report, process_one,
+        record_post_assets, validate_relative_path, validate_remote_url,
     };
     use crate::{
         app::AppState,
@@ -906,6 +930,53 @@ mod tests {
 
         state.pool.close().await;
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_asset_download_claim_is_recovered_without_stealing_a_live_lease() {
+        let root = std::env::temp_dir().join(format!("nga-asset-lease-{}", uuid::Uuid::new_v4()));
+        let state = maintenance_state(root.clone()).await;
+        for (id, lease) in [
+            ("stale", "2000-01-01 00:00:00"),
+            ("live", "2099-01-01 00:00:00"),
+        ] {
+            sqlx::query(
+                "INSERT INTO assets
+                 (id, source_url, download_status, download_lease_until)
+                 VALUES ($1, $2, 'downloading', $3)",
+            )
+            .bind(id)
+            .bind(format!("http://img.nga.cn/{id}.jpg"))
+            .bind(lease)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        }
+
+        assert!(process_one(&state).await.unwrap());
+        let stale: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT download_status, download_lease_until, last_error_kind
+             FROM assets WHERE id = 'stale'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stale,
+            ("failed".to_owned(), None, Some("invalid_url".to_owned()))
+        );
+        assert!(!process_one(&state).await.unwrap());
+        let live: (String, String) = sqlx::query_as(
+            "SELECT download_status, download_lease_until FROM assets WHERE id = 'live'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(live.0, "downloading");
+        assert_eq!(live.1, "2099-01-01 00:00:00");
+
+        state.pool.close().await;
+        std::fs::remove_dir_all(root).ok();
     }
 
     async fn maintenance_state(root: std::path::PathBuf) -> AppState {

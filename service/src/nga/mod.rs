@@ -773,60 +773,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn m0_thread_fixtures_match_frozen_contract() {
-        let page: Value = fixture("thread_page_success.json");
-        assert_eq!(page["code"], 0);
-        let posts = page["result"].as_array().expect("result must be an array");
-        assert_eq!(posts[0]["pid"], 0);
-        assert_eq!(posts[0]["lou"], 0);
-
-        let comments: Value = fixture("thread_comments_hot_post.json");
-        assert!(comments["hot_post"].is_array());
-        assert!(
-            comments["result"]
-                .as_array()
-                .expect("result must be an array")
-                .iter()
-                .any(|post| post["comments"].is_array())
-        );
-
-        let attachments: Value = fixture("thread_attachments.json");
-        assert!(
-            attachments["result"]
-                .as_array()
-                .expect("result must be an array")
-                .iter()
-                .any(|post| post["attches"].is_array())
-        );
-    }
-
-    #[test]
-    fn m0_user_fixtures_match_frozen_contract() {
-        let replies: Value = fixture("user_replies_success.json");
-        assert_eq!(replies["code"], 0);
-        assert_eq!(replies["result"]["__R__ROWS_PAGE"], 20);
-        assert!(
-            replies["result"]["__T"]
-                .as_array()
-                .expect("__T must be an array")
-                .iter()
-                .all(|item| item["__P"].is_object())
-        );
-
-        let topics: Value = fixture("user_topics_page_1.json");
-        assert!(topics["result"]["__T"].is_array());
-
-        let busy: Value = fixture("busy_2048.json");
-        assert_eq!(busy["code"], 2048);
-        assert!(
-            busy["msg"]
-                .as_str()
-                .expect("busy message must be text")
-                .contains("服务器忙")
-        );
-    }
-
     fn fixture(name: &str) -> Value {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/nga")

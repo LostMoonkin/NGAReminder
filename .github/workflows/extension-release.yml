@@ -3,13 +3,59 @@ name: Release Standalone Extension
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*-standalone'
+  pull_request:
+    paths:
+      - 'extension-standalone/**'
+      - '.github/workflows/extension-release.yml'
   workflow_dispatch:  # Allow manual trigger
 
+permissions:
+  contents: read
+
 jobs:
+  verify:
+    name: Verify standalone extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate manifest
+        run: |
+          jq -e '
+            .manifest_version == 3 and
+            (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$")) and
+            (.background.service_worker | type == "string")
+          ' extension-standalone/manifest.json
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            expected="v$(jq -r '.version' extension-standalone/manifest.json)-standalone"
+            [[ "${GITHUB_REF_NAME}" == "${expected}" ]] || {
+              echo "Release tag ${GITHUB_REF_NAME} must match ${expected}" >&2
+              exit 1
+            }
+          fi
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check extension-standalone/background.js
+          node --check extension-standalone/nga-api.js
+          node --check extension-standalone/popup.js
+          node --check extension-standalone/posts.js
+          node --check extension-standalone/i18n.js
+          node --check extension-standalone/thread-config.mjs
+
+      - name: Run standalone extension tests
+        run: node --test extension-standalone/static.test.mjs
+
   release:
     name: Package and Release Standalone Extension
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -17,7 +63,13 @@ jobs:
 
       - name: Get version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="v$(jq -r '.version' extension-standalone/manifest.json)-standalone"
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package standalone extension
         run: |
@@ -26,6 +78,7 @@ jobs:
           zip -r ../extension-standalone.zip . \
             -x "*.git*" \
             -x "*README.md" \
+            -x "*test.mjs" \
             -x "*.DS_Store"
           cd ..
           
@@ -59,7 +112,7 @@ jobs:
           
           ### What's New
           
-          See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/extension-standalone/README.md) for details.
+          See the [Standalone README](https://github.com/${{ github.repository }}/blob/main/extension-standalone/README.md) for details.
           
           ---
           
@@ -71,6 +124,7 @@ jobs:
         with:
           files: extension-standalone.zip
           body_path: release_notes.md
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
           draft: false
           prerelease: false
           name: Standalone Extension ${{ steps.get_version.outputs.VERSION }}

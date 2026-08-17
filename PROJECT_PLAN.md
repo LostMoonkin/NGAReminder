@@ -807,7 +807,7 @@ Cookie 原文或可逆的日志摘要。
   仍可能正常取得公开资料。
 - 用户回复接口 `code=2048` 已区分“服务器忙”和“必须登录”；忙碌时每秒重试，最多
   10 次。
-- M0 thread/user/busy/comments/attachments fixtures 已纳入 Rust contract tests。
+- M0 thread/user/busy/comments/attachments fixtures 已纳入对应解析器与错误分类回归测试。
 
 验证结果：
 
@@ -1116,6 +1116,14 @@ Cookie 原文或可逆的日志摘要。
 
 预计：4～7 个开发日。
 
+### M8：飞书机器人交互与 NGA Cookie 自动续期
+
+状态：已完成 dev 环境整体端到端验收，按 homeserver 单机范围可发布。
+
+完整范围、协议状态机、安全边界与验收记录见
+[`service/docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md`](service/docs/BOT_INTERACTION_AND_COOKIE_RENEWAL_DESIGN.md)。
+不支持的额外登录 challenge 会安全终止并回退管理台人工更新，不计入当前验收范围。
+
 ## 13. 总体依赖关系
 
 ```text
@@ -1124,6 +1132,7 @@ M0 → M1 → M2 ─┬→ M3
               └→ M5
 
 M2 + M3 + M4 + M5 → M6 → M7
+M1 + M4 + M6 → M8
 ```
 
 单人开发粗略总量：35～60 个开发日。M0 的用户历史接口验证是最大不确定项。
@@ -1237,6 +1246,7 @@ export_jobs_total
 
 第一版核心功能已完成 M0～M8 验收。后续工作以生产运营和增强项为主：
 
-1. 提交当前生产加固、指标和运维文档改动。
-2. 继续扩展附件音频、视频等媒体类型和导出 golden fixtures。
-3. 持续进行真实部署、备份恢复和长期运行验证。
+1. 为 NGA 凭据增加 generation fencing，避免旧 Cookie 的在途 Unauthorized 在续期成功后重新暂停账户。
+2. 补充 PostgreSQL 集成测试与双数据库迁移 smoke test。
+3. 继续扩展附件音频、视频等媒体类型和导出 golden fixtures。
+4. 持续进行真实部署、备份恢复和长期运行验证。

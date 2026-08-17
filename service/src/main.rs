@@ -82,32 +82,18 @@ async fn run_server(
     application: Application,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
-    let receiver_state = application.state().clone();
     let server_cancellation = cancellation.clone();
-    let receiver_cancellation = cancellation.clone();
     let mut server = tokio::spawn(async move { application.run_http(server_cancellation).await });
-    let mut receiver = tokio::spawn(bot::runtime::run(receiver_state, receiver_cancellation));
 
     tokio::select! {
         result = &mut server => {
             cancellation.cancel();
-            let server_result = flatten_task_result(result);
-            let receiver_result = flatten_task_result(receiver.await);
-            server_result?;
-            receiver_result
-        },
-        result = &mut receiver => {
-            cancellation.cancel();
-            let receiver_result = flatten_task_result(result);
-            let server_result = flatten_task_result(server.await);
-            receiver_result?;
-            server_result
+            flatten_task_result(result)
         },
         result = shutdown_signal() => {
             result?;
             cancellation.cancel();
-            flatten_task_result(server.await)?;
-            flatten_task_result(receiver.await)
+            flatten_task_result(server.await)
         }
     }
 }

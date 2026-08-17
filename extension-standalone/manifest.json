@@ -1,7 +1,8 @@
 {
     "manifest_version": 3,
+    "minimum_chrome_version": "116",
     "name": "NGA Reminder (Standalone)",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Monitor NGA threads and get notifications - No server required!",
     "permissions": [
         "storage",
@@ -12,7 +13,11 @@
     ],
     "host_permissions": [
         "https://bbs.nga.cn/*",
-        "https://*.nga.cn/*"
+        "https://*.nga.cn/*",
+        "https://api.day.app/*"
+    ],
+    "optional_host_permissions": [
+        "https://*/*"
     ],
     "background": {
         "service_worker": "background.js",

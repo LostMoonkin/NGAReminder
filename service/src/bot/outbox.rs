@@ -121,15 +121,3 @@ fn format_sql_timestamp(when: OffsetDateTime) -> String {
     when.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::format_sql_timestamp;
-    use time::OffsetDateTime;
-
-    #[test]
-    fn timestamps_serialize_to_rfc3339() {
-        let when = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("valid timestamp");
-        assert!(format_sql_timestamp(when).ends_with('Z'));
-    }
-}

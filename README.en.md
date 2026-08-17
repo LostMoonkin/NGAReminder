@@ -2,7 +2,7 @@
 
 [中文主 README](README.md)
 
-NGA Reminder provides NGA thread and user monitoring, persistent storage, notifications, exports, and a web administration console. It also includes a standalone Chromium extension that runs without the server.
+NGA Reminder provides NGA thread and user monitoring, persistent storage, notifications, exports, a web administration console, and Feishu bot interactions. It also includes a standalone Chromium extension that runs without the server.
 
 ## Components
 
@@ -37,11 +37,22 @@ For PostgreSQL, Docker Compose, Nginx TLS termination, backups, upgrades, and ro
 
 ## Docker image publishing
 
-[`service-image.yml`](.github/workflows/service-image.yml) builds and publishes the service image to `ghcr.io/<owner>/<repository>` on pushes to `main`, `v*` tags, or manual dispatch. It publishes branch/tag, semantic-version, commit-SHA, and `latest` (default branch) tags using the built-in GitHub Actions token.
+[`service-image.yml`](.github/workflows/service-image.yml) runs the Rust quality gates on pull requests that touch the service. It builds and publishes the service image to `ghcr.io/<owner>/<repository>` only on pushes to `main`, non-Standalone `v*` tags, or manual dispatch. It publishes branch/tag, semantic-version, commit-SHA, and `latest` (default branch) tags using the built-in GitHub Actions token.
+
+## Version releases
+
+The service and Standalone extension use independent versions. [`scripts/release.sh`](scripts/release.sh) updates the selected version, runs its quality gates, and creates an annotated tag:
+
+```bash
+scripts/release.sh service 0.1.2
+scripts/release.sh extension 1.0.2
+```
+
+Service tags use `vX.Y.Z`; extension tags use `vX.Y.Z-standalone`. The script creates local commits and tags by default; add `--push` after review to push them to the remote.
 
 ## Current status
 
-The first server release has completed acceptance for milestones M0 through M7, including Bark push delivery and the M5 Markdown/ZIP and asset workflow. Streaming exports, asset maintenance, watched-UID views, user export actions, and safe rich post details are also implemented. Remaining enhancements include broader media attachment extraction and independent change detection for nested comments on old parent posts.
+The first server release has completed acceptance for milestones M0 through M8, including Bark/Feishu delivery, Markdown/ZIP exports, the web console, Feishu bot interactions, and single-instance homeserver operations. Remaining enhancements include broader media attachment extraction, export golden fixtures, independent change detection for nested comments on old parent posts, PostgreSQL integration coverage, and ongoing production soak and restore exercises.
 
 ## Development
 

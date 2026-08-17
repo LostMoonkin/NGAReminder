@@ -6,7 +6,6 @@
 export class NGAClient {
     constructor() {
         this.baseUrl = 'https://bbs.nga.cn/app_api.php';
-        this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     }
 
     async getCookies() {
@@ -45,14 +44,13 @@ export class NGAClient {
 
         const response = await fetch(`${this.baseUrl}?${params}`, {
             method: 'POST',
+            // Cookie/Origin/User-Agent are browser-controlled request headers.
+            // `include` makes Chrome attach the authenticated NGA cookie jar.
+            credentials: 'include',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': this.userAgent,
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-                'Cookie': `ngaPassportUid=${cookies.uid}; ngaPassportCid=${cookies.cid}`,
-                'Origin': 'https://bbs.nga.cn',
-                'Referer': 'https://bbs.nga.cn/'
+                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7'
             },
             body: formData
         });
@@ -62,40 +60,66 @@ export class NGAClient {
         }
 
         const data = await response.json();
-        return this.parsePageResult(data);
+        if (Number(data?.code) !== 0) {
+            throw new Error(`NGA business error ${String(data?.code ?? 'missing')}`);
+        }
+        return this.parsePageResult(data, Number(tid), Number(page));
     }
 
-    parsePageResult(pageData) {
-        // Based on server's parse_page_result function
-        const firstPost = pageData.result?.[0] || {};
+    parsePageResult(pageData, expectedTid, expectedPage) {
+        if (!Array.isArray(pageData?.result) || pageData.result.length === 0) {
+            throw new Error('Malformed NGA response: result must be a non-empty array');
+        }
+        const positiveInteger = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+        const nonNegativeInteger = value => Number.isSafeInteger(Number(value)) && Number(value) >= 0;
+        const currentPage = Number(pageData.currentPage);
+        const totalPages = Number(pageData.totalPage);
+        const postsPerPage = Number(pageData.perPage);
+        const totalPosts = Number(pageData.vrows);
+        if (!positiveInteger(currentPage) || !positiveInteger(totalPages) ||
+            !positiveInteger(postsPerPage) || !positiveInteger(totalPosts) ||
+            currentPage > totalPages || currentPage !== expectedPage) {
+            throw new Error('Malformed NGA pagination metadata');
+        }
+
+        // Validate every row before deriving metadata or notification payloads.
+        // A successful response for another TID must never advance this watch.
+        for (const post of pageData.result) {
+            const floor = Number(post?.lou);
+            const pid = Number(post?.pid);
+            if (Number(post?.tid) !== expectedTid || !nonNegativeInteger(floor) ||
+                !nonNegativeInteger(pid) || (floor > 0 && pid === 0)) {
+                throw new Error('Malformed NGA post identity');
+            }
+        }
+        const firstPost = pageData.result[0];
 
         // Thread info
         const thread = {
-            tid: firstPost.tid || 0,
+            tid: expectedTid,
             title: pageData.tsubject || '',
             author_name: pageData.tauthor || '',
             author_uid: pageData.tauthorid || 0,
-            total_posts: pageData.vrows || 0,
-            total_pages: pageData.totalPage || 0,
-            posts_per_page: pageData.perPage || 20,
-            currentPage: pageData.currentPage || 1
+            total_posts: totalPosts,
+            total_pages: totalPages,
+            posts_per_page: postsPerPage,
+            currentPage
         };
 
         // Posts array
         const posts = [];
-        const currentPage = pageData.currentPage || 1;
-        for (const post of (pageData.result || [])) {
+        for (const post of pageData.result) {
             const author = post.author || {};
             posts.push({
-                pid: post.pid || 0,
-                tid: post.tid || 0,
+                pid: Number(post.pid),
+                tid: expectedTid,
                 fid: post.fid || 0,
                 author_name: author.username || '',
                 author_uid: author.uid || 0,
                 post_date: post.postdate || '',
                 post_timestamp: post.postdatetimestamp || 0,
                 content: post.content || '',
-                post_number: post.lou || 0,  // Floor number (楼层)
+                post_number: Number(post.lou),  // Floor number (楼层)
                 page: currentPage  // Which page this post is on
             });
         }
@@ -106,13 +130,16 @@ export class NGAClient {
     async fetchNewPosts(tid, lastSeenPostNumber) {
         // Fetch page 1 to get thread info
         const { thread, posts: firstPagePosts } = await this.fetchPage(tid, 1);
+        if (Number(thread.currentPage) !== 1) {
+            throw new Error('NGA returned an unexpected first page');
+        }
 
         // Calculate which pages to fetch based on lastSeenPostNumber
         const totalPosts = thread.total_posts;
         const postsPerPage = thread.posts_per_page;
 
         // If no new posts, return empty
-        if (totalPosts <= lastSeenPostNumber) {
+        if (totalPosts <= Number(lastSeenPostNumber) + 1) {
             return { thread, newPosts: [] };
         }
 
@@ -131,18 +158,18 @@ export class NGAClient {
         const newPostsFromFirstPage = firstPagePosts.filter(p => p.post_number > lastSeenPostNumber);
         allNewPosts.push(...newPostsFromFirstPage);
 
-        // Fetch remaining pages if needed
-        if (startPage > 1) {
-            for (let page = startPage; page <= endPage; page++) {
-                if (page === 1) continue; // Already fetched
-
-                const { posts } = await this.fetchPage(tid, page);
-                const newPosts = posts.filter(p => p.post_number > lastSeenPostNumber);
-                allNewPosts.push(...newPosts);
-
-                // Small delay to avoid rate limiting
-                await this.delay(500);
+        // Fetch every remaining page in the new-post range. Page 1 was fetched
+        // above for metadata, so start at page 2 when startPage is 1.
+        for (let page = Math.max(startPage, 2); page <= endPage; page++) {
+            const { thread: pageInfo, posts } = await this.fetchPage(tid, page);
+            if (Number(pageInfo.currentPage) !== page) {
+                throw new Error(`NGA returned page ${pageInfo.currentPage} while page ${page} was requested`);
             }
+            const newPosts = posts.filter(p => p.post_number > lastSeenPostNumber);
+            allNewPosts.push(...newPosts);
+
+            // Small delay to avoid rate limiting
+            await this.delay(500);
         }
 
         console.log(`[TID ${tid}] Found ${allNewPosts.length} new posts`);

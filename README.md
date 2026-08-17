@@ -4,7 +4,7 @@
 
 NGA Reminder 是一个面向 NGA 的主题与用户监控、内容持久化和通知服务，同时保留一个无需服务端的 Chromium 独立扩展版本。
 
-当前第一版服务端核心功能已经完成 M0～M7 验收，包含 NGA 抓取、PostgreSQL/SQLite 持久化、Bark/飞书通知、Markdown/ZIP 导出、Web 管理台和单机生产运维能力。
+当前第一版服务端核心功能已经完成 M0～M8 验收，包含 NGA 抓取、PostgreSQL/SQLite 持久化、Bark/飞书通知、Markdown/ZIP 导出、Web 管理台、飞书机器人交互和单机生产运维能力。
 
 ## 版本组成
 
@@ -88,13 +88,25 @@ GET http://127.0.0.1:8080/admin
 
 ## Docker 镜像发布
 
-[`service-image.yml`](.github/workflows/service-image.yml) 会在推送到 `main`、推送 `v*` 版本 tag，或手动触发时构建服务端镜像并发布到 GHCR：
+[`service-image.yml`](.github/workflows/service-image.yml) 会在涉及服务端代码的 pull request 上运行 Rust 质量门；推送到 `main`、推送非 `-standalone` 的 `v*` 版本 tag，或手动触发时才构建服务端镜像并发布到 GHCR：
 
 ```text
 ghcr.io/<owner>/<repository>
 ```
 
 镜像会生成分支/tag、语义化版本、commit SHA 标签；默认分支额外生成 `latest`。工作流使用 GitHub Actions 内置 `GITHUB_TOKEN`，不需要额外配置 Docker Hub 凭据。
+
+## 版本发布
+
+服务端和 Standalone 扩展使用独立版本号。使用 [`scripts/release.sh`](scripts/release.sh) 更新版本、运行质量检查、创建提交和 annotated tag：
+
+```bash
+# 下一次发布示例
+scripts/release.sh service 0.1.2
+scripts/release.sh extension 1.0.2
+```
+
+服务端 tag 为 `vX.Y.Z`，扩展 tag 为 `vX.Y.Z-standalone`。脚本默认只创建本地提交和 tag；确认无误后追加 `--push` 推送到远端。
 
 ## 常用 API
 

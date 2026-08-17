@@ -12,6 +12,12 @@ use crate::{
     repository::watch,
 };
 
+// Keep every worker cycle fair. A continuously replenished asset or
+// notification queue must not prevent due watches (or cancellation) from
+// being observed indefinitely.
+const MAX_ASSET_JOBS_PER_CYCLE: usize = 1;
+const MAX_NOTIFICATION_JOBS_PER_CYCLE: usize = 1;
+
 pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Result<()> {
     let mut scheduler = time::interval(Duration::from_secs(2));
     scheduler.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -26,7 +32,14 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
             }
             _ = scheduler.tick() => {
                 metrics::worker_cycle();
-                loop {
+                for _ in 0..MAX_ASSET_JOBS_PER_CYCLE {
+                    if cancellation.is_cancelled() {
+                        info!("worker role stopping");
+                        return Ok(());
+                    }
+                    // Let a claimed asset finish its normal bookkeeping. A
+                    // crash is recoverable through the download lease, while
+                    // graceful shutdown should avoid an unnecessary retry.
                     match assets::process_one(&state).await {
                         Ok(true) => metrics::asset_job(),
                         Ok(false) => break,
@@ -36,34 +49,57 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                         }
                     }
                 }
-                while notification::worker::process_one(&state).await? {
-                    metrics::notification_job();
+                for _ in 0..MAX_NOTIFICATION_JOBS_PER_CYCLE {
+                    if cancellation.is_cancelled() {
+                        info!("worker role stopping");
+                        return Ok(());
+                    }
+                    let processed = notification::worker::process_fair_batch(&state).await?;
+                    if processed == 0 {
+                        break;
+                    }
+                    for _ in 0..processed {
+                        metrics::notification_job();
+                    }
                 }
                 // Expire stale login sessions and clear their protocol
                 // contexts on every cycle (cheap: one indexed query).
                 if let Err(error) = crate::bot::session::expire_stale_sessions(&state).await {
                     warn!(error = %error, "login session cleanup failed");
                 }
+                if cancellation.is_cancelled() {
+                    info!("worker role stopping");
+                    return Ok(());
+                }
                 let claimed = watch::claim_due(&state.pool, state.config.database_backend).await?;
                 if let Some(watch_target) = claimed {
-                    match watch_target.target_type.as_str() {
-                        "thread" => {
-                            if let Err(error) = thread::run(&state, watch_target).await {
-                                metrics::crawl_failed();
-                                warn!(error = %error, "thread crawl failed");
-                            } else {
-                                metrics::crawl_succeeded();
-                            }
+                    let watch_id = watch_target.id.clone();
+                    let target_type = watch_target.target_type.clone();
+                    if !matches!(target_type.as_str(), "thread" | "user") {
+                        warn!(watch_id = %watch_id, target_type, "unknown watch type");
+                        continue;
+                    }
+                    let crawl = async {
+                        match target_type.as_str() {
+                            "thread" => thread::run(&state, watch_target)
+                                .await
+                                .map(|_| ())
+                                .map_err(anyhow::Error::from),
+                            "user" => user::run(&state, watch_target)
+                                .await
+                                .map(|_| ())
+                                .map_err(anyhow::Error::from),
+                            _ => unreachable!("watch type checked above"),
                         }
-                        "user" => {
-                            if let Err(error) = user::run(&state, watch_target).await {
-                                metrics::crawl_failed();
-                                warn!(error = %error, "user crawl failed");
-                            } else {
-                                metrics::crawl_succeeded();
-                            }
-                        }
-                        _ => warn!(watch_id = watch_target.id, "unknown watch type"),
+                    };
+                    // Let a claimed crawl reach its normal success/failure
+                    // bookkeeping before honoring shutdown.
+                    let result = crawl.await;
+                    if let Err(error) = result {
+                        metrics::crawl_failed();
+                        warn!(watch_id = %watch_id, target_type, error = %error, "watch crawl failed");
+                    } else {
+                        metrics::crawl_succeeded();
                     }
                 }
             }

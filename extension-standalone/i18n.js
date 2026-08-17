@@ -2,6 +2,8 @@
  * Internationalization (i18n) module for NGA Reminder Standalone Extension
  */
 
+const EXTENSION_VERSION = globalThis.chrome?.runtime?.getManifest?.().version ?? 'dev';
+
 export const TRANSLATIONS = {
     en: {
         // Header
@@ -35,6 +37,8 @@ export const TRANSLATIONS = {
         barkPriorityActive: 'Active (default)',
         barkPriorityTimeSensitive: 'Time Sensitive',
         barkPriorityPassive: 'Passive',
+        barkInvalidServer: 'Bark server must be a valid HTTPS URL without credentials, query, or fragment.',
+        barkPermissionDenied: 'Bark server access was not granted. Save the Bark settings to grant access first.',
 
         // Monitored Threads
         monitoredThreads: 'Monitored Threads',
@@ -86,6 +90,9 @@ export const TRANSLATIONS = {
         importSuccess: (count) => `Configuration imported successfully!\n${count} thread(s) loaded.`,
         importError: 'Error importing configuration: ',
         invalidScheduleJson: 'Invalid schedule JSON format: ',
+        invalidScheduleRule: 'Each schedule rule needs valid HH:MM start/end times, an interval of at least 60 seconds, and an optional days array.',
+        invalidThreadConfig: 'Invalid thread configuration:',
+        duplicateTid: (tid) => `Thread ${tid} is already configured.`,
         clearAllConfirm: 'Clear all unseen posts?',
 
         // Unseen Posts
@@ -102,7 +109,7 @@ export const TRANSLATIONS = {
         daysAgo: (n) => `${n}d ago`,
 
         // Footer
-        footer: 'v1.0.0 | No server required',
+        footer: `${EXTENSION_VERSION} | No server required`,
     },
 
     zh: {
@@ -137,6 +144,8 @@ export const TRANSLATIONS = {
         barkPriorityActive: '活跃（默认）',
         barkPriorityTimeSensitive: '时效性',
         barkPriorityPassive: '被动',
+        barkInvalidServer: 'Bark 服务器必须是有效的 HTTPS 地址，且不能包含凭据、查询参数或片段。',
+        barkPermissionDenied: '未授予 Bark 服务器访问权限，请先在 Bark 设置中保存并授权。',
 
         // Monitored Threads
         monitoredThreads: '监控主题',
@@ -188,6 +197,9 @@ export const TRANSLATIONS = {
         importSuccess: (count) => `配置导入成功！\n已加载 ${count} 个主题。`,
         importError: '导入配置时出错：',
         invalidScheduleJson: '无效的时间表 JSON 格式：',
+        invalidScheduleRule: '每条时间表规则都需要有效的 HH:MM 起止时间、至少 60 秒的间隔，以及可选的 days 数组。',
+        invalidThreadConfig: '主题配置无效：',
+        duplicateTid: (tid) => `主题 ${tid} 已存在。`,
         clearAllConfirm: '清除所有未读帖子？',
 
         // Unseen Posts
@@ -204,7 +216,7 @@ export const TRANSLATIONS = {
         daysAgo: (n) => `${n} 天前`,
 
         // Footer
-        footer: 'v1.0.0 | 无需服务器',
+        footer: `${EXTENSION_VERSION} | 无需服务器`,
     }
 };
 

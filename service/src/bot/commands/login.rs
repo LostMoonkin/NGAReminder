@@ -326,9 +326,12 @@ async fn captcha(
                     )
                     .await
                     .map_err(|_| CommandError::internal())?;
-                    Ok(vec![format!(
-                        "✅ Cookie 续期成功！已恢复 {restored} 个因认证暂停的监控。"
-                    )])
+                    match restored {
+                        Some(restored) => Ok(vec![format!(
+                            "✅ Cookie 续期成功！已恢复 {restored} 个因认证暂停的监控。"
+                        )]),
+                        None => Ok(vec!["续期请求状态已变化。".to_owned()]),
+                    }
                 }
                 Ok(_) => {
                     warn!(

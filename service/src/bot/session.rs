@@ -134,12 +134,21 @@ pub async fn on_auth_failure(state: &AppState) -> Result<(), sqlx::Error> {
     .execute(&state.pool)
     .await?;
 
-    // 2. Pause every currently-enabled watch with reason 'auth' (user-paused
-    //    watches keep their own pause_reason and are never auto-restored).
+    // 2. Pause every currently-enabled watch with reason 'auth'. Collectors
+    //    record the watch that observed Unauthorized before calling this
+    //    function, so also adopt that just-disabled watch when it has no
+    //    explicit pause reason. User-paused watches keep their own reason and
+    //    are never auto-restored.
     sqlx::query(
         "UPDATE watch_targets SET enabled = 0, status = 'paused', pause_reason = 'auth',
+         lease_until = NULL, lease_token = NULL,
          updated_at = CURRENT_TIMESTAMP
-         WHERE enabled = 1 AND deleted_at IS NULL",
+         WHERE deleted_at IS NULL AND (
+             enabled = 1 OR (
+                 enabled = 0 AND status = 'paused' AND pause_reason IS NULL
+                 AND last_error_kind = 'unauthorized'
+             )
+         )",
     )
     .execute(&state.pool)
     .await?;
@@ -586,8 +595,10 @@ pub async fn expire_stale_sessions(state: &AppState) -> Result<usize, sqlx::Erro
 }
 
 /// The verified candidate cookie replaces the old one and auth-paused watches
-/// are restored — all in one transaction. Never called with an unverified
-/// candidate.
+/// are restored — all in one transaction. The session is claimed first, so a
+/// concurrent cancellation/expiry that wins the race prevents every credential
+/// write. Returns `None` when the session is no longer eligible. Never called
+/// with an unverified candidate.
 pub async fn complete_success(
     state: &AppState,
     session_id: &str,
@@ -595,7 +606,7 @@ pub async fn complete_success(
     passport_uid: &str,
     passport_cid: &str,
     candidate_cookie_header: &str,
-) -> Result<usize, sqlx::Error> {
+) -> Result<Option<usize>, sqlx::Error> {
     let uid_encrypted = state
         .credential_cipher
         .encrypt(passport_uid)
@@ -604,10 +615,27 @@ pub async fn complete_success(
         .credential_cipher
         .encrypt(passport_cid)
         .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
+    let mut tx = state.pool.begin().await?;
+    let claimed = sqlx::query(
+        "UPDATE nga_login_sessions SET status = 'succeeded',
+         protocol_context_encrypted = NULL, last_error_kind = NULL,
+         completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND account_id = $2 AND status = 'validating_cookie'
+           AND expires_at > CURRENT_TIMESTAMP",
+    )
+    .bind(session_id)
+    .bind(account_id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
     let existing_cookie: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT cookie_encrypted FROM nga_accounts WHERE id = $1")
             .bind(account_id)
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *tx)
             .await?;
     let existing_cookie = existing_cookie
         .map(|value| {
@@ -636,7 +664,6 @@ pub async fn complete_success(
         .encrypt(&cookie)
         .map_err(|e| sqlx::Error::Protocol(format!("{e}")))?;
 
-    let mut tx = state.pool.begin().await?;
     // 1. Replace the Cookie and mark the account valid.
     sqlx::query(
         "UPDATE nga_accounts SET passport_uid_encrypted = $1, passport_cid_encrypted = $2,
@@ -673,15 +700,7 @@ pub async fn complete_success(
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    // 5. Mark the session succeeded and clear the protocol context.
-    sqlx::query(
-        "UPDATE nga_login_sessions SET status = 'succeeded', protocol_context_encrypted = NULL,
-         last_error_kind = NULL, completed_at = CURRENT_TIMESTAMP,
-         updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-    )
-    .bind(session_id)
-    .execute(&mut *tx)
-    .await?;
+    // 5. Clear queued protocol messages for the claimed session.
     let clear_payload = match state.config.database_backend {
         crate::config::DatabaseBackend::Postgres => "'\\x00'::bytea",
         crate::config::DatabaseBackend::Sqlite => "X'00'",
@@ -695,7 +714,7 @@ pub async fn complete_success(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(restored as usize)
+    Ok(Some(restored as usize))
 }
 
 fn merge_cookie_headers(
@@ -1070,6 +1089,14 @@ mod tests {
             .await
             .expect("watch must insert");
         }
+        sqlx::query(
+            "INSERT INTO watch_targets
+             (id, target_type, target_id, enabled, status, pause_reason, last_error_kind)
+             VALUES ('w-collector', 'thread', 1003, 0, 'paused', NULL, 'unauthorized')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("collector-paused watch must insert");
         let binding_id = seed_owner_binding(&state).await;
         sqlx::query(
             "INSERT INTO nga_account_renewal_settings
@@ -1094,6 +1121,13 @@ mod tests {
                 .fetch_one(&state.pool)
                 .await
                 .expect("watch must exist");
+        assert_eq!(row.get::<i32, _>("enabled"), 0);
+        assert_eq!(row.get::<String, _>("pause_reason"), "auth");
+        let row =
+            sqlx::query("SELECT enabled, pause_reason FROM watch_targets WHERE id = 'w-collector'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("collector-paused watch must exist");
         assert_eq!(row.get::<i32, _>("enabled"), 0);
         assert_eq!(row.get::<String, _>("pause_reason"), "auth");
         let row =
@@ -1274,7 +1308,7 @@ mod tests {
         )
         .await
         .expect("success must commit");
-        assert_eq!(restored, 1);
+        assert_eq!(restored, Some(1));
 
         let encrypted_cookie: Vec<u8> =
             sqlx::query_scalar("SELECT cookie_encrypted FROM nga_accounts WHERE id = 'acct'")
@@ -1317,6 +1351,111 @@ mod tests {
                 .await
                 .expect("account must exist");
         assert_eq!(account_status, "valid");
+    }
+
+    #[tokio::test]
+    async fn complete_success_rejects_cancelled_expired_or_wrong_account_without_writes() {
+        let state = test_state().await;
+        let original_cookie = "session=keep; ngaPassportUid=old; ngaPassportCid=old-cid";
+        let encrypted_cookie = state
+            .credential_cipher
+            .encrypt(original_cookie)
+            .expect("old cookie must encrypt");
+        sqlx::query(
+            "INSERT INTO nga_accounts
+             (id, label, passport_uid_encrypted, passport_cid_encrypted, cookie_encrypted, status)
+             VALUES ('acct', 'default', X'00', X'00', $1, 'paused')",
+        )
+        .bind(encrypted_cookie)
+        .execute(&state.pool)
+        .await
+        .expect("account must insert");
+        sqlx::query(
+            "INSERT INTO watch_targets
+             (id, target_type, target_id, enabled, status, pause_reason)
+             VALUES ('w-auth', 'thread', 1001, 0, 'paused', 'auth')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("watch must insert");
+        let binding_id = seed_owner_binding(&state).await;
+        sqlx::query(
+            "INSERT INTO nga_login_sessions
+             (id, account_id, bot_binding_id, integration_id, actor_id, conversation_id,
+              trigger_kind, status, expires_at)
+             VALUES ('sess', 'acct', $1, 'integration', 'ou_owner', 'oc_private',
+                     'cookie_invalid', 'cancelled', '2099-01-01 00:00:00')",
+        )
+        .bind(binding_id)
+        .execute(&state.pool)
+        .await
+        .expect("session must insert");
+
+        let candidate = "login_session=fresh; ngaPassportUid=123456; ngaPassportCid=new-cid";
+        let cancelled = complete_success(&state, "sess", "acct", "123456", "new-cid", candidate)
+            .await
+            .expect("cancelled session must be rejected cleanly");
+        assert_eq!(cancelled, None);
+
+        sqlx::query(
+            "UPDATE nga_login_sessions SET status = 'validating_cookie',
+             expires_at = '2000-01-01 00:00:00' WHERE id = 'sess'",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("session must become expired in-flight");
+        let expired = complete_success(&state, "sess", "acct", "123456", "new-cid", candidate)
+            .await
+            .expect("expired session must be rejected cleanly");
+        assert_eq!(expired, None);
+
+        sqlx::query(
+            "UPDATE nga_login_sessions SET expires_at = '2099-01-01 00:00:00'
+             WHERE id = 'sess'",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("session must become live for account ownership check");
+        let wrong_account = complete_success(
+            &state,
+            "sess",
+            "different-account",
+            "123456",
+            "new-cid",
+            candidate,
+        )
+        .await
+        .expect("wrong account must be rejected cleanly");
+        assert_eq!(wrong_account, None);
+
+        let encrypted_cookie: Vec<u8> =
+            sqlx::query_scalar("SELECT cookie_encrypted FROM nga_accounts WHERE id = 'acct'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("account must exist");
+        let saved_cookie = state
+            .credential_cipher
+            .decrypt(&encrypted_cookie)
+            .expect("saved cookie must decrypt");
+        assert_eq!(saved_cookie, original_cookie);
+        let account_status: String =
+            sqlx::query_scalar("SELECT status FROM nga_accounts WHERE id = 'acct'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("account must exist");
+        assert_eq!(account_status, "paused");
+        let watch_enabled: i32 =
+            sqlx::query_scalar("SELECT enabled FROM watch_targets WHERE id = 'w-auth'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("watch must exist");
+        assert_eq!(watch_enabled, 0);
+        let session_status: String =
+            sqlx::query_scalar("SELECT status FROM nga_login_sessions WHERE id = 'sess'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("session must exist");
+        assert_eq!(session_status, "validating_cookie");
     }
 
     #[tokio::test]

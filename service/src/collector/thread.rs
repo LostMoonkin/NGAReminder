@@ -54,6 +54,10 @@ pub async fn run(
     if watch_target.target_type != "thread" {
         return Err(ThreadCollectorError::InvalidWatch);
     }
+    let lease_token = watch_target
+        .lease_token
+        .as_deref()
+        .ok_or(ThreadCollectorError::InvalidWatch)?;
 
     let baseline = !watch_target.baseline_completed;
     let sync_mode = if baseline {
@@ -65,7 +69,15 @@ pub async fn run(
         "incremental"
     };
     let run_id = Uuid::new_v4().to_string();
-    create_crawl_run(state, &run_id, &watch_target.id, baseline, sync_mode).await?;
+    create_crawl_run(
+        state,
+        &run_id,
+        &watch_target.id,
+        lease_token,
+        baseline,
+        sync_mode,
+    )
+    .await?;
 
     match collect(state, &run_id, &watch_target, baseline).await {
         Ok(summary) => Ok(summary),
@@ -132,6 +144,10 @@ async fn collect(
                 &passport_uid,
                 &passport_cid,
                 &watch_target.id,
+                watch_target
+                    .lease_token
+                    .as_deref()
+                    .ok_or(ThreadCollectorError::InvalidWatch)?,
                 watch_target.target_id,
                 last_page,
                 last_page,
@@ -151,6 +167,10 @@ async fn collect(
             &passport_uid,
             &passport_cid,
             &watch_target.id,
+            watch_target
+                .lease_token
+                .as_deref()
+                .ok_or(ThreadCollectorError::InvalidWatch)?,
             watch_target.target_id,
             2,
             pages[0].metadata.total_pages,
@@ -167,6 +187,10 @@ async fn collect(
             &passport_uid,
             &passport_cid,
             &watch_target.id,
+            watch_target
+                .lease_token
+                .as_deref()
+                .ok_or(ThreadCollectorError::InvalidWatch)?,
             watch_target.target_id,
             start_page.max(2),
             pages[0].metadata.total_pages,
@@ -194,6 +218,7 @@ async fn fetch_pages(
     passport_uid: &secrecy::SecretString,
     passport_cid: &secrecy::SecretString,
     watch_id: &str,
+    lease_token: &str,
     tid: i64,
     start_page: i32,
     end_page: i32,
@@ -229,7 +254,14 @@ async fn fetch_pages(
             .try_collect()
             .await?;
         pages.extend(fetched);
-        if !watch::renew_lease(&state.pool, state.config.database_backend, watch_id).await? {
+        if !watch::renew_lease(
+            &state.pool,
+            state.config.database_backend,
+            watch_id,
+            lease_token,
+        )
+        .await?
+        {
             return Err(ThreadCollectorError::InvalidWatch);
         }
     }
@@ -339,16 +371,32 @@ async fn persist_pages(
 
     let active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM watch_targets
-         WHERE id = $1 AND deleted_at IS NULL AND status = 'running'",
+         WHERE id = $1 AND lease_token = $2
+           AND deleted_at IS NULL AND status = 'running'",
     )
     .bind(&watch_target.id)
+    .bind(
+        watch_target
+            .lease_token
+            .as_deref()
+            .ok_or(ThreadCollectorError::InvalidWatch)?,
+    )
     .fetch_one(&mut *tx)
     .await?;
     if active != 1 {
         return Err(ThreadCollectorError::InvalidWatch);
     }
 
-    watch::update_target_name(&mut tx, &watch_target.id, &metadata.title).await?;
+    watch::update_target_name(
+        &mut tx,
+        &watch_target.id,
+        watch_target
+            .lease_token
+            .as_deref()
+            .ok_or(ThreadCollectorError::InvalidWatch)?,
+        &metadata.title,
+    )
+    .await?;
 
     update_cursor_and_finish(
         &mut tx,
@@ -475,23 +523,36 @@ async fn create_crawl_run(
     state: &AppState,
     run_id: &str,
     watch_id: &str,
+    lease_token: &str,
     baseline: bool,
     sync_mode: &str,
 ) -> Result<(), ThreadCollectorError> {
-    sqlx::query(
-        "UPDATE watch_targets SET status = 'running', updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
+    let renewed_lease = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '5 minutes'",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+5 minutes')",
+    };
+    let mut tx = state.pool.begin().await?;
+    let owned = sqlx::query(&format!(
+        "UPDATE watch_targets SET status = 'running', lease_until = {renewed_lease},
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND lease_token = $2 AND status = 'running'
+           AND lease_until > CURRENT_TIMESTAMP AND deleted_at IS NULL"
+    ))
     .bind(watch_id)
-    .execute(&state.pool)
+    .bind(lease_token)
+    .execute(&mut *tx)
     .await?;
+    if owned.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Err(ThreadCollectorError::InvalidWatch);
+    }
     sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_expired',
          error_message = 'lease_expired', completed_at = CURRENT_TIMESTAMP
          WHERE watch_id = $1 AND status = 'running'",
     )
     .bind(watch_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
@@ -501,9 +562,24 @@ async fn create_crawl_run(
     .bind(watch_id)
     .bind(i32::from(baseline))
     .bind(sync_mode)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+async fn mark_run_lease_lost(state: &AppState, run_id: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_lost',
+         error_message = 'lease_lost', completed_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND status = 'running'",
+    )
+    .bind(run_id)
+    .execute(&state.pool)
+    .await
+    {
+        warn!(crawl_run_id = run_id, error = %error, "failed to close a crawl after lease loss");
+    }
 }
 
 async fn mark_skipped_pending_review(
@@ -512,14 +588,19 @@ async fn mark_skipped_pending_review(
     watch_target: &WatchTarget,
 ) -> Result<(), ThreadCollectorError> {
     let mut tx = state.pool.begin().await?;
-    finish_skipped(
+    if let Err(error) = finish_skipped(
         &mut tx,
         state.config.database_backend,
         run_id,
         watch_target,
         state.config.scheduler.timezone_offset,
     )
-    .await?;
+    .await
+    {
+        tx.rollback().await?;
+        mark_run_lease_lost(state, run_id).await;
+        return Err(error.into());
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -543,16 +624,20 @@ async fn finish_skipped(
     );
     let query = format!(
         "UPDATE watch_targets SET status = 'active',
-         next_run_at = {next_run}, lease_until = NULL,
+         next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
          last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL"
+         WHERE id = $1 AND lease_token = $3 AND deleted_at IS NULL"
     );
-    sqlx::query(&query)
+    let updated = sqlx::query(&query)
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&mut **tx)
         .await?;
+    if updated.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     sqlx::query(
         "UPDATE crawl_runs SET status = 'skipped', error_kind = 'nga_pending_review',
          error_message = 'nga_pending_review', completed_at = CURRENT_TIMESTAMP WHERE id = $1",
@@ -779,16 +864,20 @@ async fn update_cursor_and_finish(
     );
     let query = format!(
         "UPDATE watch_targets SET status = 'active', baseline_completed = 1,
-         next_run_at = {next_run}, lease_until = NULL,
+         next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
          last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL"
+         WHERE id = $1 AND lease_token = $3 AND deleted_at IS NULL"
     );
-    sqlx::query(&query)
+    let updated = sqlx::query(&query)
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&mut **tx)
         .await?;
+    if updated.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
 
     sqlx::query(
         "UPDATE crawl_runs SET status = 'succeeded', pages_requested = $1,
@@ -850,20 +939,30 @@ async fn record_failure(
     let watch_query = format!(
         "UPDATE watch_targets SET status = $1,
          enabled = CASE WHEN $1 IN ('paused', 'not_found') THEN 0 ELSE enabled END,
-         lease_until = NULL,
+         lease_until = NULL, lease_token = NULL,
          next_run_at = {next_run}, last_error_kind = $2, last_error_message = $3,
-         updated_at = CURRENT_TIMESTAMP WHERE id = $4 AND deleted_at IS NULL"
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4 AND lease_token = $6 AND deleted_at IS NULL"
     );
-    if let Err(db_error) = sqlx::query(&watch_query)
+    let watch_updated = sqlx::query(&watch_query)
         .bind(status)
         .bind(kind)
         .bind(safe_message)
         .bind(&watch_target.id)
         .bind(delay)
+        .bind(watch_target.lease_token.as_deref().unwrap_or(""))
         .execute(&state.pool)
-        .await
-    {
-        warn!(watch_id = %watch_target.id, error = %db_error, "failed to record watch failure");
+        .await;
+    match watch_updated {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            mark_run_lease_lost(state, run_id).await;
+            return;
+        }
+        Err(db_error) => {
+            warn!(watch_id = %watch_target.id, error = %db_error, "failed to record watch failure");
+            return;
+        }
     }
     if let Err(db_error) = sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = $1,
@@ -1009,6 +1108,10 @@ mod tests {
         let created = watch::create_thread_watch(&pool, 1001, 60)
             .await
             .expect("watch must create");
+        let created = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch claim must succeed")
+            .expect("watch must be claimable");
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
@@ -1016,6 +1119,7 @@ mod tests {
             &state,
             "baseline-run",
             &created.id,
+            created.lease_token.as_deref().unwrap(),
             true,
             "tid_full_baseline",
         )
@@ -1065,16 +1169,23 @@ mod tests {
                 "attches": null
             }));
         let live_page = parse_thread_page(&live, 1001).expect("live page must parse");
-        let current_watch = watch::find(&pool, &created.id)
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
             .await
             .expect("watch query must succeed")
             .expect("watch must exist");
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "increment-run", &created.id, false, "incremental")
-            .await
-            .expect("crawl run must create");
+        create_crawl_run(
+            &state,
+            "increment-run",
+            &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+            "incremental",
+        )
+        .await
+        .expect("crawl run must create");
         let increment = persist_pages(
             &state,
             "increment-run",
@@ -1099,16 +1210,23 @@ mod tests {
                 .get("content_raw");
         assert_eq!(original, "[redacted reply content]");
 
-        let current_watch = watch::find(&pool, &created.id)
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
             .await
             .expect("watch query must succeed")
             .expect("watch must exist");
         let cursor = watch::thread_cursor(&pool, &created.id)
             .await
             .expect("cursor must load");
-        create_crawl_run(&state, "repeat-run", &created.id, false, "incremental")
-            .await
-            .expect("crawl run must create");
+        create_crawl_run(
+            &state,
+            "repeat-run",
+            &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+            "incremental",
+        )
+        .await
+        .expect("crawl run must create");
         let repeat = persist_pages(
             &state,
             "repeat-run",
@@ -1134,10 +1252,15 @@ mod tests {
         assert_eq!(post_count, 3);
         assert_eq!(event_count, 1);
 
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch query must succeed")
+            .expect("watch must be claimable");
         create_crawl_run(
             &state,
             "pending-review-run",
             &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
             false,
             "incremental",
         )

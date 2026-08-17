@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+### Reliability and quality gates
+
+- Added claim-token fencing to watch and asset-download leases so stale workers cannot overwrite reset, paused, or newly claimed jobs.
+- Made Cookie-renewal completion a conditional transactional claim; cancelled, expired, and wrong-account sessions cannot persist candidate Cookies.
+- Dead-lettered corrupt notification ciphertext per row with failed-delivery audits, and made bot, system-alert, and post queues fair to each other.
+- Fixed authentication-pause recovery, crash recovery for asset downloads, and worker queue starvation.
+- Added CI format, full Rust test, Clippy, extension-manifest, and JavaScript syntax gates, with isolated service/Standalone release tags.
+
 ### Streaming exports, asset maintenance, and content management
 
 - Changed Markdown exports to stable cursor pagination and HTTP streaming; ZIP exports are built incrementally in temporary files and delete those files when the response completes or is dropped.

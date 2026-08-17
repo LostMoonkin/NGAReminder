@@ -10,6 +10,7 @@ use crate::schedule::Schedule;
 #[derive(Clone, Debug)]
 pub struct WatchTarget {
     pub id: String,
+    pub lease_token: Option<String>,
     pub target_type: String,
     pub target_id: i64,
     pub target_name: String,
@@ -188,7 +189,7 @@ async fn insert_watch_target(
 
 pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
+        "SELECT id, lease_token, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets WHERE deleted_at IS NULL
@@ -205,7 +206,7 @@ pub async fn list(pool: &AnyPool) -> Result<Vec<WatchTarget>, sqlx::Error> {
 
 pub async fn find(pool: &AnyPool, id: &str) -> Result<Option<WatchTarget>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
+        "SELECT id, lease_token, target_type, target_id, target_name, enabled, interval_seconds, schedule_json, status,
          baseline_completed, CAST(next_run_at AS TEXT) AS next_run_at,
          CAST(last_completed_at AS TEXT) AS last_completed_at, last_error_kind
          FROM watch_targets WHERE id = $1 AND deleted_at IS NULL",
@@ -287,6 +288,43 @@ pub async fn update_with_config(
     channel_ids: Option<&[String]>,
 ) -> Result<Option<WatchTarget>, CreateWatchError> {
     let mut tx = pool.begin().await.map_err(CreateWatchError::Database)?;
+    let changes_runtime_config = enabled.is_some()
+        || interval_seconds.is_some()
+        || schedule.is_some()
+        || history_mode.is_some()
+        || history_parallel_enabled.is_some()
+        || history_parallelism.is_some()
+        || author_uids.is_some()
+        || channel_ids.is_some();
+    if changes_runtime_config {
+        let reason = if enabled == Some(false) {
+            "watch_paused"
+        } else {
+            "watch_updated"
+        };
+        sqlx::query(
+            "UPDATE crawl_runs SET status = 'failed', error_kind = $1,
+             error_message = $1, completed_at = CURRENT_TIMESTAMP
+             WHERE watch_id = $2 AND status = 'running'",
+        )
+        .bind(reason)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(CreateWatchError::Database)?;
+        sqlx::query(
+            "UPDATE watch_targets SET
+             status = CASE WHEN enabled = 1 THEN 'pending' ELSE 'paused' END,
+             lease_until = NULL, lease_token = NULL,
+             next_run_at = CASE WHEN enabled = 1 THEN CURRENT_TIMESTAMP ELSE next_run_at END,
+             updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(CreateWatchError::Database)?;
+    }
     if let Some(channel_ids) = channel_ids {
         validate_channels(&mut tx, channel_ids).await?;
     }
@@ -294,6 +332,8 @@ pub async fn update_with_config(
         sqlx::query(
             "UPDATE watch_targets SET enabled = $1,
              status = CASE WHEN $1 = 1 THEN 'pending' ELSE 'paused' END,
+             pause_reason = CASE WHEN $1 = 1 THEN NULL ELSE 'user' END,
+             lease_until = NULL, lease_token = NULL,
              next_run_at = CASE WHEN $1 = 1 THEN CURRENT_TIMESTAMP ELSE next_run_at END,
              updated_at = CURRENT_TIMESTAMP
              WHERE id = $2 AND deleted_at IS NULL",
@@ -379,20 +419,42 @@ pub async fn reset(
     history_parallelism: Option<i32>,
 ) -> Result<Option<WatchTarget>, ResetWatchError> {
     let mut tx = pool.begin().await?;
+    // Atomically take the row before touching its cursors. This closes the
+    // SELECT-then-reset race with the regular worker claim path.
     let row = sqlx::query(
-        "SELECT target_type, status FROM watch_targets
-         WHERE id = $1 AND deleted_at IS NULL",
+        "UPDATE watch_targets SET status = 'running', lease_until = CURRENT_TIMESTAMP,
+         lease_token = NULL,
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL
+           AND (status <> 'running' OR lease_until IS NULL
+                OR lease_until <= CURRENT_TIMESTAMP)
+         RETURNING target_type",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
-        return Ok(None);
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM watch_targets WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        return if exists == 0 {
+            Ok(None)
+        } else {
+            Err(ResetWatchError::Busy)
+        };
     };
-    if row.get::<String, _>("status") == "running" {
-        return Err(ResetWatchError::Busy);
-    }
     let target_type: String = row.get("target_type");
+    sqlx::query(
+        "UPDATE crawl_runs SET status = 'failed', error_kind = 'watch_reset',
+         error_message = 'watch_reset', completed_at = CURRENT_TIMESTAMP
+         WHERE watch_id = $1 AND status = 'running'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     if target_type == "thread" {
         if history_mode.is_some()
             || history_parallel_enabled.is_some()
@@ -431,7 +493,8 @@ pub async fn reset(
     }
     sqlx::query(
         "UPDATE watch_targets SET baseline_completed = 0, status = 'pending',
-         enabled = 1, lease_until = NULL, next_run_at = CURRENT_TIMESTAMP,
+         enabled = 1, pause_reason = NULL, lease_until = NULL, lease_token = NULL,
+         next_run_at = CURRENT_TIMESTAMP,
          last_error_kind = NULL, last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1",
     )
@@ -443,16 +506,28 @@ pub async fn reset(
 }
 
 pub async fn delete(pool: &AnyPool, id: &str) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query(
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE crawl_runs SET status = 'failed', error_kind = 'watch_deleted',
+         error_message = 'watch_deleted', completed_at = CURRENT_TIMESTAMP
+         WHERE watch_id = $1 AND status = 'running'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query(
         "UPDATE watch_targets SET enabled = 0, status = 'paused', lease_until = NULL,
+         lease_token = NULL,
          deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected()
-        == 1)
+        == 1;
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 pub async fn claim_due(
@@ -493,9 +568,11 @@ async fn claim(
     id: Option<&str>,
 ) -> Result<Option<WatchTarget>, sqlx::Error> {
     let lease_expression = lease_expression(backend);
+    let lease_token = Uuid::new_v4().to_string();
     let query = if id.is_some() {
         format!(
             "UPDATE watch_targets SET status = 'running', lease_until = {lease_expression},
+             lease_token = $2,
              last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = $1 AND deleted_at IS NULL
                AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
@@ -504,6 +581,7 @@ async fn claim(
     } else {
         format!(
             "UPDATE watch_targets SET status = 'running', lease_until = {lease_expression},
+             lease_token = $1,
              last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = (
                  SELECT id FROM watch_targets
@@ -519,7 +597,9 @@ async fn claim(
     };
     let mut query = sqlx::query(&query);
     if let Some(id) = id {
-        query = query.bind(id);
+        query = query.bind(id).bind(&lease_token);
+    } else {
+        query = query.bind(&lease_token);
     }
     let claimed = query.fetch_optional(pool).await?;
     let Some(claimed) = claimed else {
@@ -532,14 +612,16 @@ pub async fn renew_lease(
     pool: &AnyPool,
     backend: DatabaseBackend,
     id: &str,
+    lease_token: &str,
 ) -> Result<bool, sqlx::Error> {
     let query = format!(
         "UPDATE watch_targets SET lease_until = {}, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND status = 'running' AND deleted_at IS NULL",
+         WHERE id = $1 AND lease_token = $2 AND status = 'running' AND deleted_at IS NULL",
         lease_expression(backend)
     );
     Ok(sqlx::query(&query)
         .bind(id)
+        .bind(lease_token)
         .execute(pool)
         .await?
         .rows_affected()
@@ -549,19 +631,26 @@ pub async fn renew_lease(
 pub async fn update_target_name(
     tx: &mut Transaction<'_, Any>,
     watch_id: &str,
+    lease_token: &str,
     candidate: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE watch_targets
          SET target_name = COALESCE(NULLIF(TRIM($2), ''), CAST(target_id AS TEXT)),
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND deleted_at IS NULL",
+         WHERE id = $1 AND lease_token = $3 AND status = 'running'
+           AND deleted_at IS NULL",
     )
     .bind(watch_id)
     .bind(candidate)
+    .bind(lease_token)
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    if updated.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(sqlx::Error::RowNotFound)
+    }
 }
 
 fn lease_expression(backend: DatabaseBackend) -> &'static str {
@@ -575,6 +664,7 @@ fn map_watch(row: &sqlx::any::AnyRow) -> WatchTarget {
     let schedule_json: Option<String> = row.get("schedule_json");
     WatchTarget {
         id: row.get("id"),
+        lease_token: row.get("lease_token"),
         target_type: row.get("target_type"),
         target_id: row.get("target_id"),
         target_name: row.get("target_name"),
@@ -715,8 +805,10 @@ mod tests {
     use sqlx::any::AnyPoolOptions;
 
     use super::{
-        CreateWatchError, create_thread_watch, create_user_watch_with_config, delete, list, update,
+        CreateWatchError, ResetWatchError, claim_by_id, create_thread_watch,
+        create_user_watch_with_config, delete, list, renew_lease, reset, update,
     };
+    use crate::config::DatabaseBackend;
 
     #[tokio::test]
     async fn thread_watch_crud_and_soft_delete() {
@@ -750,6 +842,114 @@ mod tests {
             .expect("watch must exist");
         assert!(!paused.enabled);
         assert_eq!(paused.interval_seconds, 120);
+        let pause_reason: Option<String> =
+            sqlx::query_scalar("SELECT pause_reason FROM watch_targets WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("pause reason must query");
+        assert_eq!(pause_reason.as_deref(), Some("user"));
+
+        update(&pool, &created.id, Some(true), None)
+            .await
+            .expect("watch must resume")
+            .expect("watch must exist");
+        let claimed = claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch claim must succeed")
+            .expect("watch must be claimable");
+        let stale_token = claimed
+            .lease_token
+            .clone()
+            .expect("claim must have a token");
+        sqlx::query(
+            "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
+             VALUES ('paused-run', $1, 'running', 0, 'incremental')",
+        )
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .expect("crawl run must seed");
+        update(&pool, &created.id, Some(false), None)
+            .await
+            .expect("running watch must pause")
+            .expect("watch must exist");
+        assert!(
+            !renew_lease(&pool, DatabaseBackend::Sqlite, &created.id, &stale_token)
+                .await
+                .expect("stale renewal must query")
+        );
+        let paused_state: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT status, pause_reason, lease_token FROM watch_targets WHERE id = $1",
+        )
+        .bind(&created.id)
+        .fetch_one(&pool)
+        .await
+        .expect("paused watch must query");
+        assert_eq!(paused_state, ("paused".into(), "user".into(), None));
+        let paused_run: (String, String) =
+            sqlx::query_as("SELECT status, error_kind FROM crawl_runs WHERE id = 'paused-run'")
+                .fetch_one(&pool)
+                .await
+                .expect("invalidated crawl run must query");
+        assert_eq!(paused_run, ("failed".into(), "watch_paused".into()));
+
+        sqlx::query(
+            "UPDATE watch_targets SET enabled = 0, status = 'paused', pause_reason = 'auth'
+             WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .expect("auth pause must seed");
+        let resumed = update(&pool, &created.id, Some(true), None)
+            .await
+            .expect("watch must resume")
+            .expect("watch must exist");
+        assert!(resumed.enabled);
+        let pause_reason: Option<String> =
+            sqlx::query_scalar("SELECT pause_reason FROM watch_targets WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("pause reason must query");
+        assert!(pause_reason.is_none());
+
+        update(&pool, &created.id, Some(false), None)
+            .await
+            .expect("watch must pause again")
+            .expect("watch must exist");
+        let pause_reason: Option<String> =
+            sqlx::query_scalar("SELECT pause_reason FROM watch_targets WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("pause reason must query");
+        assert_eq!(pause_reason.as_deref(), Some("user"));
+
+        sqlx::query(
+            "UPDATE watch_targets SET status = 'running',
+             lease_until = '2099-01-01 00:00:00' WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .expect("live lease must seed");
+        assert!(matches!(
+            reset(&pool, &created.id, Some("full"), Some(false), Some(2)).await,
+            Err(ResetWatchError::Busy)
+        ));
+        sqlx::query("UPDATE watch_targets SET lease_until = '2000-01-01 00:00:00' WHERE id = $1")
+            .bind(&created.id)
+            .execute(&pool)
+            .await
+            .expect("stale lease must seed");
+        let reset_watch = reset(&pool, &created.id, Some("full"), Some(false), Some(2))
+            .await
+            .expect("stale lease must be resettable")
+            .expect("watch must exist");
+        assert!(reset_watch.enabled);
+        assert_eq!(reset_watch.status, "pending");
 
         assert!(delete(&pool, &created.id).await.expect("watch must delete"));
         assert!(list(&pool).await.expect("watches must list").is_empty());

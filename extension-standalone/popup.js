@@ -3,8 +3,66 @@
  */
 
 import { initI18n, t, applyTranslations, setLang, getCurrentLang } from './i18n.js';
+import {
+    ensureThreadIdentities,
+    nextThreadFence,
+    normalizeSchedule,
+    normalizeThreadConfig,
+    normalizeThreadList
+} from './thread-config.mjs';
 
 let currentEditIndex = null;
+
+const HTML_ESCAPE_MAP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+};
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => HTML_ESCAPE_MAP[character]);
+}
+
+function postIdentity(post) {
+    return `${String(post.tid)}:${String(post.pid)}`;
+}
+
+function normalizeBarkServerUrl(value) {
+    const url = new URL(value || 'https://api.day.app');
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+        throw new Error(t('barkInvalidServer'));
+    }
+    const path = url.pathname.replace(/\/+$/, '');
+    return `${url.origin}${path}`;
+}
+
+function barkOriginPattern(serverUrl) {
+    return `${new URL(serverUrl).origin}/*`;
+}
+
+async function withStorageLock(name, operation) {
+    if (globalThis.navigator?.locks) {
+        return navigator.locks.request(name, operation);
+    }
+    return operation();
+}
+
+async function loadStoredThreads() {
+    return withStorageLock('nga-threads', async () => {
+        const { threads = [] } = await chrome.storage.local.get(['threads']);
+        const migrated = ensureThreadIdentities(threads);
+        const identityChanged = migrated.some((thread, index) =>
+            thread?.watchId !== threads[index]?.watchId ||
+            thread?.revision !== threads[index]?.revision
+        );
+        if (identityChanged) {
+            await chrome.storage.local.set({ threads: migrated });
+        }
+        return migrated;
+    });
+}
 
 // Initialize on load
 document.addEventListener('DOMContentLoaded', async () => {
@@ -46,16 +104,16 @@ async function checkCookieStatus() {
 
         if (cookies.uid && cookies.cid) {
             statusBox.className = 'status-box status-ok';
-            statusBox.innerHTML = `${t('loggedInAs')} ${cookies.uid}`;
+            statusBox.textContent = `${t('loggedInAs')} ${cookies.uid}`;
             loginBtn.style.display = 'none';
         } else {
             statusBox.className = 'status-box status-error';
-            statusBox.innerHTML = t('notLoggedIn');
+            statusBox.textContent = t('notLoggedIn');
             loginBtn.style.display = 'block';
         }
     } catch (error) {
         statusBox.className = 'status-box status-error';
-        statusBox.innerHTML = t('errorCheckingCookies');
+        statusBox.textContent = t('errorCheckingCookies');
     }
 }
 
@@ -77,12 +135,30 @@ async function loadBarkSettings() {
 }
 
 async function saveBarkSettings() {
-    const serverUrl = document.getElementById('bark-server').value.trim();
+    let serverUrl;
+    try {
+        serverUrl = normalizeBarkServerUrl(document.getElementById('bark-server').value.trim());
+    } catch (error) {
+        alert(error.message);
+        return;
+    }
     const deviceKey = document.getElementById('bark-device-key').value.trim();
     const priority = document.getElementById('bark-priority').value;
 
+    // Runtime host access keeps arbitrary self-hosted Bark endpoints optional.
+    // This call happens directly in the Save button's user gesture.
+    if (deviceKey) {
+        const granted = await chrome.permissions.request({
+            origins: [barkOriginPattern(serverUrl)]
+        });
+        if (!granted) {
+            alert(t('barkPermissionDenied'));
+            return;
+        }
+    }
+
     const barkConfig = {
-        serverUrl: serverUrl || 'https://api.day.app',
+        serverUrl,
         deviceKey: deviceKey,
         priority: priority
     };
@@ -102,7 +178,7 @@ async function saveBarkSettings() {
 }
 
 async function loadThreads() {
-    const { threads } = await chrome.storage.local.get(['threads']);
+    const threads = await loadStoredThreads();
     const threadsList = document.getElementById('threads-list');
 
     if (!threads || threads.length === 0) {
@@ -123,26 +199,31 @@ function createThreadCard(thread, index) {
 
     const interval = thread.checkIntervalSchedule ? t('dynamic') : `${thread.checkInterval}s`;
     const lastSeen = thread.lastSeenPostNumber ? `#${thread.lastSeenPostNumber}` : t('notChecked');
+    const title = thread.title || `Thread ${thread.tid}`;
+    const notificationAuthors = thread.authorNotification && thread.authorNotification.length > 0
+        ? thread.authorNotification.join(', ')
+        : '';
 
     card.innerHTML = `
         <div class="thread-header">
-            <span class="thread-title">${thread.title || `Thread ${thread.tid}`}</span>
+            <span class="thread-title">${escapeHtml(title)}</span>
             <label class="toggle">
                 <input type="checkbox" class="thread-toggle" data-index="${index}" ${thread.enabled ? 'checked' : ''}>
                 <span class="slider"></span>
             </label>
         </div>
         <div class="thread-details">
-            <p><strong>TID:</strong> ${thread.tid}</p>
-            <p><strong>${t('interval')}:</strong> ${interval}</p>
-            <p><strong>${t('lastSeen')}:</strong> ${lastSeen}</p>
-            ${thread.authorNotification && thread.authorNotification.length > 0 ?
-            `<p><strong>${t('notifyUIDs')}:</strong> ${thread.authorNotification.join(', ')}</p>` : ''}
+            <p><strong>TID:</strong> ${escapeHtml(thread.tid)}</p>
+            <p><strong>${escapeHtml(t('interval'))}:</strong> ${escapeHtml(interval)}</p>
+            <p><strong>${escapeHtml(t('lastSeen'))}:</strong> ${escapeHtml(lastSeen)}</p>
+            ${notificationAuthors
+            ? `<p><strong>${escapeHtml(t('notifyUIDs'))}:</strong> ${escapeHtml(notificationAuthors)}</p>`
+            : ''}
         </div>
         <div class="thread-actions">
-            <button class="btn btn-small btn-edit" data-index="${index}">${t('editBtn')}</button>
-            <button class="btn btn-small btn-danger btn-delete" data-index="${index}">${t('deleteBtn')}</button>
-            <button class="btn btn-small btn-test" data-index="${index}">${t('testBtn')}</button>
+            <button class="btn btn-small btn-edit" data-index="${index}">${escapeHtml(t('editBtn'))}</button>
+            <button class="btn btn-small btn-danger btn-delete" data-index="${index}">${escapeHtml(t('deleteBtn'))}</button>
+            <button class="btn btn-small btn-test" data-index="${index}">${escapeHtml(t('testBtn'))}</button>
         </div>
     `;
 
@@ -240,6 +321,7 @@ function showThreadForm(thread = null, index = null) {
     if (thread) {
         formTitle.textContent = t('editThreadTitle');
         document.getElementById('tid').value = thread.tid;
+        document.getElementById('tid').disabled = true;
         document.getElementById('author-notification').value =
             thread.authorNotification ? thread.authorNotification.join(',') : '';
         document.getElementById('last-seen').value = thread.lastSeenPostNumber || 0;
@@ -254,6 +336,7 @@ function showThreadForm(thread = null, index = null) {
     } else {
         formTitle.textContent = t('addThreadTitle');
         document.getElementById('thread-config-form').reset();
+        document.getElementById('tid').disabled = false;
         document.getElementById('schedule-config').style.display = 'none';
     }
 
@@ -265,6 +348,7 @@ function hideThreadForm() {
     document.getElementById('thread-form').style.display = 'none';
     document.querySelector('.threads-list').parentElement.style.display = 'block';
     document.getElementById('thread-config-form').reset();
+    document.getElementById('tid').disabled = false;
     currentEditIndex = null;
 }
 
@@ -291,6 +375,7 @@ async function saveThread() {
                 if (!Array.isArray(checkIntervalSchedule)) {
                     checkIntervalSchedule = [checkIntervalSchedule];
                 }
+                checkIntervalSchedule = normalizeSchedule(checkIntervalSchedule);
             }
         } catch (error) {
             alert(t('invalidScheduleJson') + error.message);
@@ -309,33 +394,72 @@ async function saveThread() {
         lastChecked: 0
     };
 
-    const { threads = [] } = await chrome.storage.local.get(['threads']);
+    let saved = false;
+    try {
+        await withStorageLock('nga-threads', async () => {
+            const stored = await chrome.storage.local.get(['threads']);
+            const threads = ensureThreadIdentities(stored.threads || []);
 
-    if (currentEditIndex !== null) {
-        // Preserve some existing data when editing
-        thread.title = threads[currentEditIndex].title;
-        // Only preserve lastSeenPostNumber if user didn't explicitly change it
-        if (!lastSeenInput && threads[currentEditIndex].lastSeenPostNumber) {
-            thread.lastSeenPostNumber = threads[currentEditIndex].lastSeenPostNumber;
-        }
-        threads[currentEditIndex] = thread;
-    } else {
-        threads.push(thread);
+            if (threads.some((candidate, index) =>
+                index !== currentEditIndex && String(candidate.tid) === String(tid))) {
+                alert(t('duplicateTid')(tid));
+                return;
+            }
+
+            if (currentEditIndex !== null) {
+                const existingThread = threads[currentEditIndex];
+                if (!existingThread || String(existingThread.tid) !== String(tid)) {
+                    return;
+                }
+                // Preserve worker-owned progress and the user's enabled state, but
+                // advance the fence so an in-flight check cannot overwrite this edit.
+                thread.title = existingThread.title;
+                thread.enabled = existingThread.enabled ?? true;
+                thread.lastChecked = existingThread.lastChecked ?? 0;
+                // Only preserve lastSeenPostNumber if user didn't explicitly change it
+                if (!lastSeenInput && existingThread.lastSeenPostNumber) {
+                    thread.lastSeenPostNumber = existingThread.lastSeenPostNumber;
+                }
+                threads[currentEditIndex] = normalizeThreadConfig({
+                    ...thread,
+                    ...nextThreadFence(existingThread)
+                });
+            } else {
+                threads.push(normalizeThreadConfig(thread, { preserveIdentity: false }));
+            }
+
+            await chrome.storage.local.set({ threads });
+            saved = true;
+        });
+    } catch (error) {
+        alert(`${t('invalidThreadConfig')} ${error.message}`);
+        return;
     }
-
-    await chrome.storage.local.set({ threads });
+    if (!saved) {
+        await loadThreads();
+        return;
+    }
     hideThreadForm();
     await loadThreads();
 }
 
 async function toggleThread(index, enabled) {
-    const { threads } = await chrome.storage.local.get(['threads']);
-    threads[index].enabled = enabled;
-    await chrome.storage.local.set({ threads });
+    await withStorageLock('nga-threads', async () => {
+        const stored = await chrome.storage.local.get(['threads']);
+        const threads = ensureThreadIdentities(stored.threads || []);
+        if (threads[index]) {
+            threads[index] = {
+                ...threads[index],
+                ...nextThreadFence(threads[index]),
+                enabled
+            };
+            await chrome.storage.local.set({ threads });
+        }
+    });
 }
 
 async function editThread(index) {
-    const { threads } = await chrome.storage.local.get(['threads']);
+    const threads = await loadStoredThreads();
     showThreadForm(threads[index], index);
 }
 
@@ -344,14 +468,19 @@ async function deleteThread(index) {
         return;
     }
 
-    const { threads } = await chrome.storage.local.get(['threads']);
-    threads.splice(index, 1);
-    await chrome.storage.local.set({ threads });
+    await withStorageLock('nga-threads', async () => {
+        const stored = await chrome.storage.local.get(['threads']);
+        const threads = ensureThreadIdentities(stored.threads || []);
+        if (threads[index]) {
+            threads.splice(index, 1);
+            await chrome.storage.local.set({ threads });
+        }
+    });
     await loadThreads();
 }
 
 async function testThread(index, btn) {
-    const { threads } = await chrome.storage.local.get(['threads']);
+    const threads = await loadStoredThreads();
     const thread = threads[index];
 
     btn.textContent = t('testingBtn');
@@ -415,6 +544,12 @@ async function importConfig(file) {
             throw new Error(t('importInvalidFormat'));
         }
 
+        // Imported watches receive fresh identities so in-flight checks from
+        // the replaced configuration can never commit into the new list.
+        const importedThreads = normalizeThreadList(config.threads, {
+            preserveIdentity: false
+        });
+
         // Confirm before importing
         const threadCount = config.threads.length;
         if (!confirm(t('importConfirm')(threadCount))) {
@@ -423,14 +558,20 @@ async function importConfig(file) {
 
         // Import data
         const importData = {
-            threads: config.threads
+            threads: importedThreads
         };
 
         if (config.barkConfig) {
-            importData.barkConfig = config.barkConfig;
+            const serverUrl = normalizeBarkServerUrl(config.barkConfig.serverUrl);
+            const hasPermission = !config.barkConfig.deviceKey ||
+                await chrome.permissions.contains({ origins: [barkOriginPattern(serverUrl)] });
+            if (!hasPermission) {
+                throw new Error(t('barkPermissionDenied'));
+            }
+            importData.barkConfig = { ...config.barkConfig, serverUrl };
         }
 
-        await chrome.storage.local.set(importData);
+        await withStorageLock('nga-threads', () => chrome.storage.local.set(importData));
 
         // Reload UI
         await loadBarkSettings();
@@ -485,17 +626,19 @@ async function loadUnseenPostsList() {
         return;
     }
 
-    unseenPosts.sort((a, b) => b.timestamp - a.timestamp);
+    const sortedPosts = [...unseenPosts].sort((a, b) => b.timestamp - a.timestamp);
 
     postsList.innerHTML = '';
-    unseenPosts.forEach((post, index) => {
-        const postCard = createPostCard(post, index);
+    sortedPosts.forEach(post => {
+        const postCard = createPostCard(post);
         postsList.appendChild(postCard);
     });
 
     document.getElementById('clear-all-btn').onclick = async () => {
         if (confirm(t('clearAllConfirm'))) {
-            await chrome.storage.local.set({ unseenPosts: [] });
+            await withStorageLock('nga-unseen-posts', () =>
+                chrome.storage.local.set({ unseenPosts: [] })
+            );
             await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
             await loadUnseenPostsList();
             await loadUnseenCount();
@@ -503,7 +646,7 @@ async function loadUnseenPostsList() {
     };
 }
 
-function createPostCard(post, index) {
+function createPostCard(post) {
     const card = document.createElement('div');
     card.style.cssText = 'background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin-bottom: 12px; cursor: pointer; transition: all 0.2s;';
 
@@ -522,23 +665,27 @@ function createPostCard(post, index) {
 
     const timestamp = new Date(post.timestamp * 1000);
     const timeStr = formatTimestamp(timestamp);
+    const threadTitle = post.threadTitle || `Thread ${post.tid}`;
 
     card.innerHTML = `
-        <div style="font-weight: 600; color: #667eea; margin-bottom: 8px; font-size: 15px;">${post.threadTitle || `Thread ${post.tid}`}</div>
+        <div style="font-weight: 600; color: #667eea; margin-bottom: 8px; font-size: 15px;">${escapeHtml(threadTitle)}</div>
         <div style="display: flex; gap: 15px; margin-bottom: 8px; font-size: 13px; color: #666;">
-            <span>👤 ${post.authorName}</span>
-            <span>#${post.postNumber}</span>
-            <span>🕒 ${timeStr}</span>
+            <span>👤 ${escapeHtml(post.authorName)}</span>
+            <span>#${escapeHtml(post.postNumber)}</span>
+            <span>🕒 ${escapeHtml(timeStr)}</span>
         </div>
-        <div style="color: #444; font-size: 14px; line-height: 1.5; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e0e0e0;">${post.content}</div>
+        <div style="color: #444; font-size: 14px; line-height: 1.5; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e0e0e0;">${escapeHtml(post.content)}</div>
     `;
 
     card.onclick = async () => {
         chrome.tabs.create({ url: post.url });
 
-        const { unseenPosts = [] } = await chrome.storage.local.get(['unseenPosts']);
-        unseenPosts.splice(index, 1);
-        await chrome.storage.local.set({ unseenPosts });
+        await withStorageLock('nga-unseen-posts', async () => {
+            const { unseenPosts = [] } = await chrome.storage.local.get(['unseenPosts']);
+            const identity = postIdentity(post);
+            const remainingPosts = unseenPosts.filter(candidate => postIdentity(candidate) !== identity);
+            await chrome.storage.local.set({ unseenPosts: remainingPosts });
+        });
         await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
 
         await loadUnseenPostsList();

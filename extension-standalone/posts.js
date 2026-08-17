@@ -4,6 +4,29 @@
 
 import { initI18n, t, applyTranslations } from './i18n.js';
 
+const HTML_ESCAPE_MAP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+};
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => HTML_ESCAPE_MAP[character]);
+}
+
+function postIdentity(post) {
+    return `${String(post.tid)}:${String(post.pid)}`;
+}
+
+async function withStorageLock(name, operation) {
+    if (globalThis.navigator?.locks) {
+        return navigator.locks.request(name, operation);
+    }
+    return operation();
+}
+
 // Load and display unseen posts on page load
 document.addEventListener('DOMContentLoaded', async () => {
     await initI18n();
@@ -42,32 +65,32 @@ async function loadUnseenPosts() {
     }
 
     // Sort by timestamp (newest first)
-    unseenPosts.sort((a, b) => b.timestamp - a.timestamp);
+    const sortedPosts = [...unseenPosts].sort((a, b) => b.timestamp - a.timestamp);
 
     // Display posts
     postsList.innerHTML = '';
-    unseenPosts.forEach((post, index) => {
-        const postCard = createPostCard(post, index);
+    sortedPosts.forEach(post => {
+        const postCard = createPostCard(post);
         postsList.appendChild(postCard);
     });
 }
 
-function createPostCard(post, index) {
+function createPostCard(post) {
     const card = document.createElement('div');
     card.className = 'post-item';
-    card.dataset.index = index;
 
     const timestamp = new Date(post.timestamp * 1000);
     const timeStr = formatTimestamp(timestamp);
+    const threadTitle = post.threadTitle || `Thread ${post.tid}`;
 
     card.innerHTML = `
-        <div class="post-thread-title">${post.threadTitle || `Thread ${post.tid}`}</div>
+        <div class="post-thread-title">${escapeHtml(threadTitle)}</div>
         <div class="post-meta">
-            <span>👤 ${post.authorName}</span>
-            <span>#${post.postNumber}</span>
-            <span>🕒 ${timeStr}</span>
+            <span>👤 ${escapeHtml(post.authorName)}</span>
+            <span>#${escapeHtml(post.postNumber)}</span>
+            <span>🕒 ${escapeHtml(timeStr)}</span>
         </div>
-        <div class="post-content">${post.content}</div>
+        <div class="post-content">${escapeHtml(post.content)}</div>
     `;
 
     // Click to open and remove
@@ -76,7 +99,7 @@ function createPostCard(post, index) {
         chrome.tabs.create({ url: post.url });
 
         // Remove from unseen list
-        await removePost(index);
+        await removePost(post);
 
         // Reload the list
         await loadUnseenPosts();
@@ -85,17 +108,22 @@ function createPostCard(post, index) {
     return card;
 }
 
-async function removePost(index) {
-    const { unseenPosts = [] } = await chrome.storage.local.get(['unseenPosts']);
-    unseenPosts.splice(index, 1);
-    await chrome.storage.local.set({ unseenPosts });
+async function removePost(post) {
+    await withStorageLock('nga-unseen-posts', async () => {
+        const { unseenPosts = [] } = await chrome.storage.local.get(['unseenPosts']);
+        const identity = postIdentity(post);
+        const remainingPosts = unseenPosts.filter(candidate => postIdentity(candidate) !== identity);
+        await chrome.storage.local.set({ unseenPosts: remainingPosts });
+    });
 
     // Update badge
     await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
 }
 
 async function clearAllPosts() {
-    await chrome.storage.local.set({ unseenPosts: [] });
+    await withStorageLock('nga-unseen-posts', () =>
+        chrome.storage.local.set({ unseenPosts: [] })
+    );
     await chrome.runtime.sendMessage({ type: 'UPDATE_BADGE' });
     await loadUnseenPosts();
 }

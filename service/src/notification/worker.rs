@@ -18,7 +18,10 @@ use crate::{
 };
 
 const BOT_MAX_ATTEMPTS: i32 = 3;
+const CREDENTIAL_DECRYPTION_FAILED: &str = "credential_decryption_failed";
+const TARGET_DECRYPTION_FAILED: &str = "target_decryption_failed";
 
+#[cfg(test)]
 pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
     if process_bot_one(state).await? {
         return Ok(true);
@@ -27,6 +30,25 @@ pub async fn process_one(state: &AppState) -> anyhow::Result<bool> {
         return Ok(true);
     }
     process_post_one(state).await
+}
+
+/// Process at most one row from each independent notification class.
+///
+/// `process_one` intentionally keeps its historical priority order for direct
+/// callers. The scheduler uses this fair batch so a continuously replenished
+/// bot reply queue cannot starve system alerts or post notifications.
+pub async fn process_fair_batch(state: &AppState) -> anyhow::Result<usize> {
+    let mut processed = 0;
+    if process_bot_one(state).await? {
+        processed += 1;
+    }
+    if process_system_alert_one(state).await? {
+        processed += 1;
+    }
+    if process_post_one(state).await? {
+        processed += 1;
+    }
+    Ok(processed)
 }
 
 async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
@@ -155,22 +177,29 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
     match delivery {
         Ok(receipt) => {
             if message_kind == BotMessageKind::Image {
-                // Enqueue the follow-up before marking the image row complete.
-                // If this database write fails, the leased image is retried
-                // with the same platform UUID and outbox dedupe key.
+                // Renew the exact attempt before creating its idempotent
+                // follow-up. A reclaimed or cancelled attempt cannot create
+                // session side effects.
+                if !renew_claimed_bot(state, &outbox_id, attempt).await? {
+                    return Ok(true);
+                }
                 enqueue_captcha_instruction(state, &integration_id, &conversation_id, &dedupe_key)
                     .await?;
             }
-            sqlx::query(
+            let completed = sqlx::query(
                 "UPDATE bot_outbox SET status = 'delivered', lease_until = NULL,
                  delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
-                 payload_encrypted = $2 WHERE id = $1",
+                 payload_encrypted = $2
+                 WHERE id = $1 AND status = 'sending' AND attempt_count = $3",
             )
             .bind(&outbox_id)
             .bind(Vec::<u8>::new())
+            .bind(attempt)
             .execute(&state.pool)
-            .await?;
-            if let Some(event_id) = inbound_event_id {
+            .await?
+            .rows_affected()
+                == 1;
+            if completed && let Some(event_id) = inbound_event_id {
                 sqlx::query("UPDATE bot_inbound_events SET status = 'succeeded' WHERE id = $1")
                     .bind(event_id)
                     .execute(&state.pool)
@@ -209,13 +238,18 @@ async fn process_bot_one(state: &AppState) -> anyhow::Result<bool> {
                  payload_encrypted = CASE WHEN $1 = 'dead' THEN {clear_payload} ELSE payload_encrypted END
                  WHERE id = $3"
             );
-            sqlx::query(&query)
-                .bind(if retryable { "failed" } else { "dead" })
-                .bind(kind)
-                .bind(&outbox_id)
-                .execute(&state.pool)
-                .await?;
-            if !retryable && message_kind == BotMessageKind::Image {
+            let completed = sqlx::query(&format!(
+                "{query} AND status = 'sending' AND attempt_count = $4"
+            ))
+            .bind(if retryable { "failed" } else { "dead" })
+            .bind(kind)
+            .bind(&outbox_id)
+            .bind(attempt)
+            .execute(&state.pool)
+            .await?
+            .rows_affected()
+                == 1;
+            if completed && !retryable && message_kind == BotMessageKind::Image {
                 fail_captcha_image_session(state, &integration_id, &conversation_id, &dedupe_key)
                     .await?;
             }
@@ -343,14 +377,36 @@ async fn fail_claimed_bot(
         "UPDATE bot_outbox SET status = $1, lease_until = NULL,
          next_attempt_at = {next}, last_error_kind = $2,
          payload_encrypted = CASE WHEN $1 = 'dead' THEN {clear_payload} ELSE payload_encrypted END
-         WHERE id = $3"
+         WHERE id = $3 AND status = 'sending' AND attempt_count = $4"
     ))
     .bind(if should_retry { "failed" } else { "dead" })
     .bind(kind)
     .bind(outbox_id)
+    .bind(attempt)
     .execute(&state.pool)
     .await?;
     Ok(())
+}
+
+async fn renew_claimed_bot(
+    state: &AppState,
+    outbox_id: &str,
+    attempt: i32,
+) -> Result<bool, sqlx::Error> {
+    let lease = match state.config.database_backend {
+        DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + INTERVAL '2 minutes'",
+        DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+2 minutes')",
+    };
+    Ok(sqlx::query(&format!(
+        "UPDATE bot_outbox SET lease_until = {lease}
+         WHERE id = $1 AND status = 'sending' AND attempt_count = $2"
+    ))
+    .bind(outbox_id)
+    .bind(attempt)
+    .execute(&state.pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
@@ -395,15 +451,22 @@ async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
     .await?;
     let attempt: i32 = row.get("attempt_count");
     let encrypted: Vec<u8> = row.get("credentials_encrypted");
-    let credentials = state
-        .credential_cipher
-        .decrypt(&encrypted)
-        .map_err(|_| anyhow::anyhow!("integration credentials decryption failed"))?;
+    let credentials = match state.credential_cipher.decrypt(&encrypted) {
+        Ok(credentials) => credentials,
+        Err(_) => {
+            dead_letter_system_alert(state, &outbox_id, attempt, CREDENTIAL_DECRYPTION_FAILED)
+                .await?;
+            return Ok(true);
+        }
+    };
     let target_encrypted: Vec<u8> = row.get("target_encrypted");
-    let target = state
-        .credential_cipher
-        .decrypt(&target_encrypted)
-        .map_err(|_| anyhow::anyhow!("notification target decryption failed"))?;
+    let target = match state.credential_cipher.decrypt(&target_encrypted) {
+        Ok(target) => target,
+        Err(_) => {
+            dead_letter_system_alert(state, &outbox_id, attempt, TARGET_DECRYPTION_FAILED).await?;
+            return Ok(true);
+        }
+    };
     let notification = Notification {
         title: row.get("title"),
         body: row.get("body"),
@@ -424,9 +487,11 @@ async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
             .await?;
             sqlx::query(
                 "UPDATE system_alert_outbox SET status = 'delivered', lease_until = NULL,
-                 delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL WHERE id = $1",
+                 delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL
+                 WHERE id = $1 AND status = 'sending' AND attempt_count = $2",
             )
             .bind(&outbox_id)
+            .bind(attempt)
             .execute(&state.pool)
             .await?;
         }
@@ -453,12 +518,14 @@ async fn process_system_alert_one(state: &AppState) -> anyhow::Result<bool> {
             };
             let query = format!(
                 "UPDATE system_alert_outbox SET status = $1, lease_until = NULL,
-                 next_attempt_at = {next}, last_error_kind = $2 WHERE id = $3"
+                 next_attempt_at = {next}, last_error_kind = $2
+                 WHERE id = $3 AND status = 'sending' AND attempt_count = $4"
             );
             sqlx::query(&query)
                 .bind(if retryable { "failed" } else { "dead" })
                 .bind(error.kind())
                 .bind(&outbox_id)
+                .bind(attempt)
                 .execute(&state.pool)
                 .await?;
         }
@@ -510,15 +577,21 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
     .await?;
     let attempt: i32 = row.get("attempt_count");
     let encrypted: Vec<u8> = row.get("credentials_encrypted");
-    let credentials = state
-        .credential_cipher
-        .decrypt(&encrypted)
-        .map_err(|_| anyhow::anyhow!("integration credentials decryption failed"))?;
+    let credentials = match state.credential_cipher.decrypt(&encrypted) {
+        Ok(credentials) => credentials,
+        Err(_) => {
+            dead_letter_post(state, &outbox_id, attempt, CREDENTIAL_DECRYPTION_FAILED).await?;
+            return Ok(true);
+        }
+    };
     let target_encrypted: Vec<u8> = row.get("target_encrypted");
-    let target = state
-        .credential_cipher
-        .decrypt(&target_encrypted)
-        .map_err(|_| anyhow::anyhow!("notification target decryption failed"))?;
+    let target = match state.credential_cipher.decrypt(&target_encrypted) {
+        Ok(target) => target,
+        Err(_) => {
+            dead_letter_post(state, &outbox_id, attempt, TARGET_DECRYPTION_FAILED).await?;
+            return Ok(true);
+        }
+    };
     let tid: i64 = row.get("tid");
     let pid: Option<i64> = row.get("pid");
     let author_uid: i64 = row.get("author_uid");
@@ -547,9 +620,11 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
             .await?;
             sqlx::query(
                 "UPDATE notification_outbox SET status = 'delivered', lease_until = NULL,
-                 delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL WHERE id = $1",
+                 delivered_at = CURRENT_TIMESTAMP, last_error_kind = NULL
+                 WHERE id = $1 AND status = 'sending' AND attempt_count = $2",
             )
             .bind(&outbox_id)
+            .bind(attempt)
             .execute(&state.pool)
             .await?;
         }
@@ -576,17 +651,91 @@ async fn process_post_one(state: &AppState) -> anyhow::Result<bool> {
             };
             let query = format!(
                 "UPDATE notification_outbox SET status = $1, lease_until = NULL,
-                 next_attempt_at = {next}, last_error_kind = $2 WHERE id = $3"
+                 next_attempt_at = {next}, last_error_kind = $2
+                 WHERE id = $3 AND status = 'sending' AND attempt_count = $4"
             );
             sqlx::query(&query)
                 .bind(if retryable { "failed" } else { "dead" })
                 .bind(error.kind())
                 .bind(&outbox_id)
+                .bind(attempt)
                 .execute(&state.pool)
                 .await?;
         }
     }
     Ok(true)
+}
+
+async fn dead_letter_system_alert(
+    state: &AppState,
+    outbox_id: &str,
+    attempt: i32,
+    error_kind: &'static str,
+) -> Result<(), sqlx::Error> {
+    if let Err(error) = record_system_alert_delivery(
+        state,
+        outbox_id,
+        attempt,
+        false,
+        None,
+        None,
+        Some(error_kind),
+    )
+    .await
+    {
+        warn!(
+            outbox_id,
+            error_kind, error = %error,
+            "failed to record system alert decryption failure"
+        );
+    }
+    sqlx::query(
+        "UPDATE system_alert_outbox SET status = 'dead', lease_until = NULL,
+         last_error_kind = $1
+         WHERE id = $2 AND status = 'sending' AND attempt_count = $3",
+    )
+    .bind(error_kind)
+    .bind(outbox_id)
+    .bind(attempt)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+async fn dead_letter_post(
+    state: &AppState,
+    outbox_id: &str,
+    attempt: i32,
+    error_kind: &'static str,
+) -> Result<(), sqlx::Error> {
+    if let Err(error) = record_delivery(
+        state,
+        outbox_id,
+        attempt,
+        false,
+        None,
+        None,
+        Some(error_kind),
+    )
+    .await
+    {
+        warn!(
+            outbox_id,
+            error_kind, error = %error,
+            "failed to record notification decryption failure"
+        );
+    }
+    sqlx::query(
+        "UPDATE notification_outbox SET status = 'dead', lease_until = NULL,
+         last_error_kind = $1
+         WHERE id = $2 AND status = 'sending' AND attempt_count = $3",
+    )
+    .bind(error_kind)
+    .bind(outbox_id)
+    .bind(attempt)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 async fn record_system_alert_delivery(
@@ -676,8 +825,81 @@ fn notification_title(
 
 #[cfg(test)]
 mod tests {
-    use super::{bot_error_detail, captcha_session_id, notification_title, post_url};
-    use crate::bot::adapter::BotSendError;
+    use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use secrecy::SecretString;
+    use sqlx::any::AnyPoolOptions;
+    use tokio::sync::RwLock;
+
+    use super::{
+        CREDENTIAL_DECRYPTION_FAILED, TARGET_DECRYPTION_FAILED, bot_error_detail,
+        captcha_session_id, fail_claimed_bot, notification_title, post_url, process_one,
+    };
+    use crate::{
+        app::AppState,
+        bot::adapter::BotSendError,
+        config::{
+            AppConfig, AssetsConfig, DatabaseBackend, ObservabilityConfig, PersistenceConfig,
+            SchedulerConfig,
+        },
+        crypto::CredentialCipher,
+        nga::NgaClient,
+    };
+
+    async fn test_state() -> AppState {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("test database must connect");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys must enable");
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&pool)
+            .await
+            .expect("migrations must run");
+        AppState {
+            pool,
+            config: Arc::new(AppConfig {
+                bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                database_backend: DatabaseBackend::Sqlite,
+                database_url: SecretString::from("postgres://unused"),
+                sqlite_path: ":memory:".into(),
+                database_max_connections: 1,
+                api_token: SecretString::from("test-token"),
+                admin_password: SecretString::from("test-password"),
+                credential_encryption_key: SecretString::from(STANDARD.encode([7_u8; 32])),
+                nga_user_agent: "test-agent".to_owned(),
+                run_migrations: false,
+                persistence: PersistenceConfig {
+                    store_raw_payload: false,
+                },
+                assets: AssetsConfig {
+                    download_enabled: false,
+                    storage_path: "./data/test-assets".into(),
+                    max_download_bytes: 10 * 1024 * 1024,
+                },
+                scheduler: SchedulerConfig {
+                    default_interval_seconds: 60,
+                    timezone_offset: time::UtcOffset::UTC,
+                },
+                observability: ObservabilityConfig {
+                    log_filter: "info".to_owned(),
+                    log_json: false,
+                },
+            }),
+            credential_cipher: Arc::new(
+                CredentialCipher::from_base64(&STANDARD.encode([7_u8; 32])).unwrap(),
+            ),
+            nga_client: NgaClient::new("test-agent".to_owned()).unwrap(),
+            admin_sessions: Arc::new(RwLock::new(HashSet::new())),
+            platform_updates: tokio::sync::watch::channel(()).0,
+        }
+    }
 
     #[test]
     fn reply_url_opens_post_detail_by_tid_and_pid() {
@@ -727,5 +949,199 @@ mod tests {
         let sanitized = bot_error_detail(&BotSendError::ImageUpload(detail));
         assert!(!sanitized.contains('\n'));
         assert_eq!(sanitized.chars().count(), 512);
+    }
+
+    #[tokio::test]
+    async fn stale_bot_attempt_cannot_overwrite_a_newer_claim() {
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO platform_integrations
+             (id, platform, label, credentials_encrypted)
+             VALUES ('integration', 'feishu', 'test', X'00')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bot_outbox
+             (id, dedupe_key, integration_id, conversation_id, message_kind,
+              payload_encrypted, status, attempt_count)
+             VALUES ('outbox', 'dedupe', 'integration', 'chat', 'text', X'00', 'sending', 2)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        fail_claimed_bot(&state, "outbox", 1, "stale", false)
+            .await
+            .unwrap();
+        let stale_result: (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT status, attempt_count, last_error_kind FROM bot_outbox WHERE id = 'outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(stale_result, ("sending".into(), 2, None));
+
+        fail_claimed_bot(&state, "outbox", 2, "current", false)
+            .await
+            .unwrap();
+        let current_result: (String, Option<String>) =
+            sqlx::query_as("SELECT status, last_error_kind FROM bot_outbox WHERE id = 'outbox'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(current_result, ("dead".into(), Some("current".into())));
+    }
+
+    #[tokio::test]
+    async fn corrupt_notification_secrets_are_dead_lettered_and_do_not_stop_the_queue() {
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO platform_integrations
+             (id, platform, label, credentials_encrypted)
+             VALUES ('integration', 'bark', 'test', X'00')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("integration must insert");
+        sqlx::query(
+            "INSERT INTO notification_channels
+             (id, integration_id, label, target_encrypted)
+             VALUES ('channel', 'integration', 'test', X'00')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("channel must insert");
+        sqlx::query(
+            "INSERT INTO system_alerts (id, alert_key, title, body, url)
+             VALUES ('alert', 'test-alert', 'title', 'body', '/admin')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("alert must insert");
+        sqlx::query(
+            "INSERT INTO system_alert_outbox (id, alert_id, channel_id)
+             VALUES ('alert-outbox', 'alert', 'channel')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("alert outbox must insert");
+        sqlx::query(
+            "INSERT INTO threads
+             (tid, fid, title, forum_name, author_uid, author_name)
+             VALUES (1001, 3001, 'thread', 'forum', 2001, 'author')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("thread must insert");
+        sqlx::query(
+            "INSERT INTO posts
+             (id, tid, pid, floor_number, post_kind, author_uid, author_name,
+              content_raw, page_number, raw_payload)
+             VALUES ('post', 1001, 4001, 1, 'reply', 2002, 'reply author', 'body', 1, '')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("post must insert");
+        sqlx::query(
+            "INSERT INTO post_events (id, post_id, event_type)
+             VALUES ('event', 'post', 'new_reply')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("event must insert");
+        sqlx::query(
+            "INSERT INTO notification_outbox (id, post_event_id, channel_id)
+             VALUES ('post-outbox', 'event', 'channel')",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("post outbox must insert");
+
+        assert!(
+            process_one(&state)
+                .await
+                .expect("bad integration ciphertext must be row-local")
+        );
+        let alert_status: String =
+            sqlx::query_scalar("SELECT status FROM system_alert_outbox WHERE id = 'alert-outbox'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("alert outbox must exist");
+        let alert_error: String = sqlx::query_scalar(
+            "SELECT last_error_kind FROM system_alert_outbox WHERE id = 'alert-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("alert failure kind must exist");
+        let alert_lease: Option<String> = sqlx::query_scalar(
+            "SELECT CAST(lease_until AS TEXT) FROM system_alert_outbox WHERE id = 'alert-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("alert lease must query");
+        assert_eq!(alert_status, "dead");
+        assert_eq!(alert_error, CREDENTIAL_DECRYPTION_FAILED);
+        assert!(alert_lease.is_none());
+        let alert_delivery_error: String = sqlx::query_scalar(
+            "SELECT error_kind FROM system_alert_deliveries WHERE outbox_id = 'alert-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("alert failure delivery must exist");
+        assert_eq!(alert_delivery_error, CREDENTIAL_DECRYPTION_FAILED);
+
+        let valid_credentials = state
+            .credential_cipher
+            .encrypt("{}")
+            .expect("test credentials must encrypt");
+        sqlx::query(
+            "UPDATE platform_integrations SET credentials_encrypted = $1
+             WHERE id = 'integration'",
+        )
+        .bind(valid_credentials)
+        .execute(&state.pool)
+        .await
+        .expect("credentials must become decryptable");
+
+        assert!(
+            process_one(&state)
+                .await
+                .expect("bad target ciphertext must be row-local")
+        );
+        let post_status: String =
+            sqlx::query_scalar("SELECT status FROM notification_outbox WHERE id = 'post-outbox'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("post outbox must exist");
+        let post_error: String = sqlx::query_scalar(
+            "SELECT last_error_kind FROM notification_outbox WHERE id = 'post-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("post failure kind must exist");
+        let post_lease: Option<String> = sqlx::query_scalar(
+            "SELECT CAST(lease_until AS TEXT) FROM notification_outbox WHERE id = 'post-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("post lease must query");
+        assert_eq!(post_status, "dead");
+        assert_eq!(post_error, TARGET_DECRYPTION_FAILED);
+        assert!(post_lease.is_none());
+        let post_delivery_error: String = sqlx::query_scalar(
+            "SELECT error_kind FROM notification_deliveries WHERE outbox_id = 'post-outbox'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("post failure delivery must exist");
+        assert_eq!(post_delivery_error, TARGET_DECRYPTION_FAILED);
+
+        assert!(
+            !process_one(&state)
+                .await
+                .expect("queue must continue and become empty")
+        );
     }
 }
