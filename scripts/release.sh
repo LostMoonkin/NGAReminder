@@ -72,13 +72,31 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Release requires a clean worktree; commit or stash existing changes first." >&2
+push_release() {
+  local branch
+  branch="$(git branch --show-current)"
+  if [[ -n "$branch" ]]; then
+    git push origin "$branch" "$tag"
+  else
+    git push origin "$tag"
+  fi
+}
+
+if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+  existing_commit="$(git rev-list -n 1 "$tag")"
+  head_commit="$(git rev-parse HEAD)"
+  if [[ "$push" == true && "$existing_commit" == "$head_commit" ]]; then
+    push_release
+    echo "Tag ${tag} already existed locally and was pushed."
+    exit 0
+  fi
+  echo "Tag already exists: ${tag}" >&2
+  echo "It points to ${existing_commit}; refusing to overwrite it." >&2
   exit 1
 fi
 
-if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
-  echo "Tag already exists: ${tag}" >&2
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Release requires a clean worktree; commit or stash existing changes first." >&2
   exit 1
 fi
 
@@ -157,12 +175,7 @@ fi
 git tag --annotate "$tag" --message "Release ${tag}"
 
 if [[ "$push" == true ]]; then
-  branch="$(git branch --show-current)"
-  if [[ -n "$branch" ]]; then
-    git push origin "$branch" "$tag"
-  else
-    git push origin "$tag"
-  fi
+  push_release
 fi
 
 echo "Created ${tag}"
