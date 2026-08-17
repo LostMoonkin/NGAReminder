@@ -107,7 +107,7 @@
             <div id="thread-history-mode" class="field"><label for="watch-history-mode">初始同步</label><select id="watch-history-mode"><option value="full">全量历史</option><option value="incremental">仅新增</option></select></div>
             <div id="thread-parallel" class="field"><label><input id="watch-parallel-enabled" type="checkbox" style="width:auto"> 并发抓取历史页面</label><span class="hint">最大 in-flight 请求数，不绕过账号限速</span></div>
             <div id="thread-parallelism" class="field"><label for="watch-parallelism">并发抓取数</label><input id="watch-parallelism" type="number" min="1" max="16" value="2"></div>
-            <div id="thread-authors" class="field full"><label for="watch-authors">通知作者 UID 白名单</label><input id="watch-authors" placeholder="例如 150058, 123456；留空表示所有作者"><span class="hint">只影响推送，不影响 TID 内容落库</span></div>
+            <div id="thread-authors" class="field full"><label for="watch-authors">事件作者 UID 白名单</label><input id="watch-authors" placeholder="例如 150058, 123456；留空表示所有作者"><span class="hint">只允许这些作者的新内容进入事件收件箱和通知推送；不影响 TID 内容落库</span></div>
             <div class="field full"><label>通知渠道（至少选择一个）</label><div id="watch-channels" class="check-grid"><span class="hint">请先在通知中心添加渠道</span></div></div>
             <div id="uid-watch-hint" class="notice full hidden">UID 首次运行只建立当前水位，不回溯历史；监控启动后的新增内容会落库，用于通知重试和审计。</div>
             <div class="field full"><label><input id="watch-schedule-enabled" type="checkbox" style="width:auto"> 使用动态时间段间隔</label></div>

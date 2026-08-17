@@ -13,10 +13,64 @@ pub struct MatchStats {
     pub outbox_enqueued: i32,
 }
 
+pub(crate) async fn watch_matches_post(
+    tx: &mut Transaction<'_, Any>,
+    post: &ParsedPost,
+    watch_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let watch = sqlx::query(
+        "SELECT target_type, target_id FROM watch_targets
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(watch_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(watch) = watch else {
+        return Ok(false);
+    };
+    let target_type: String = watch.get("target_type");
+    let target_id: i64 = watch.get("target_id");
+    if target_type == "user" {
+        return Ok(target_id == post.author_uid);
+    }
+    if target_type != "thread" || target_id != post.tid {
+        return Ok(false);
+    }
+
+    let author_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM watch_notification_authors WHERE watch_id = $1")
+            .bind(watch_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if author_count == 0 {
+        return Ok(true);
+    }
+    let author_matches: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM watch_notification_authors
+         WHERE watch_id = $1 AND author_uid = $2",
+    )
+    .bind(watch_id)
+    .bind(post.author_uid)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(author_matches == 1)
+}
+
 pub async fn enqueue_matches(
     tx: &mut Transaction<'_, Any>,
     event_id: &str,
     post: &ParsedPost,
+    watch_id: &str,
+) -> Result<MatchStats, sqlx::Error> {
+    if !watch_matches_post(tx, post, watch_id).await? {
+        return Ok(MatchStats::default());
+    }
+    enqueue_confirmed_match(tx, event_id, watch_id).await
+}
+
+pub(crate) async fn enqueue_confirmed_match(
+    tx: &mut Transaction<'_, Any>,
+    event_id: &str,
     watch_id: &str,
 ) -> Result<MatchStats, sqlx::Error> {
     let matched = sqlx::query(
@@ -27,50 +81,6 @@ pub async fn enqueue_matches(
     .bind(watch_id)
     .execute(&mut **tx)
     .await?;
-
-    let watch = sqlx::query(
-        "SELECT target_type, target_id FROM watch_targets
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(watch_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(watch) = watch else {
-        return Ok(MatchStats {
-            matches_created: i32::from(matched.rows_affected() == 1),
-            outbox_enqueued: 0,
-        });
-    };
-    let target_type: String = watch.get("target_type");
-    let target_id: i64 = watch.get("target_id");
-    let content_matches = if target_type == "user" {
-        target_id == post.author_uid
-    } else if target_type == "thread" && target_id == post.tid {
-        let author_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM watch_notification_authors WHERE watch_id = $1",
-        )
-        .bind(watch_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        author_count == 0
-            || sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM watch_notification_authors
-                 WHERE watch_id = $1 AND author_uid = $2",
-            )
-            .bind(watch_id)
-            .bind(post.author_uid)
-            .fetch_one(&mut **tx)
-            .await?
-                == 1
-    } else {
-        false
-    };
-    if !content_matches {
-        return Ok(MatchStats {
-            matches_created: i32::from(matched.rows_affected() == 1),
-            outbox_enqueued: 0,
-        });
-    }
 
     let channels = sqlx::query(
         "SELECT wc.channel_id FROM watch_notification_channels wc
@@ -106,7 +116,7 @@ mod tests {
     use sqlx::any::AnyPoolOptions;
 
     use super::enqueue_matches;
-    use crate::nga::thread_parser::parse_thread_page;
+    use crate::{collector::thread::insert_event, nga::thread_parser::parse_thread_page};
 
     #[tokio::test]
     async fn thread_and_user_watch_share_channel_outbox() {
@@ -214,6 +224,28 @@ mod tests {
             .expect("user match must succeed");
         tx.commit().await.expect("transaction must commit");
 
+        sqlx::query(
+            "INSERT INTO posts
+             (id, tid, pid, floor_number, post_kind, author_uid, author_name,
+              content_raw, page_number, raw_payload)
+             VALUES ('filtered-post', 1001, 4002, 2, 'reply', 2002,
+                     'reply author', 'filtered body', 1, '')",
+        )
+        .execute(&pool)
+        .await
+        .expect("filtered post must insert");
+        let mut filtered_post = post.clone();
+        filtered_post.pid = Some(4002);
+        filtered_post.floor_number = 2;
+        let mut tx = pool.begin().await.expect("transaction must begin");
+        let filtered = insert_event(&mut tx, "filtered-post", &filtered_post, "watch-thread")
+            .await
+            .expect("filtered event insert must succeed");
+        tx.commit().await.expect("transaction must commit");
+        assert!(!filtered.event_created);
+        assert_eq!(filtered.matches_created, 0);
+        assert_eq!(filtered.outbox_enqueued, 0);
+
         let matches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM post_event_watch_matches")
             .fetch_one(&pool)
             .await
@@ -222,7 +254,12 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("outbox must count");
-        assert_eq!(matches, 2);
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM post_events")
+            .fetch_one(&pool)
+            .await
+            .expect("events must count");
+        assert_eq!(events, 1);
+        assert_eq!(matches, 1);
         assert_eq!(outbox, 1);
     }
 }

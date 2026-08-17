@@ -794,6 +794,10 @@ pub(crate) async fn insert_event(
     post: &ParsedPost,
     watch_id: &str,
 ) -> Result<EventInsertResult, sqlx::Error> {
+    if !notification::watch_matches_post(tx, post, watch_id).await? {
+        return Ok(EventInsertResult::default());
+    }
+
     let event_id = Uuid::new_v4().to_string();
     let result = sqlx::query(
         "INSERT INTO post_events
@@ -817,7 +821,7 @@ pub(crate) async fn insert_event(
             .await?
             .get("id")
     };
-    let matched = notification::enqueue_matches(tx, &event_id, post, watch_id).await?;
+    let matched = notification::enqueue_confirmed_match(tx, &event_id, watch_id).await?;
     Ok(EventInsertResult {
         event_created: created,
         matches_created: matched.matches_created,
