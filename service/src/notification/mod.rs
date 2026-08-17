@@ -56,18 +56,6 @@ pub(crate) async fn watch_matches_post(
     Ok(author_matches == 1)
 }
 
-pub async fn enqueue_matches(
-    tx: &mut Transaction<'_, Any>,
-    event_id: &str,
-    post: &ParsedPost,
-    watch_id: &str,
-) -> Result<MatchStats, sqlx::Error> {
-    if !watch_matches_post(tx, post, watch_id).await? {
-        return Ok(MatchStats::default());
-    }
-    enqueue_confirmed_match(tx, event_id, watch_id).await
-}
-
 pub(crate) async fn enqueue_confirmed_match(
     tx: &mut Transaction<'_, Any>,
     event_id: &str,
@@ -115,7 +103,6 @@ pub(crate) async fn enqueue_confirmed_match(
 mod tests {
     use sqlx::any::AnyPoolOptions;
 
-    use super::enqueue_matches;
     use crate::{collector::thread::insert_event, nga::thread_parser::parse_thread_page};
 
     #[tokio::test]
@@ -215,11 +202,11 @@ mod tests {
         let page = parse_thread_page(&value, 1001).expect("page must parse");
         let post = &page.posts[1];
         let mut tx = pool.begin().await.expect("transaction must begin");
-        let thread_match = enqueue_matches(&mut tx, "event", post, "watch-thread")
+        let thread_match = insert_event(&mut tx, "post", post, "watch-thread")
             .await
             .expect("thread match must succeed");
         assert_eq!(thread_match.outbox_enqueued, 0);
-        enqueue_matches(&mut tx, "event", post, "watch-user")
+        insert_event(&mut tx, "post", post, "watch-user")
             .await
             .expect("user match must succeed");
         tx.commit().await.expect("transaction must commit");
