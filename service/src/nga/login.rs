@@ -50,8 +50,8 @@ pub enum NgaLoginError {
     UnsupportedPhoneVerification,
     #[error("NGA login is busy")]
     Busy,
-    #[error("NGA login HTTP error")]
-    Http,
+    #[error("NGA login returned HTTP {0}")]
+    Http(reqwest::StatusCode),
     #[error("NGA login protocol changed")]
     ProtocolChanged,
     #[error("candidate cookie missing ({response_shape})")]
@@ -78,7 +78,7 @@ impl NgaLoginError {
             Self::UnsupportedTencentCaptcha => "unsupported_tencent_captcha",
             Self::UnsupportedPhoneVerification => "unsupported_phone_verification",
             Self::Busy => "nga_login_busy",
-            Self::Http => "nga_login_http_error",
+            Self::Http(_) => "nga_login_http_error",
             Self::ProtocolChanged => "nga_login_protocol_changed",
             Self::CandidateCookieMissing { .. } => "candidate_cookie_missing",
             Self::CandidateCookieInvalid => "candidate_cookie_invalid",
@@ -176,6 +176,9 @@ impl NgaWebLoginV1 {
             .await
             .map_err(NgaLoginError::Request)?;
         self.capture_cookies(entry.headers());
+        if !entry.status().is_success() {
+            return Err(NgaLoginError::Http(entry.status()));
+        }
         drop(entry);
 
         // 2. Fetch the account page and extract the RSA public key.
@@ -188,7 +191,7 @@ impl NgaWebLoginV1 {
             .await
             .map_err(NgaLoginError::Request)?;
         if !page.status().is_success() {
-            return Err(NgaLoginError::Http);
+            return Err(NgaLoginError::Http(page.status()));
         }
         self.capture_cookies(page.headers());
         let page_bytes = page.bytes().await.map_err(NgaLoginError::Request)?;
@@ -215,7 +218,7 @@ impl NgaWebLoginV1 {
             .await
             .map_err(NgaLoginError::Request)?;
         if !captcha.status().is_success() {
-            return Err(NgaLoginError::Http);
+            return Err(NgaLoginError::Http(captcha.status()));
         }
         self.capture_cookies(captcha.headers());
         let content_type = captcha
@@ -294,7 +297,7 @@ impl NgaWebLoginV1 {
             .await
             .map_err(NgaLoginError::Request)?;
         if !response.status().is_success() {
-            return Err(NgaLoginError::Http);
+            return Err(NgaLoginError::Http(response.status()));
         }
         self.capture_cookies(response.headers());
         let body = response.bytes().await.map_err(NgaLoginError::Request)?;

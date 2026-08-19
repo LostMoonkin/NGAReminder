@@ -10,6 +10,7 @@
 - Made Cookie-renewal completion a conditional transactional claim; cancelled, expired, and wrong-account sessions cannot persist candidate Cookies.
 - Dead-lettered corrupt notification ciphertext per row with failed-delivery audits, and made bot, system-alert, and post queues fair to each other.
 - Fixed authentication-pause recovery, crash recovery for asset downloads, and worker queue starvation.
+- Stopped NGA crawls and Cookie validation from indefinitely reusing one upstream connection, preventing valid Cookies from being rejected after long runtimes; login HTTP errors now include the response status.
 - Added CI format, full Rust test, Clippy, extension-manifest, and JavaScript syntax gates, with isolated service/Standalone release tags.
 
 ### Streaming exports, asset maintenance, and content management

@@ -85,6 +85,12 @@ impl NgaClient {
     fn with_base_url(user_agent: String, base_url: &str) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(15))
+            // NGA/CDN can leave a continuously reused upstream connection in
+            // a state where valid credentials are rejected until the process
+            // is restarted. Do not retain idle connections here: crawls are
+            // already rate-limited, and a fresh connection also refreshes DNS
+            // and upstream routing before an auth failure is considered final.
+            .pool_max_idle_per_host(0)
             .build()?;
         Ok(Self {
             client,
@@ -557,6 +563,11 @@ fn classify_envelope(envelope: &NgaEnvelope) -> Result<(), AuthCheckError> {
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::timeout,
+    };
 
     use super::{
         AuthCheckError, NgaEnvelope, NgaRequestError, USER_BUSY_ATTEMPTS, classify_data_envelope,
@@ -584,6 +595,67 @@ mod tests {
             classify_envelope(&login),
             Err(AuthCheckError::Unauthorized)
         ));
+    }
+
+    #[tokio::test]
+    async fn credential_checks_do_not_reuse_a_persistent_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener must bind");
+        let address = listener.local_addr().expect("listener address must exist");
+        let server = tokio::spawn(async move {
+            let mut open_connections = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("request must connect");
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 1024];
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .expect("request must be readable");
+                    assert!(read > 0, "request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = br#"{"code":0,"msg":""}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response headers must be writable");
+                stream
+                    .write_all(body)
+                    .await
+                    .expect("response body must be writable");
+                open_connections.push(stream);
+            }
+            open_connections.len()
+        });
+        let client = super::NgaClient::with_base_url(
+            "NGA-Reminder-Test".to_owned(),
+            &format!("http://{address}"),
+        )
+        .expect("test client must build");
+
+        timeout(std::time::Duration::from_secs(3), async {
+            client
+                .check_credentials("123", "cookie")
+                .await
+                .expect("first credential check must succeed");
+            client
+                .check_credentials("123", "cookie")
+                .await
+                .expect("second credential check must use a fresh connection");
+        })
+        .await
+        .expect("a pooled second request would remain on the first connection");
+        assert_eq!(server.await.expect("test server must finish"), 2);
     }
 
     #[test]
