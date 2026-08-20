@@ -10,6 +10,7 @@ mod export;
 pub(crate) mod markup;
 mod metrics;
 mod nga;
+mod no_fetch;
 mod notification;
 mod observability;
 mod platform;

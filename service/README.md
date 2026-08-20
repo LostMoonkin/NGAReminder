@@ -187,6 +187,23 @@ curl -X POST http://127.0.0.1:8080/api/v1/watches/threads \
 
 临近规则边界时，调度器会保证不晚于边界执行，因此较长的间隔不会跳过更快或更慢的规则切换。使用 `schedule: null` 的 `PATCH` 会清除计划并回到回退间隔。
 
+免拉取时段通过独立的 `no_fetch_periods` 配置，不改变 `schedule` 的拉取间隔语义。规则同样使用 `scheduler.timezone_offset`，支持 `weekdays`、`weekends` 和星期名称；开始时间包含、结束时间不包含，跨午夜规则归属于开始日，`00:00`～`24:00` 表示全天。每个目标最多配置 128 条规则，规则不得为空、不得使用相同的开始和结束时间，且整周必须至少保留一分钟可拉取时间。
+
+```json
+{
+  "no_fetch_periods": [
+    {
+      "days": ["weekdays"],
+      "start_time": "00:00",
+      "end_time": "08:00",
+      "description": "夜间"
+    }
+  ]
+}
+```
+
+免拉取期间只有自动运行会在访问 NGA 前记录一条 `status=skipped`、`error_kind=no_fetch_period` 的零计数运行，并将下次运行推到连续区间结束；游标和基线不会推进。手动 API `/run` 和机器人 `/watch run` 不受免拉取限制。`PATCH` 中字段缺失表示不修改，`null` 清空配置，非空数组完整替换，空数组会返回 `400 invalid_request`。读取 watch 时可使用 `no_fetch_active`、`no_fetch_until` 和 `scheduler_timezone_offset`，运行列表中的 `trigger_kind` 为 `unknown`、`scheduled` 或 `manual`。
+
 创建用户监控：
 
 ```bash

@@ -14,6 +14,8 @@ use crate::{
         thread::{self, ThreadCollectorError},
         user::{self, UserCollectorError},
     },
+    metrics,
+    no_fetch::{self, NoFetchPeriods},
     repository::watch::{self, CreateWatchError, ResetWatchError, WatchTarget},
     schedule::{self, Schedule},
 };
@@ -42,6 +44,8 @@ pub struct CreateThreadWatchRequest {
     #[serde(default)]
     schedule: Option<Schedule>,
     #[serde(default)]
+    no_fetch_periods: Option<NoFetchPeriods>,
+    #[serde(default)]
     history: Option<HistoryRequest>,
     notification: NotificationRequest,
 }
@@ -53,6 +57,8 @@ pub struct CreateUserWatchRequest {
     interval_seconds: Option<i32>,
     #[serde(default)]
     schedule: Option<Schedule>,
+    #[serde(default)]
+    no_fetch_periods: Option<NoFetchPeriods>,
     notification: NotificationRequest,
 }
 
@@ -81,6 +87,8 @@ pub struct UpdateWatchRequest {
     interval_seconds: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     schedule: PatchField<Schedule>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    no_fetch_periods: PatchField<NoFetchPeriods>,
     history: Option<HistoryRequest>,
     notification: Option<NotificationRequest>,
 }
@@ -101,6 +109,10 @@ pub struct WatchResponse {
     enabled: bool,
     interval_seconds: i32,
     schedule: Option<Schedule>,
+    no_fetch_periods: Option<NoFetchPeriods>,
+    no_fetch_active: bool,
+    no_fetch_until: Option<String>,
+    scheduler_timezone_offset: String,
     status: String,
     baseline_completed: bool,
     next_run_at: String,
@@ -134,6 +146,7 @@ pub struct RunView {
     status: String,
     baseline: bool,
     sync_mode: String,
+    trigger_kind: String,
     pages_requested: i32,
     posts_inserted: i32,
     events_created: i32,
@@ -161,7 +174,10 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 pub async fn list(State(state): State<AppState>) -> ApiResult<WatchListResponse> {
     let watches = watch::list(&state.pool).await.map_err(internal_error)?;
     Ok(Json(WatchListResponse {
-        items: watches.into_iter().map(WatchResponse::from).collect(),
+        items: watches
+            .into_iter()
+            .map(|watch| WatchResponse::from_target(watch, state.config.scheduler.timezone_offset))
+            .collect(),
     }))
 }
 
@@ -172,7 +188,7 @@ pub async fn get(
     watch::find(&state.pool, &id)
         .await
         .map_err(internal_error)?
-        .map(WatchResponse::from)
+        .map(|watch| WatchResponse::from_target(watch, state.config.scheduler.timezone_offset))
         .map(Json)
         .ok_or_else(not_found)
 }
@@ -192,29 +208,38 @@ pub async fn create_thread(
     if request.tid <= 0
         || !valid_interval(interval_seconds)
         || !valid_schedule(request.schedule.as_ref())
+        || !valid_no_fetch_periods(request.no_fetch_periods.as_ref())
         || !valid_history(&history)
         || !valid_notification(&request.notification, true)
     {
         return Err(bad_request());
     }
-    map_create(
-        watch::create_thread_watch_with_config(
-            &state.pool,
-            request.tid,
-            interval_seconds,
-            request.schedule.as_ref(),
-            &history.mode,
-            history.parallel_enabled,
-            history.parallelism,
-            request
-                .notification
-                .author_uids
-                .as_deref()
-                .unwrap_or_default(),
-            &request.notification.channel_ids,
-        )
-        .await,
+    let created = watch::create_thread_watch_with_no_fetch_config(
+        &state.pool,
+        request.tid,
+        interval_seconds,
+        request.schedule.as_ref(),
+        request.no_fetch_periods.as_ref(),
+        &history.mode,
+        history.parallel_enabled,
+        history.parallelism,
+        request
+            .notification
+            .author_uids
+            .as_deref()
+            .unwrap_or_default(),
+        &request.notification.channel_ids,
     )
+    .await
+    .map_err(map_create_error)?;
+    let created = refresh_after_configuration_change(&state, created.id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(WatchResponse::from_target(
+            created,
+            state.config.scheduler.timezone_offset,
+        )),
+    ))
 }
 
 pub async fn create_user(
@@ -227,20 +252,29 @@ pub async fn create_user(
     if request.uid <= 0
         || !valid_interval(interval_seconds)
         || !valid_schedule(request.schedule.as_ref())
+        || !valid_no_fetch_periods(request.no_fetch_periods.as_ref())
         || !valid_notification(&request.notification, false)
     {
         return Err(bad_request());
     }
-    map_create(
-        watch::create_user_watch_with_config(
-            &state.pool,
-            request.uid,
-            interval_seconds,
-            request.schedule.as_ref(),
-            &request.notification.channel_ids,
-        )
-        .await,
+    let created = watch::create_user_watch_with_no_fetch_config(
+        &state.pool,
+        request.uid,
+        interval_seconds,
+        request.schedule.as_ref(),
+        request.no_fetch_periods.as_ref(),
+        &request.notification.channel_ids,
     )
+    .await
+    .map_err(map_create_error)?;
+    let created = refresh_after_configuration_change(&state, created.id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(WatchResponse::from_target(
+            created,
+            state.config.scheduler.timezone_offset,
+        )),
+    ))
 }
 
 pub async fn update(
@@ -249,9 +283,11 @@ pub async fn update(
     Json(request): Json<UpdateWatchRequest>,
 ) -> ApiResult<WatchResponse> {
     let has_schedule = !matches!(request.schedule, PatchField::Missing);
+    let has_no_fetch_periods = !matches!(request.no_fetch_periods, PatchField::Missing);
     if request.enabled.is_none()
         && request.interval_seconds.is_none()
         && !has_schedule
+        && !has_no_fetch_periods
         && request.history.is_none()
         && request.notification.is_none()
     {
@@ -261,6 +297,7 @@ pub async fn update(
         .interval_seconds
         .is_some_and(|interval| !valid_interval(interval))
         || matches!(&request.schedule, PatchField::Value(value) if !valid_schedule(Some(value)))
+        || matches!(&request.no_fetch_periods, PatchField::Value(value) if !valid_no_fetch_periods(Some(value)))
         || request
             .history
             .as_ref()
@@ -289,6 +326,12 @@ pub async fn update(
         PatchField::Null => Some(None),
         PatchField::Value(value) => Some(Some(value)),
     };
+    let no_fetch_periods = match &request.no_fetch_periods {
+        PatchField::Missing => None,
+        PatchField::Null => Some(None),
+        PatchField::Value(value) => Some(Some(value)),
+    };
+    let should_refresh_no_fetch = has_no_fetch_periods || request.enabled == Some(true);
     let history_mode = request.history.as_ref().map(|value| value.mode.as_str());
     let history_parallel_enabled = request.history.as_ref().map(|value| value.parallel_enabled);
     let history_parallelism = request.history.as_ref().map(|value| value.parallelism);
@@ -302,12 +345,13 @@ pub async fn update(
         .as_ref()
         .map(|value| value.channel_ids.as_slice());
 
-    watch::update_with_config(
+    let updated = watch::update_with_no_fetch_config(
         &state.pool,
         &id,
         request.enabled,
         request.interval_seconds,
         schedule,
+        no_fetch_periods,
         history_mode,
         history_parallel_enabled,
         history_parallelism,
@@ -316,9 +360,16 @@ pub async fn update(
     )
     .await
     .map_err(map_create_error)?
-    .map(WatchResponse::from)
-    .map(Json)
-    .ok_or_else(not_found)
+    .ok_or_else(not_found)?;
+    let updated = if should_refresh_no_fetch {
+        refresh_after_configuration_change(&state, updated.id).await?
+    } else {
+        updated
+    };
+    Ok(Json(WatchResponse::from_target(
+        updated,
+        state.config.scheduler.timezone_offset,
+    )))
 }
 
 pub async fn reset(
@@ -360,7 +411,13 @@ pub async fn reset(
     )
     .await
     {
-        Ok(Some(value)) => Ok(Json(value.into())),
+        Ok(Some(value)) => {
+            let value = refresh_after_configuration_change(&state, value.id).await?;
+            Ok(Json(WatchResponse::from_target(
+                value,
+                state.config.scheduler.timezone_offset,
+            )))
+        }
         Ok(None) => Err(not_found()),
         Err(ResetWatchError::Busy) => Err(conflict("watch_running")),
         Err(ResetWatchError::Database(error)) => Err(internal_error(error)),
@@ -392,6 +449,7 @@ pub async fn runs(
     let rows = sqlx::query(
         "SELECT id, status, baseline, sync_mode, pages_requested, posts_inserted,
          events_created, matches_created, outbox_enqueued, remote_vrows,
+         trigger_kind,
          error_kind, error_message, CAST(started_at AS TEXT) AS started_at,
          CAST(completed_at AS TEXT) AS completed_at
          FROM crawl_runs WHERE watch_id = $1 ORDER BY started_at DESC LIMIT 100",
@@ -408,6 +466,7 @@ pub async fn runs(
                 status: row.get("status"),
                 baseline: row.get::<i32, _>("baseline") == 1,
                 sync_mode: row.get("sync_mode"),
+                trigger_kind: row.get("trigger_kind"),
                 pages_requested: row.get("pages_requested"),
                 posts_inserted: row.get("posts_inserted"),
                 events_created: row.get("events_created"),
@@ -431,17 +490,54 @@ pub async fn run(
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
-    let claimed = watch::claim_by_id(&state.pool, state.config.database_backend, &id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| conflict("watch_already_running"))?;
+    let Some(claimed) =
+        watch::claim_by_id_with_trigger(&state.pool, state.config.database_backend, &id, "manual")
+            .await
+            .map_err(internal_error)?
+    else {
+        let error = watch::manual_run_conflict(&state.pool, &id)
+            .await
+            .map_err(internal_error)?;
+        return Err(match error {
+            "watch_not_found" => not_found(),
+            "watch_already_running" | "watch_run_already_requested" => conflict(error),
+            _ => conflict("watch_not_runnable"),
+        });
+    };
+
+    let run_context = match watch::prepare_crawl_run(
+        &state.pool,
+        state.config.database_backend,
+        &claimed,
+        state.config.scheduler.timezone_offset,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        watch::RunPreparation::Skipped(skip) => {
+            metrics::crawl_skipped_no_fetch();
+            return Ok(Json(serde_json::json!({
+                "crawl_run_id": skip.crawl_run_id,
+                "status": "skipped",
+                "baseline": skip.baseline,
+                "sync_mode": skip.sync_mode,
+                "pages_requested": 0,
+                "posts_inserted": 0,
+                "events_created": 0,
+                "matches_created": 0,
+                "outbox_enqueued": 0,
+                "no_fetch_until": no_fetch::format_rfc3339(skip.no_fetch_until),
+            })));
+        }
+        watch::RunPreparation::Collect(context) => context,
+    };
 
     match claimed.target_type.as_str() {
-        "thread" => thread::run(&state, claimed)
+        "thread" => thread::run_with_run_id(&state, claimed, run_context.crawl_run_id)
             .await
             .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
             .map_err(map_thread_error),
-        "user" => user::run(&state, claimed)
+        "user" => user::run_with_run_id(&state, claimed, run_context.crawl_run_id)
             .await
             .map(|summary| Json(serde_json::to_value(summary).expect("summary must serialize")))
             .map_err(map_user_error),
@@ -449,12 +545,32 @@ pub async fn run(
     }
 }
 
-fn map_create(
-    result: Result<WatchTarget, CreateWatchError>,
-) -> Result<(StatusCode, Json<WatchResponse>), (StatusCode, Json<ApiError>)> {
-    result
-        .map(|watch| (StatusCode::CREATED, Json(watch.into())))
-        .map_err(map_create_error)
+async fn refresh_after_configuration_change(
+    state: &AppState,
+    id: String,
+) -> Result<WatchTarget, (StatusCode, Json<ApiError>)> {
+    if let Some(skip) = watch::reevaluate_no_fetch_period(
+        &state.pool,
+        state.config.database_backend,
+        &id,
+        state.config.scheduler.timezone_offset,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        metrics::crawl_skipped_no_fetch();
+        tracing::info!(
+            crawl_run_id = %skip.crawl_run_id,
+            watch_id = %id,
+            trigger_kind = "scheduled",
+            no_fetch_until = %no_fetch::format_rfc3339(skip.no_fetch_until),
+            "automatic watch run skipped during a no-fetch period"
+        );
+    }
+    watch::find(&state.pool, &id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)
 }
 
 fn map_create_error(error: CreateWatchError) -> (StatusCode, Json<ApiError>) {
@@ -527,6 +643,10 @@ fn valid_schedule(value: Option<&Schedule>) -> bool {
     value.is_none_or(|items| schedule::validate_schedule(items).is_ok())
 }
 
+fn valid_no_fetch_periods(value: Option<&NoFetchPeriods>) -> bool {
+    value.is_none_or(|items| no_fetch::validate_no_fetch_periods(items).is_ok())
+}
+
 fn valid_history(value: &HistoryRequest) -> bool {
     matches!(value.mode.as_str(), "full" | "incremental")
         && (1..=16).contains(&value.parallelism)
@@ -589,8 +709,13 @@ fn internal_error(_: sqlx::Error) -> (StatusCode, Json<ApiError>) {
     )
 }
 
-impl From<WatchTarget> for WatchResponse {
-    fn from(value: WatchTarget) -> Self {
+impl WatchResponse {
+    fn from_target(value: WatchTarget, timezone_offset: time::UtcOffset) -> Self {
+        let no_fetch_window = no_fetch::current_window(
+            value.no_fetch_periods.as_ref(),
+            time::OffsetDateTime::now_utc(),
+            timezone_offset,
+        );
         Self {
             id: value.id,
             target_type: value.target_type,
@@ -603,6 +728,10 @@ impl From<WatchTarget> for WatchResponse {
             enabled: value.enabled,
             interval_seconds: value.interval_seconds,
             schedule: value.schedule,
+            no_fetch_periods: value.no_fetch_periods,
+            no_fetch_active: no_fetch_window.is_some(),
+            no_fetch_until: no_fetch_window.map(|window| no_fetch::format_rfc3339(window.until)),
+            scheduler_timezone_offset: format_timezone_offset(timezone_offset),
             status: value.status,
             baseline_completed: value.baseline_completed,
             next_run_at: value.next_run_at,
@@ -619,6 +748,13 @@ impl From<WatchTarget> for WatchResponse {
             },
         }
     }
+}
+
+fn format_timezone_offset(offset: time::UtcOffset) -> String {
+    let seconds = offset.whole_seconds();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let seconds = seconds.unsigned_abs();
+    format!("{sign}{:02}:{:02}", seconds / 3_600, (seconds % 3_600) / 60)
 }
 
 #[cfg(test)]
@@ -660,6 +796,27 @@ mod tests {
         .expect("thread request should deserialize");
         assert!(valid_notification(&request.notification, true));
         assert!(request.notification.author_uids.is_none());
+    }
+
+    #[test]
+    fn no_fetch_patch_has_three_state_replacement_semantics() {
+        let missing: UpdateWatchRequest =
+            serde_json::from_str(r#"{"interval_seconds":120}"#).expect("patch must parse");
+        assert!(matches!(missing.no_fetch_periods, PatchField::Missing));
+
+        let clear: UpdateWatchRequest =
+            serde_json::from_str(r#"{"no_fetch_periods":null}"#).expect("null patch must parse");
+        assert!(matches!(clear.no_fetch_periods, PatchField::Null));
+
+        let replacement: UpdateWatchRequest = serde_json::from_str(
+            r#"{"no_fetch_periods":[{"days":["weekdays"],"start_time":"00:00","end_time":"08:00"}]}"#,
+        )
+        .expect("replacement patch must parse");
+        let PatchField::Value(periods) = replacement.no_fetch_periods else {
+            panic!("replacement must carry a value");
+        };
+        assert!(valid_no_fetch_periods(Some(&periods)));
+        assert!(!valid_no_fetch_periods(Some(&Vec::new())));
     }
 
     #[test]

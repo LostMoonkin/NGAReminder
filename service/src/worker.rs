@@ -8,7 +8,7 @@ use crate::{
     app::AppState,
     assets,
     collector::{thread, user},
-    metrics, notification,
+    metrics, no_fetch, notification,
     repository::watch,
 };
 
@@ -79,13 +79,47 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                         warn!(watch_id = %watch_id, target_type, "unknown watch type");
                         continue;
                     }
+                    let run_context = match watch::prepare_crawl_run(
+                        &state.pool,
+                        state.config.database_backend,
+                        &watch_target,
+                        state.config.scheduler.timezone_offset,
+                    )
+                    .await {
+                        Ok(watch::RunPreparation::Skipped(skip)) => {
+                            metrics::crawl_skipped_no_fetch();
+                            info!(
+                                crawl_run_id = %skip.crawl_run_id,
+                                watch_id = %watch_id,
+                                trigger_kind = "scheduled",
+                                no_fetch_until = %no_fetch::format_rfc3339(skip.no_fetch_until),
+                                "automatic watch run skipped during a no-fetch period"
+                            );
+                            continue;
+                        }
+                        Ok(watch::RunPreparation::Collect(context)) => context,
+                        Err(sqlx::Error::RowNotFound) => {
+                            warn!(watch_id = %watch_id, "watch lease was lost before run preparation");
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let trigger_kind = run_context.trigger_kind.clone();
                     let crawl = async {
                         match target_type.as_str() {
-                            "thread" => thread::run(&state, watch_target)
+                            "thread" => thread::run_with_run_id(
+                                &state,
+                                watch_target,
+                                run_context.crawl_run_id,
+                            )
                                 .await
                                 .map(|_| ())
                                 .map_err(anyhow::Error::from),
-                            "user" => user::run(&state, watch_target)
+                            "user" => user::run_with_run_id(
+                                &state,
+                                watch_target,
+                                run_context.crawl_run_id,
+                            )
                                 .await
                                 .map(|_| ())
                                 .map_err(anyhow::Error::from),
@@ -97,7 +131,7 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                     let result = crawl.await;
                     if let Err(error) = result {
                         metrics::crawl_failed();
-                        warn!(watch_id = %watch_id, target_type, error = %error, "watch crawl failed");
+                        warn!(watch_id = %watch_id, target_type, trigger_kind = %trigger_kind, error = %error, "watch crawl failed");
                     } else {
                         metrics::crawl_succeeded();
                     }

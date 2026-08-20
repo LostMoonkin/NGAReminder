@@ -47,6 +47,7 @@ pub enum ThreadCollectorError {
     Parse(#[from] thread_parser::ThreadParseError),
 }
 
+#[allow(dead_code)]
 pub async fn run(
     state: &AppState,
     watch_target: WatchTarget,
@@ -79,6 +80,18 @@ pub async fn run(
     )
     .await?;
 
+    run_with_run_id(state, watch_target, run_id).await
+}
+
+pub async fn run_with_run_id(
+    state: &AppState,
+    watch_target: WatchTarget,
+    run_id: String,
+) -> Result<CrawlSummary, ThreadCollectorError> {
+    if watch_target.target_type != "thread" {
+        return Err(ThreadCollectorError::InvalidWatch);
+    }
+    let baseline = !watch_target.baseline_completed;
     match collect(state, &run_id, &watch_target, baseline).await {
         Ok(summary) => Ok(summary),
         Err(ThreadCollectorError::Nga(NgaRequestError::PendingReview)) => {
@@ -519,6 +532,7 @@ pub(crate) async fn load_credentials(
     Ok((uid.into(), request_cookie.into(), full_cookie_configured))
 }
 
+#[allow(dead_code)]
 async fn create_crawl_run(
     state: &AppState,
     run_id: &str,
@@ -546,6 +560,11 @@ async fn create_crawl_run(
         tx.rollback().await?;
         return Err(ThreadCollectorError::InvalidWatch);
     }
+    let trigger_kind: Option<String> =
+        sqlx::query_scalar("SELECT lease_trigger_kind FROM watch_targets WHERE id = $1")
+            .bind(watch_id)
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query(
         "UPDATE crawl_runs SET status = 'failed', error_kind = 'lease_expired',
          error_message = 'lease_expired', completed_at = CURRENT_TIMESTAMP
@@ -555,13 +574,14 @@ async fn create_crawl_run(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode)
-         VALUES ($1, $2, 'running', $3, $4)",
+        "INSERT INTO crawl_runs (id, watch_id, status, baseline, sync_mode, trigger_kind)
+         VALUES ($1, $2, 'running', $3, $4, $5)",
     )
     .bind(run_id)
     .bind(watch_id)
     .bind(i32::from(baseline))
     .bind(sync_mode)
+    .bind(watch::valid_trigger_kind(trigger_kind.as_deref()).unwrap_or("unknown"))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -612,6 +632,7 @@ async fn finish_skipped(
     watch_target: &WatchTarget,
     timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
+    let watch_target = watch::refresh_run_scheduling(tx, watch_target).await?;
     let next_run = match backend {
         DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($2 * INTERVAL '1 second')",
         DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $2 || ' seconds')",
@@ -622,9 +643,13 @@ async fn finish_skipped(
         OffsetDateTime::now_utc(),
         timezone_offset,
     );
+    let delay =
+        watch::adjust_next_delay_for_manual(tx, backend, &watch_target, timezone_offset, delay)
+            .await?;
     let query = format!(
         "UPDATE watch_targets SET status = 'active',
          next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
+         lease_trigger_kind = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = 'nga_pending_review',
          last_error_message = 'nga_pending_review', updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND lease_token = $3 AND deleted_at IS NULL"
@@ -844,6 +869,7 @@ async fn update_cursor_and_finish(
     outbox_enqueued: i32,
     timezone_offset: time::UtcOffset,
 ) -> Result<(), sqlx::Error> {
+    let watch_target = watch::refresh_run_scheduling(tx, watch_target).await?;
     sqlx::query(
         "UPDATE watch_cursors SET last_floor = $1, remote_vrows = $2,
          remote_total_pages = $3, updated_at = CURRENT_TIMESTAMP
@@ -866,9 +892,13 @@ async fn update_cursor_and_finish(
         OffsetDateTime::now_utc(),
         timezone_offset,
     );
+    let delay =
+        watch::adjust_next_delay_for_manual(tx, backend, &watch_target, timezone_offset, delay)
+            .await?;
     let query = format!(
         "UPDATE watch_targets SET status = 'active', baseline_completed = 1,
          next_run_at = {next_run}, lease_until = NULL, lease_token = NULL,
+         lease_trigger_kind = NULL,
          last_completed_at = CURRENT_TIMESTAMP, last_error_kind = NULL,
          last_error_message = NULL, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND lease_token = $3 AND deleted_at IS NULL"
@@ -934,16 +964,34 @@ async fn record_failure(
         DatabaseBackend::Postgres => "CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second')",
         DatabaseBackend::Sqlite => "datetime(CURRENT_TIMESTAMP, '+' || $5 || ' seconds')",
     };
-    let delay = schedule::next_delay_seconds(
-        watch_target.schedule.as_ref(),
-        watch_target.interval_seconds,
+    let scheduling_target = watch::find(&state.pool, &watch_target.id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| watch_target.clone());
+    let base_delay = schedule::next_delay_seconds(
+        scheduling_target.schedule.as_ref(),
+        scheduling_target.interval_seconds,
         OffsetDateTime::now_utc(),
         state.config.scheduler.timezone_offset,
     );
+    let delay = if status == "error" {
+        watch::adjust_next_delay_for_manual_pool(
+            &state.pool,
+            state.config.database_backend,
+            &scheduling_target,
+            state.config.scheduler.timezone_offset,
+            base_delay,
+        )
+        .await
+        .unwrap_or(base_delay)
+    } else {
+        base_delay
+    };
     let watch_query = format!(
         "UPDATE watch_targets SET status = $1,
          enabled = CASE WHEN $1 IN ('paused', 'not_found') THEN 0 ELSE enabled END,
-         lease_until = NULL, lease_token = NULL,
+         lease_until = NULL, lease_token = NULL, lease_trigger_kind = NULL,
          next_run_at = {next_run}, last_error_kind = $2, last_error_message = $3,
          updated_at = CURRENT_TIMESTAMP
          WHERE id = $4 AND lease_token = $6 AND deleted_at IS NULL"

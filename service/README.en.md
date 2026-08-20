@@ -115,6 +115,23 @@ GET    /api/v1/watches/{id}/runs
 
 `interval_seconds` defaults to the scheduler configuration and must be between 30 and 86400. A manual run returns `409` while another worker holds the lease. Code 14 disables a missing-thread watch; Thread `code=51` skips the current crawl without advancing the cursor. Rejected credentials pause the account and affected watches until corrected and explicitly enabled.
 
+No-fetch periods are configured independently through `no_fetch_periods`; they do not change the meaning of `schedule`, which only controls fetch frequency. Rules use `scheduler.timezone_offset`, support `weekdays`, `weekends`, and weekday names, include the start minute and exclude the end minute, and assign a cross-midnight window to its start day. `00:00` to `24:00` is the explicit all-day form. Each watch accepts at most 128 rules, cannot use equal start and end times, and must leave at least one minute available in every week.
+
+```json
+{
+  "no_fetch_periods": [
+    {
+      "days": ["weekdays"],
+      "start_time": "00:00",
+      "end_time": "08:00",
+      "description": "night"
+    }
+  ]
+}
+```
+
+During a no-fetch window, an automatic run is completed before any NGA request as one zero-count `status=skipped`, `error_kind=no_fetch_period` audit row, and the next run is moved to the end of the contiguous window. Cursors and baselines do not advance. Manual API `/run` and bot `/watch run` requests bypass no-fetch periods. In `PATCH`, an omitted field is unchanged, `null` clears the configuration, a non-empty array replaces it, and an empty array returns `400 invalid_request`. Watch responses expose `no_fetch_active`, `no_fetch_until`, and `scheduler_timezone_offset`; run records expose `trigger_kind` as `unknown`, `scheduled`, or `manual`.
+
 User watches do not import history. The first run records only current topic/reply watermarks. Later runs save newly discovered posts and replies for delivery retries and audit, without expanding a discovered TID into a full-thread crawl. Busy responses are retried up to ten times; exhaustion records `skipped_busy` without advancing cursors.
 
 ## Notifications

@@ -21,6 +21,7 @@ static HTTP_5XX: AtomicU64 = AtomicU64::new(0);
 static WORKER_CYCLES: AtomicU64 = AtomicU64::new(0);
 static CRAWL_SUCCEEDED: AtomicU64 = AtomicU64::new(0);
 static CRAWL_FAILED: AtomicU64 = AtomicU64::new(0);
+static CRAWL_SKIPPED_NO_FETCH: AtomicU64 = AtomicU64::new(0);
 static ASSET_JOBS: AtomicU64 = AtomicU64::new(0);
 static NOTIFICATION_JOBS: AtomicU64 = AtomicU64::new(0);
 static BOT_INBOUND_HANDLED: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +86,9 @@ nga_reminder_worker_cycles_total {}\n\
 # TYPE nga_reminder_crawls_total counter\n\
 nga_reminder_crawls_total{{outcome=\"succeeded\"}} {}\n\
 nga_reminder_crawls_total{{outcome=\"failed\"}} {}\n\
+# HELP crawl_runs_skipped_no_fetch_total Automatic crawl runs skipped by a no-fetch period.\n\
+# TYPE crawl_runs_skipped_no_fetch_total counter\n\
+crawl_runs_skipped_no_fetch_total {}\n\
 # HELP nga_reminder_asset_jobs_total Asset jobs processed.\n\
 # TYPE nga_reminder_asset_jobs_total counter\n\
 nga_reminder_asset_jobs_total {}\n\
@@ -115,6 +119,7 @@ nga_reminder_nga_auth_paused_watches {}\n",
         WORKER_CYCLES.load(Ordering::Relaxed),
         CRAWL_SUCCEEDED.load(Ordering::Relaxed),
         CRAWL_FAILED.load(Ordering::Relaxed),
+        CRAWL_SKIPPED_NO_FETCH.load(Ordering::Relaxed),
         ASSET_JOBS.load(Ordering::Relaxed),
         NOTIFICATION_JOBS.load(Ordering::Relaxed),
         BOT_INBOUND_HANDLED.load(Ordering::Relaxed),
@@ -152,6 +157,10 @@ pub fn crawl_succeeded() {
 
 pub fn crawl_failed() {
     CRAWL_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn crawl_skipped_no_fetch() {
+    CRAWL_SKIPPED_NO_FETCH.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn bot_inbound_handled() {

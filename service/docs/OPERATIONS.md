@@ -14,7 +14,7 @@ GET /metrics  Prometheus 文本格式指标
 ```
 
 `/metrics` 只返回计数和运行时长，不包含 Cookie、API token、通知渠道配置或帖子正文。当前指标
-包括 HTTP 请求/状态码、worker 周期、抓取成功/失败、资源任务和通知任务数量。
+包括 HTTP 请求/状态码、worker 周期、抓取成功/失败、免拉取跳过（`crawl_runs_skipped_no_fetch_total`）、资源任务和通知任务数量。免拉取跳过是正常调度结果，不应配置为错误告警。
 
 生产环境建议将结构化日志打开：
 

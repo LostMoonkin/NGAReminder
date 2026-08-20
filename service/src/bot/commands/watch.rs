@@ -115,15 +115,22 @@ async fn list(context: CommandContext) -> Result<Vec<String>, CommandError> {
 
 async fn run(context: CommandContext, id: &str) -> Result<Vec<String>, CommandError> {
     let state = &context.state;
-    let requested = crate::repository::watch::request_run(&state.pool, id)
+    let requested = crate::repository::watch::request_manual_run(&state.pool, id)
         .await
         .map_err(|_| CommandError::internal())?;
-    if requested {
-        Ok(vec![
+    match requested {
+        crate::repository::watch::ManualRunRequest::Requested => Ok(vec![
             "已安排立即运行，可稍后通过 /watch list 查看状态。".to_owned(),
-        ])
-    } else {
-        Ok(vec!["监控目标不存在、未启用或正在运行中。".to_owned()])
+        ]),
+        crate::repository::watch::ManualRunRequest::AlreadyRunning => Ok(vec![
+            "watch_already_running：监控目标当前已有运行。".to_owned(),
+        ]),
+        crate::repository::watch::ManualRunRequest::AlreadyRequested => Ok(vec![
+            "watch_run_already_requested：已有一个手动运行请求等待处理。".to_owned(),
+        ]),
+        crate::repository::watch::ManualRunRequest::NotRunnable => {
+            Ok(vec!["监控目标不存在、未启用或已暂停。".to_owned()])
+        }
     }
 }
 
