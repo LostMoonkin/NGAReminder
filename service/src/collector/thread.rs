@@ -14,7 +14,10 @@ use crate::{
     domain::thread::{ParsedPost, PostKind, ThreadMetadata, ThreadPage},
     nga::{NgaRequestError, thread_parser},
     notification,
-    repository::watch::{self, ThreadCursor, WatchTarget},
+    repository::{
+        thread_gap,
+        watch::{self, ThreadCursor, WatchTarget},
+    },
     schedule,
 };
 
@@ -131,6 +134,11 @@ async fn collect(
     baseline: bool,
 ) -> Result<CrawlSummary, ThreadCollectorError> {
     let cursor = watch::thread_cursor(&state.pool, &watch_target.id).await?;
+    let open_gaps = if baseline {
+        Vec::new()
+    } else {
+        thread_gap::list_open(&state.pool, &watch_target.id).await?
+    };
     let (passport_uid, passport_cid, _) = load_credentials(state).await?;
     let first_value = state
         .nga_client
@@ -213,6 +221,26 @@ async fn collect(
         .await?;
     }
 
+    if !baseline {
+        let total_pages = pages[0].metadata.total_pages;
+        let fetched_pages: HashSet<i32> = pages.iter().map(|page| page.current_page).collect();
+        let recovery_pages = recovery_page_numbers(&open_gaps, total_pages, &fetched_pages);
+        fetch_recovery_pages(
+            state,
+            &passport_uid,
+            &passport_cid,
+            &watch_target.id,
+            watch_target
+                .lease_token
+                .as_deref()
+                .ok_or(ThreadCollectorError::InvalidWatch)?,
+            watch_target.target_id,
+            &recovery_pages,
+            &mut pages,
+        )
+        .await?;
+    }
+
     persist_pages(
         state,
         run_id,
@@ -223,6 +251,105 @@ async fn collect(
         pages,
     )
     .await
+}
+
+fn recovery_page_numbers(
+    gaps: &[thread_gap::ThreadFloorGap],
+    total_pages: i32,
+    fetched_pages: &HashSet<i32>,
+) -> Vec<i32> {
+    let mut pages: Vec<i32> = gaps
+        .iter()
+        .filter(|gap| gap.due)
+        .flat_map(|gap| {
+            let hint = gap.page_hint.clamp(1, total_pages);
+            let start = hint.saturating_sub(1).max(1);
+            let end = hint.saturating_add(1).min(total_pages);
+            start..=end
+        })
+        .filter(|page| !fetched_pages.contains(page))
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    pages
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_recovery_pages(
+    state: &AppState,
+    passport_uid: &secrecy::SecretString,
+    passport_cid: &secrecy::SecretString,
+    watch_id: &str,
+    lease_token: &str,
+    tid: i64,
+    page_numbers: &[i32],
+    pages: &mut Vec<ThreadPage>,
+) -> Result<(), ThreadCollectorError> {
+    if page_numbers.is_empty() {
+        return Ok(());
+    }
+    let fetched = stream::iter(page_numbers.iter().copied().map(|page_number| async move {
+        let result = async {
+            let value = state
+                .nga_client
+                .fetch_thread_page(
+                    passport_uid.expose_secret(),
+                    passport_cid.expose_secret(),
+                    tid,
+                    page_number,
+                )
+                .await?;
+            let page = thread_parser::parse_thread_page(&value, tid)?;
+            if page.current_page != page_number {
+                return Err(ThreadCollectorError::from(
+                    thread_parser::ThreadParseError::Pagination,
+                ));
+            }
+            Ok::<_, ThreadCollectorError>(page)
+        }
+        .await;
+        (page_number, result)
+    }))
+    .buffer_unordered(2)
+    .collect::<Vec<_>>()
+    .await;
+    for (page_number, result) in fetched {
+        match result {
+            Ok(page) => pages.push(page),
+            Err(error) if recovery_error_is_non_blocking(&error) => warn!(
+                watch_id,
+                tid,
+                page_number,
+                error = %error,
+                "thread floor-gap recovery page failed; the gap remains pending"
+            ),
+            Err(error) => return Err(error),
+        }
+    }
+    if !watch::renew_lease(
+        &state.pool,
+        state.config.database_backend,
+        watch_id,
+        lease_token,
+    )
+    .await?
+    {
+        return Err(ThreadCollectorError::InvalidWatch);
+    }
+    pages.sort_by_key(|page| page.current_page);
+    Ok(())
+}
+
+fn recovery_error_is_non_blocking(error: &ThreadCollectorError) -> bool {
+    matches!(
+        error,
+        ThreadCollectorError::Nga(
+            NgaRequestError::Request(_)
+                | NgaRequestError::Http(_)
+                | NgaRequestError::Busy
+                | NgaRequestError::Decode(_)
+        ) | ThreadCollectorError::Parse(_)
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -293,8 +420,14 @@ async fn persist_pages(
 ) -> Result<CrawlSummary, ThreadCollectorError> {
     let metadata = pages[0].metadata.clone();
     let pages_requested = i32::try_from(pages.len()).unwrap_or(i32::MAX);
+    let open_gaps = if baseline {
+        Vec::new()
+    } else {
+        thread_gap::list_open(&state.pool, &watch_target.id).await?
+    };
+    let recovery_floors: HashSet<i32> = open_gaps.iter().map(|gap| gap.floor_number).collect();
     let selected = if persist_content {
-        select_posts(&pages, cursor.last_floor, baseline)
+        select_posts(&pages, cursor.last_floor, baseline, &recovery_floors)
     } else {
         Vec::new()
     };
@@ -306,6 +439,14 @@ async fn persist_pages(
         .max()
         .unwrap_or(cursor.last_floor)
         .max(cursor.last_floor);
+    let detected_gaps = detect_floor_gaps(&pages, cursor.last_floor, last_floor, baseline);
+    let recovered_floors: HashSet<i32> = pages
+        .iter()
+        .flat_map(|page| page.posts.iter())
+        .filter(|post| post.kind != PostKind::Comment)
+        .map(|post| post.floor_number)
+        .filter(|floor| recovery_floors.contains(floor))
+        .collect();
 
     let mut tx = state.pool.begin().await?;
     if persist_content {
@@ -313,6 +454,25 @@ async fn persist_pages(
             upsert_thread_partial(&mut tx, &metadata).await?;
         } else {
             upsert_thread(&mut tx, &metadata).await?;
+        }
+    }
+    for gap in &detected_gaps {
+        if thread_gap::insert_pending(
+            &mut tx,
+            state.config.database_backend,
+            &watch_target.id,
+            gap.floor_number,
+            gap.page_hint,
+        )
+        .await?
+        {
+            info!(
+                watch_id = watch_target.id,
+                tid = watch_target.target_id,
+                floor_number = gap.floor_number,
+                page_hint = gap.page_hint,
+                "thread floor gap detected"
+            );
         }
     }
 
@@ -344,6 +504,29 @@ async fn persist_pages(
             match_count += result.matches_created;
             outbox_count += result.outbox_enqueued;
         }
+    }
+
+    for floor_number in &recovered_floors {
+        if thread_gap::mark_resolved(&mut tx, &watch_target.id, *floor_number).await? {
+            info!(
+                watch_id = watch_target.id,
+                tid = watch_target.target_id,
+                floor_number,
+                "thread floor gap recovered"
+            );
+        }
+    }
+    for gap in open_gaps
+        .iter()
+        .filter(|gap| gap.due && !recovered_floors.contains(&gap.floor_number))
+    {
+        thread_gap::record_missed_attempt(
+            &mut tx,
+            state.config.database_backend,
+            &watch_target.id,
+            gap,
+        )
+        .await?;
     }
 
     for post in selected
@@ -456,7 +639,12 @@ async fn persist_pages(
     })
 }
 
-fn select_posts(pages: &[ThreadPage], last_floor: i32, baseline: bool) -> Vec<ParsedPost> {
+fn select_posts(
+    pages: &[ThreadPage],
+    last_floor: i32,
+    baseline: bool,
+    recovery_floors: &HashSet<i32>,
+) -> Vec<ParsedPost> {
     let mut parent_keys = HashSet::new();
     let mut seen = HashSet::new();
     let mut selected = Vec::new();
@@ -465,7 +653,10 @@ fn select_posts(pages: &[ThreadPage], last_floor: i32, baseline: bool) -> Vec<Pa
         if post.kind == PostKind::Comment {
             continue;
         }
-        if baseline || post.floor_number > last_floor {
+        if baseline
+            || post.floor_number > last_floor
+            || recovery_floors.contains(&post.floor_number)
+        {
             let key = natural_key(post);
             if seen.insert(key.clone()) {
                 parent_keys.insert(key);
@@ -489,6 +680,49 @@ fn select_posts(pages: &[ThreadPage], last_floor: i32, baseline: bool) -> Vec<Pa
         }
     }
     selected
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DetectedFloorGap {
+    floor_number: i32,
+    page_hint: i32,
+}
+
+fn detect_floor_gaps(
+    pages: &[ThreadPage],
+    previous_last_floor: i32,
+    observed_last_floor: i32,
+    baseline: bool,
+) -> Vec<DetectedFloorGap> {
+    if baseline || observed_last_floor <= previous_last_floor {
+        return Vec::new();
+    }
+    let mut visible: Vec<(i32, i32)> = pages
+        .iter()
+        .flat_map(|page| page.posts.iter())
+        .filter(|post| {
+            post.kind != PostKind::Comment
+                && post.floor_number > previous_last_floor
+                && post.floor_number <= observed_last_floor
+        })
+        .map(|post| (post.floor_number, post.page_number))
+        .collect();
+    visible.sort_unstable_by_key(|(floor, _)| *floor);
+    visible.dedup_by_key(|(floor, _)| *floor);
+
+    let mut expected = previous_last_floor.saturating_add(1).max(1);
+    let mut gaps = Vec::new();
+    for (floor_number, page_hint) in visible {
+        while expected < floor_number {
+            gaps.push(DetectedFloorGap {
+                floor_number: expected,
+                page_hint,
+            });
+            expected = expected.saturating_add(1);
+        }
+        expected = floor_number.saturating_add(1);
+    }
+    gaps
 }
 
 fn natural_key(post: &ParsedPost) -> String {
@@ -663,6 +897,7 @@ async fn finish_skipped(
     if updated.rows_affected() != 1 {
         return Err(sqlx::Error::RowNotFound);
     }
+    thread_gap::schedule_earliest_pending(tx, &watch_target.id).await?;
     sqlx::query(
         "UPDATE crawl_runs SET status = 'skipped', error_kind = 'nga_pending_review',
          error_message = 'nga_pending_review', completed_at = CURRENT_TIMESTAMP WHERE id = $1",
@@ -913,6 +1148,7 @@ async fn update_cursor_and_finish(
         return Err(sqlx::Error::RowNotFound);
     }
 
+    thread_gap::schedule_earliest_pending(tx, &watch_target.id).await?;
     sqlx::query(
         "UPDATE crawl_runs SET status = 'succeeded', pages_requested = $1,
          posts_inserted = $2, events_created = $3, matches_created = $4,
@@ -1006,7 +1242,18 @@ async fn record_failure(
         .execute(&state.pool)
         .await;
     match watch_updated {
-        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(result) if result.rows_affected() == 1 => {
+            if status == "error"
+                && let Err(db_error) =
+                    thread_gap::schedule_earliest_pending_pool(&state.pool, &watch_target.id).await
+            {
+                warn!(
+                    watch_id = %watch_target.id,
+                    error = %db_error,
+                    "failed to preserve pending floor-gap scheduling after crawl failure"
+                );
+            }
+        }
         Ok(_) => {
             mark_run_lease_lost(state, run_id).await;
             return;
@@ -1046,8 +1293,8 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        create_crawl_run, mark_skipped_pending_review, persist_pages, raw_payload_for_storage,
-        select_posts,
+        create_crawl_run, detect_floor_gaps, mark_skipped_pending_review, persist_pages,
+        raw_payload_for_storage, recovery_page_numbers, select_posts,
     };
     use crate::{
         app::AppState,
@@ -1057,7 +1304,7 @@ mod tests {
         crypto::CredentialCipher,
         domain::thread::PostKind,
         nga::{NgaClient, thread_parser::parse_thread_page},
-        repository::watch,
+        repository::{thread_gap::ThreadFloorGap, watch},
     };
 
     #[test]
@@ -1065,7 +1312,7 @@ mod tests {
         let page = parse_thread_page(&fixture("thread_comments_hot_post.json"), 1001)
             .expect("fixture must parse");
 
-        let selected = select_posts(&[page], 0, false);
+        let selected = select_posts(&[page], 0, false, &HashSet::new());
         assert_eq!(selected.len(), 3);
         assert_eq!(
             selected
@@ -1087,7 +1334,61 @@ mod tests {
     fn incremental_selection_does_not_revisit_existing_parent_comments() {
         let page = parse_thread_page(&fixture("thread_comments_hot_post.json"), 1001)
             .expect("fixture must parse");
-        assert!(select_posts(&[page], 1, false).is_empty());
+        assert!(select_posts(&[page], 1, false, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn floor_gap_detection_only_covers_the_new_incremental_range() {
+        let mut value = fixture("thread_page_success.json");
+        value["result"]
+            .as_array_mut()
+            .expect("result must be an array")
+            .push(json!({
+                "tid": 1001,
+                "pid": 4003,
+                "fid": 3001,
+                "lou": 3,
+                "postdatetimestamp": 1767225720_i64,
+                "subject": "",
+                "content": "reply after a gap",
+                "type": 0,
+                "author": {"uid": 2003, "username": "new author"},
+                "attches": null
+            }));
+        let page = parse_thread_page(&value, 1001).expect("page must parse");
+
+        let gaps = detect_floor_gaps(std::slice::from_ref(&page), 1, 3, false);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].floor_number, 2);
+        assert_eq!(gaps[0].page_hint, 1);
+        assert!(detect_floor_gaps(&[page], 1, 3, true).is_empty());
+    }
+
+    #[test]
+    fn recovery_pages_are_bounded_deduplicated_and_skip_fetched_pages() {
+        let gaps = vec![
+            ThreadFloorGap {
+                floor_number: 21,
+                page_hint: 2,
+                retry_count: 0,
+                due: true,
+            },
+            ThreadFloorGap {
+                floor_number: 22,
+                page_hint: 99,
+                retry_count: 0,
+                due: true,
+            },
+            ThreadFloorGap {
+                floor_number: 23,
+                page_hint: 4,
+                retry_count: 0,
+                due: false,
+            },
+        ];
+        let fetched = HashSet::from([1, 3]);
+
+        assert_eq!(recovery_page_numbers(&gaps, 5, &fetched), vec![2, 4, 5]);
     }
 
     #[test]
@@ -1343,6 +1644,156 @@ mod tests {
                 .await
                 .expect("payload bytes must count");
         assert_eq!(payload_bytes, 0);
+
+        let mut gap_value = fixture("thread_page_success.json");
+        gap_value["vrows"] = json!(4);
+        gap_value["result"]
+            .as_array_mut()
+            .expect("result must be an array")
+            .push(json!({
+                "tid": 1001,
+                "pid": 4004,
+                "fid": 3001,
+                "lou": 4,
+                "postdatetimestamp": 1767225840_i64,
+                "subject": "",
+                "content": "reply after hidden floor",
+                "type": 0,
+                "author": {"uid": 2004, "username": "later author"},
+                "attches": null
+            }));
+        let gap_page = parse_thread_page(&gap_value, 1001).expect("gap page must parse");
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch query must succeed")
+            .expect("watch must be claimable");
+        let cursor = watch::thread_cursor(&pool, &created.id)
+            .await
+            .expect("cursor must load");
+        create_crawl_run(
+            &state,
+            "gap-run",
+            &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+            "incremental",
+        )
+        .await
+        .expect("gap crawl run must create");
+        let gap_summary = persist_pages(
+            &state,
+            "gap-run",
+            &current_watch,
+            &cursor,
+            false,
+            true,
+            vec![gap_page],
+        )
+        .await
+        .expect("gap crawl must succeed");
+        assert_eq!(gap_summary.last_floor, 4);
+        let gap_state: (String, i32) = sqlx::query_as(
+            "SELECT status, retry_count FROM thread_floor_gaps
+             WHERE watch_id = $1 AND floor_number = 3",
+        )
+        .bind(&created.id)
+        .fetch_one(&pool)
+        .await
+        .expect("gap must be persisted");
+        assert_eq!(gap_state, ("pending".to_owned(), 0));
+
+        let mut recovered_value = gap_value;
+        recovered_value["result"]
+            .as_array_mut()
+            .expect("result must be an array")
+            .insert(
+                2,
+                json!({
+                    "tid": 1001,
+                    "pid": 4003,
+                    "fid": 3001,
+                    "lou": 3,
+                    "postdatetimestamp": 1767225780_i64,
+                    "subject": "",
+                    "content": "restored reply",
+                    "type": 0,
+                    "author": {"uid": 2003, "username": "restored author"},
+                    "attches": null
+                }),
+            );
+        let recovered_page =
+            parse_thread_page(&recovered_value, 1001).expect("recovered page must parse");
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch query must succeed")
+            .expect("watch must be claimable");
+        let cursor = watch::thread_cursor(&pool, &created.id)
+            .await
+            .expect("cursor must load");
+        create_crawl_run(
+            &state,
+            "recovery-run",
+            &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+            "incremental",
+        )
+        .await
+        .expect("recovery crawl run must create");
+        let recovered = persist_pages(
+            &state,
+            "recovery-run",
+            &current_watch,
+            &cursor,
+            false,
+            true,
+            vec![recovered_page.clone()],
+        )
+        .await
+        .expect("recovery crawl must succeed");
+        assert_eq!(recovered.last_floor, 4);
+        assert_eq!(recovered.posts_inserted, 1);
+        assert_eq!(recovered.events_created, 1);
+        let resolved: String = sqlx::query_scalar(
+            "SELECT status FROM thread_floor_gaps
+             WHERE watch_id = $1 AND floor_number = 3",
+        )
+        .bind(&created.id)
+        .fetch_one(&pool)
+        .await
+        .expect("gap status must query");
+        assert_eq!(resolved, "resolved");
+
+        let current_watch = watch::claim_by_id(&pool, DatabaseBackend::Sqlite, &created.id)
+            .await
+            .expect("watch query must succeed")
+            .expect("watch must be claimable");
+        let cursor = watch::thread_cursor(&pool, &created.id)
+            .await
+            .expect("cursor must load");
+        create_crawl_run(
+            &state,
+            "recovery-repeat-run",
+            &created.id,
+            current_watch.lease_token.as_deref().unwrap(),
+            false,
+            "incremental",
+        )
+        .await
+        .expect("repeat recovery crawl run must create");
+        let repeated_recovery = persist_pages(
+            &state,
+            "recovery-repeat-run",
+            &current_watch,
+            &cursor,
+            false,
+            true,
+            vec![recovered_page],
+        )
+        .await
+        .expect("repeat recovery crawl must succeed");
+        assert_eq!(repeated_recovery.posts_inserted, 0);
+        assert_eq!(repeated_recovery.events_created, 0);
     }
 
     fn fixture(name: &str) -> Value {

@@ -4,11 +4,11 @@ use sqlx::{Any, AnyPool, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::config::DatabaseBackend;
 use crate::no_fetch::{
     NoFetchPeriods, current_window, format_database_timestamp, format_postgres_timestamp,
 };
 use crate::schedule::Schedule;
+use crate::{config::DatabaseBackend, repository::thread_gap};
 use time::{OffsetDateTime, UtcOffset};
 
 #[derive(Clone, Debug)]
@@ -583,6 +583,7 @@ pub async fn reset(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+        thread_gap::clear(&mut tx, id).await?;
     } else {
         sqlx::query(
             "UPDATE user_watch_cursors SET newest_topic_at_unix = 0, newest_topic_tid = 0,
@@ -618,6 +619,7 @@ pub async fn delete(pool: &AnyPool, id: &str) -> Result<bool, sqlx::Error> {
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    thread_gap::clear(&mut tx, id).await?;
     let deleted = sqlx::query(
         "UPDATE watch_targets SET enabled = 0, status = 'paused', lease_until = NULL,
          lease_token = NULL, pending_trigger_kind = NULL, lease_trigger_kind = NULL,
@@ -1554,14 +1556,47 @@ mod tests {
             .execute(&pool)
             .await
             .expect("stale lease must seed");
+        sqlx::query(
+            "INSERT INTO thread_floor_gaps
+                (watch_id, floor_number, page_hint, next_retry_at, expires_at)
+             VALUES ($1, 7, 1, CURRENT_TIMESTAMP, datetime(CURRENT_TIMESTAMP, '+120 minutes'))",
+        )
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .expect("gap must seed");
         let reset_watch = reset(&pool, &created.id, Some("full"), Some(false), Some(2))
             .await
             .expect("stale lease must be resettable")
             .expect("watch must exist");
         assert!(reset_watch.enabled);
         assert_eq!(reset_watch.status, "pending");
+        let gaps_after_reset: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_floor_gaps WHERE watch_id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("gaps must count");
+        assert_eq!(gaps_after_reset, 0);
+
+        sqlx::query(
+            "INSERT INTO thread_floor_gaps
+                (watch_id, floor_number, page_hint, next_retry_at, expires_at)
+             VALUES ($1, 8, 1, CURRENT_TIMESTAMP, datetime(CURRENT_TIMESTAMP, '+120 minutes'))",
+        )
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .expect("gap must seed again");
 
         assert!(delete(&pool, &created.id).await.expect("watch must delete"));
+        let gaps_after_delete: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_floor_gaps WHERE watch_id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("gaps must count");
+        assert_eq!(gaps_after_delete, 0);
         assert!(list(&pool).await.expect("watches must list").is_empty());
         create_thread_watch(&pool, 12345, 60)
             .await

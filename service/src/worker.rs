@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::{
     app::AppState,
     assets,
-    collector::{thread, user},
+    collector::{thread, user, user_backfill},
     metrics, no_fetch, notification,
     repository::watch,
 };
@@ -66,6 +66,13 @@ pub async fn run(state: AppState, cancellation: CancellationToken) -> anyhow::Re
                 // contexts on every cycle (cheap: one indexed query).
                 if let Err(error) = crate::bot::session::expire_stale_sessions(&state).await {
                     warn!(error = %error, "login session cleanup failed");
+                }
+                if cancellation.is_cancelled() {
+                    info!("worker role stopping");
+                    return Ok(());
+                }
+                if let Err(error) = user_backfill::process_one(&state).await {
+                    warn!(error = %error, "UID reply history backfill worker failed");
                 }
                 if cancellation.is_cancelled() {
                     info!("worker role stopping");

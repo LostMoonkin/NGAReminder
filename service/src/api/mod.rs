@@ -7,6 +7,7 @@ mod health;
 mod integration;
 mod notification;
 mod query;
+mod user_backfill;
 mod watch;
 
 use axum::{
@@ -62,6 +63,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/watches/{id}/run", post(watch::run))
         .route("/api/v1/watches/{id}/reset", post(watch::reset))
         .route("/api/v1/watches/{id}/runs", get(watch::runs))
+        .route(
+            "/api/v1/user-reply-backfills",
+            get(user_backfill::list).post(user_backfill::create),
+        )
         .route("/api/v1/threads", get(query::threads))
         .route("/api/v1/threads/{tid}/posts", get(query::posts))
         .route("/api/v1/users", get(query::users))

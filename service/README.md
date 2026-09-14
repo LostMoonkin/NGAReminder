@@ -145,6 +145,8 @@ DELETE /api/v1/watches/{id}
 POST   /api/v1/watches/{id}/run
 POST   /api/v1/watches/{id}/reset
 GET    /api/v1/watches/{id}/runs
+GET    /api/v1/user-reply-backfills
+POST   /api/v1/user-reply-backfills
 ```
 
 `interval_seconds` 可选，默认使用 `config/default.toml` 中的 `scheduler.default_interval_seconds`（或 `NGA_REMINDER__SCHEDULER__DEFAULT_INTERVAL_SECONDS`），范围必须为 30～86400。其他 worker 持有监控租约时，手动运行返回 `409`。NGA code 14 会停用不存在主题的监控。主题 `code=51`（帖子正在审核）只跳过本轮抓取，不推进游标，下一次定时运行会自动重试。凭据被拒后会暂停账号及受影响监控，修复凭据并显式启用监控后才会恢复。
@@ -220,6 +222,17 @@ curl -X POST http://127.0.0.1:8080/api/v1/watches/users \
 ```
 
 用户监控不会导入历史。回复列表使用 `GET /thread.php?searchpost=1&authorid={uid}&__output=12&page={page}`；请求只携带配置的 User-Agent，以及从完整 Cookie 中提取的 `ngaPassportUid`、可选 `ngaPassportUrlencodedUname` 和 `ngaPassportCid`。第一次运行只记录当前主题列表和回复列表的水位，不创建帖子或通知。后续运行保存该 UID 新发现的主题和单条回复，以支持可靠的投递重试与审计，但不会因为用户参与某个 TID 就扩展为完整主题抓取。跨用户查询必须先在服务设置中粘贴完整浏览器 Cookie；仅有 Passport UID/CID 时会返回 `nga_full_cookie_required`。若 NGA 对跨用户列表返回空体 HTTP 503，则按 2 秒间隔最多尝试 3 次，耗尽后记录 `nga_user_search_unavailable`。这两种失败都不会建立错误的空水位或推进任一游标。列表扫描在已保存的 `(postdate, tid/pid)` 边界处停止，只请求新候选的详情。用户列表遇到 NGA busy 响应时每秒重试一次，最多十次；耗尽后记录 `skipped_busy`，且不推进两个游标。如果主题详情返回 `code=51`，本次用户抓取记录为 `skipped_pending_review`，游标保持不变，等待下一次定时运行。
+
+管理台可以为一个已存在的 UID 监控创建历史回帖回填。日期按 `scheduler.timezone_offset` 从当天 `00:00:00`（含）解释，任务范围固定到创建时刻。回填异步逐页执行，只保存目标回复和必要上下文，不推进 UID 水位，也不创建事件或通知；相同或重叠范围可依靠帖子自然键安全重跑。同一时间只允许一个活动回填任务。
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/user-reply-backfills \
+  -H "Authorization: Bearer $NGA_REMINDER__API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"uid":150058,"start_date":"2026-09-01"}'
+```
+
+使用 `GET /api/v1/user-reply-backfills` 查询最近任务的状态、页数、候选数、新增帖子数和失败原因。服务重启后，未完成任务会从已提交的下一页恢复。
 
 ## 通知
 
