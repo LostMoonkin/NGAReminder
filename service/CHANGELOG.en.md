@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+### UID reply backfills and missing-floor recovery
+
+- Added persistent UID reply-history backfill jobs. The admin console can silently import one watched UID from a service-timezone date through job creation time, with progress, lease recovery, and idempotent reruns; live UID cursors, events, and notifications remain unchanged.
+- TID incremental crawls now persist `floor_number` gaps as possible moderation removals and retry them with backoff for 120 minutes. Restored floors are saved even below the current high-water mark and continue through the existing event and notification deduplication path.
+
 ### Reliability and quality gates
 
 - Added claim-token fencing to watch and asset-download leases so stale workers cannot overwrite reset, paused, or newly claimed jobs.
