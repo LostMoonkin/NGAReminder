@@ -3,10 +3,10 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release.sh extension <x.y.z> [--push] [--skip-checks]
+Usage: scripts/release.sh <service|extension> <x.y.z> [--push] [--skip-checks]
 
-Updates the extension when needed, creates a release commit and an annotated tag.
-Extension tags are vX.Y.Z-standalone. Server releases are paused for the Go rewrite.
+Updates the selected artifact when needed, creates a release commit and an annotated tag.
+Tags are vX.Y.Z for the service and vX.Y.Z-standalone for the extension.
 The tag is pushed only when --push is supplied.
 EOF
 }
@@ -44,16 +44,15 @@ fi
 
 case "$artifact" in
   service)
-    echo "Server releases are paused for the Go rewrite." >&2
-    echo "Rust v0.1.4 is archived at archive/rust-service/; see ARCHIVE.md there." >&2
-    exit 2
+    tag="v${version}"
+    version_files=(service/Cargo.toml service/Cargo.lock)
     ;;
   extension)
     tag="v${version}-standalone"
     version_files=(extension-standalone/manifest.json extension-standalone/popup.html)
     ;;
   *)
-    echo "Artifact must be extension: $artifact" >&2
+    echo "Artifact must be service or extension: $artifact" >&2
     exit 2
     ;;
 esac
@@ -64,7 +63,11 @@ for command in git perl jq; do
     exit 1
   }
 done
-command -v node >/dev/null || { echo "Required command not found: node" >&2; exit 1; }
+if [[ "$artifact" == service ]]; then
+  command -v cargo >/dev/null || { echo "Required command not found: cargo" >&2; exit 1; }
+else
+  command -v node >/dev/null || { echo "Required command not found: node" >&2; exit 1; }
+fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
@@ -97,6 +100,15 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+update_service_version() {
+  RELEASE_VERSION="$version" perl -0pi -e \
+    's/^(\[package\]\nname = "nga-reminder"\nversion = ")[^"]+("\n)/$1 . $ENV{RELEASE_VERSION} . $2/em' \
+    service/Cargo.toml
+  RELEASE_VERSION="$version" perl -0pi -e \
+    's/^(\[\[package\]\]\nname = "nga-reminder"\nversion = ")[^"]+("\n)/$1 . $ENV{RELEASE_VERSION} . $2/em' \
+    service/Cargo.lock
+}
+
 update_extension_version() {
   RELEASE_VERSION="$version" perl -0pi -e \
     's/^(\s+"version":\s+")[^"]+("\s*,\s*\n)/$1 . $ENV{RELEASE_VERSION} . $2/em' \
@@ -106,8 +118,24 @@ update_extension_version() {
     extension-standalone/popup.html
 }
 
+validate_service_version() {
+  local actual
+  actual="$(cargo metadata --manifest-path service/Cargo.toml --locked --no-deps --format-version 1 \
+    | jq -r '.packages[] | select(.name == "nga-reminder") | .version')"
+  [[ "$actual" == "$version" ]] || {
+    echo "Cargo version mismatch: expected ${version}, found ${actual}" >&2
+    return 1
+  }
+}
+
 validate_extension_version() {
   jq -e --arg version "$version" '.version == $version' extension-standalone/manifest.json >/dev/null
+}
+
+run_service_checks() {
+  cargo fmt --manifest-path service/Cargo.toml --all -- --check
+  cargo test --manifest-path service/Cargo.toml --locked --all-targets
+  cargo clippy --manifest-path service/Cargo.toml --locked --all-targets --all-features -- -D warnings
 }
 
 run_extension_checks() {
@@ -120,11 +148,22 @@ run_extension_checks() {
   node --test extension-standalone/static.test.mjs
 }
 
-update_extension_version
-validate_extension_version
-if [[ "$skip_checks" != true ]]; then
-  run_extension_checks
-fi
+case "$artifact" in
+  service)
+    update_service_version
+    validate_service_version
+    if [[ "$skip_checks" != true ]]; then
+      run_service_checks
+    fi
+    ;;
+  extension)
+    update_extension_version
+    validate_extension_version
+    if [[ "$skip_checks" != true ]]; then
+      run_extension_checks
+    fi
+    ;;
+esac
 
 git diff --check
 if ! git diff --quiet -- "${version_files[@]}"; then

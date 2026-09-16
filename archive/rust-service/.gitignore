@@ -56,9 +56,6 @@ logs/
 # Rust
 service/target/
 
-# Preserved local state for archived implementations
-.local/
-
 # Docker
 docker-compose.override.yml
 
