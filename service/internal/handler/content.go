@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/service"
 	"strconv"
+	"time"
 )
 
 func (h *Handler) contentRoutes(router *gin.Engine) {
@@ -54,6 +56,9 @@ func (h *Handler) userContent(c *gin.Context) {
 	h.render(c, 200, "posts", gin.H{"Data": data, "Previous": previous, "Next": next, "TraceID": logging.TraceID(c.Request.Context())})
 }
 func (h *Handler) exportContent(c *gin.Context) {
+	if !h.longResponse(c) {
+		return
+	}
 	id, ok := h.id(c, "id")
 	if !ok {
 		return
@@ -112,6 +117,9 @@ func (h *Handler) saveResourceSettings(c *gin.Context) {
 	h.respond(c, 200, gin.H{"download_enabled": input.Enabled}, "/admin/resources")
 }
 func (h *Handler) redownloadResources(c *gin.Context) {
+	if !h.longResponse(c) {
+		return
+	}
 	count, err := h.monitor.Resources().Redownload(c.Request.Context())
 	if err != nil {
 		h.problem(c, err)
@@ -155,4 +163,14 @@ func (h *Handler) asset(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Disposition", "attachment")
 	http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), file)
+}
+
+// 批量导出/资源补下载不受普通响应的 30 秒写入期限截断，仍随客户端断开取消。
+func (h *Handler) longResponse(c *gin.Context) bool {
+	err := http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{})
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		h.problem(c, logging.Wrap(err, "clear batch response write deadline"))
+		return false
+	}
+	return true
 }

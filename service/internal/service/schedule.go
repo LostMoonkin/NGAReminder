@@ -203,6 +203,10 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 	if err != nil {
 		return err
 	}
+	dueGaps, err := m.dueGapWatches(ctx, now)
+	if err != nil {
+		return err
+	}
 	account, err := m.store.Account(ctx)
 	if err != nil {
 		return err
@@ -218,14 +222,24 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 		return a == nil || b != nil && a.Before(*b)
 	})
 	for _, watch := range watches {
-		if watch.Paused || watch.State != "ready" || watch.NextRunAt != nil && watch.NextRunAt.After(now) {
+		if watch.Paused || watch.State != "ready" {
 			continue
+		}
+		source := "automatic"
+		if watch.NextRunAt != nil && watch.NextRunAt.After(now) {
+			if !dueGaps[watch.ID] {
+				continue
+			}
+			if active, _ := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active {
+				continue
+			}
+			source = "gap_recovery"
 		}
 		// 全天免拉取且已记录过跳过时，不每秒制造一条相同记录；修改配置会重新设置 next_run_at。
 		if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active && until == nil && watch.NextRunAt == nil {
 			continue
 		}
-		_, started, err = m.startRunLocked(ctx, watch, "automatic", now)
+		_, started, err = m.startRunLocked(ctx, watch, source, now)
 		return err
 	}
 	return nil

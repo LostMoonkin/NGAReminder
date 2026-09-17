@@ -114,7 +114,7 @@ func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure
 	}
 	// 两份列表和所有详情成功后才一次提交；任何失败都保留原水位和基线。
 	watch.TopicCursor, watch.ReplyCursor = topicCursor, replyCursor
-	return m.finishSuccessfulRun(ctx, watch, run, 0, posts)
+	return m.finishSuccessfulRun(ctx, watch, run, 0, posts, nil)
 }
 
 func storedPost(post infrastructure.ParsedPost) repository.Post {

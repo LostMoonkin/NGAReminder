@@ -52,6 +52,9 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	if err != nil {
 		return nil, err
 	}
+	if err = store.InterruptBackfills(initCtx); err != nil {
+		return nil, err
+	}
 	if err = store.InterruptRuns(initCtx); err != nil {
 		return nil, err
 	}
@@ -293,7 +296,8 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 			return watch, InvalidInput("此目标已有监控")
 		}
 	}
-	if watch.TID != input.TID || watch.UID != input.UID || watch.InitMode != input.InitMode {
+	resetGaps := watch.TID != input.TID || watch.UID != input.UID || watch.InitMode != input.InitMode
+	if resetGaps {
 		resetBaseline(&watch)
 	}
 	if watch.TID != input.TID || watch.UID != input.UID {
@@ -315,6 +319,11 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 		Str("kind", input.Kind).Str("init_mode", input.InitMode).Int("interval_seconds", interval).
 		Int("interval_rules", len(input.IntervalRules)).Int("no_fetch_periods", len(input.NoFetchPeriods)).Msg("Saving watch")
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if resetGaps && id > 0 {
+			if e := tx.ClearFloorGaps(ctx, id); e != nil {
+				return e
+			}
+		}
 		if e := validateNotificationWatch(ctx, tx, watch); e != nil {
 			return e
 		}
@@ -364,21 +373,35 @@ func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode str
 		now := time.Now().UTC()
 		watch.NextRunAt = &now
 	case "delete":
-		return watch, m.store.DeleteWatch(ctx, id)
+		return watch, m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+			if e := tx.ClearFloorGaps(ctx, id); e != nil {
+				return e
+			}
+			return tx.DeleteWatch(ctx, id)
+		})
 	default:
 		return watch, InvalidInput("不支持的监控操作")
 	}
-	err = m.store.SaveWatch(ctx, &watch)
+	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if action == "reset" {
+			if e := tx.ClearFloorGaps(ctx, id); e != nil {
+				return e
+			}
+		}
+		return tx.SaveWatch(ctx, &watch)
+	})
 	m.describeWatch(&watch, time.Now())
 	return watch, err
 }
 
 type WatchDetail struct {
-	Channels          []repository.Channel `json:"channels"`
-	Timezone          string               `json:"timezone"`
-	BackgroundEnabled bool                 `json:"background_enabled"`
-	Watch             repository.Watch     `json:"watch"`
-	Runs              []repository.Run     `json:"runs"`
+	Backfills         []repository.Backfill `json:"backfills"`
+	Gaps              repository.GapSummary `json:"gaps"`
+	Channels          []repository.Channel  `json:"channels"`
+	Timezone          string                `json:"timezone"`
+	BackgroundEnabled bool                  `json:"background_enabled"`
+	Watch             repository.Watch      `json:"watch"`
+	Runs              []repository.Run      `json:"runs"`
 }
 
 func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, err error) {
@@ -393,6 +416,27 @@ func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, e
 	detail.Channels, err = m.store.Channels(ctx)
 	if err != nil {
 		return detail, err
+	}
+	if detail.Watch.Kind == "uid" {
+		detail.Backfills, err = m.store.Backfills(ctx, id)
+		if err != nil {
+			return detail, err
+		}
+	} else {
+		gaps, e := m.store.FloorGaps(ctx, id)
+		if e != nil {
+			return detail, e
+		}
+		for _, gap := range gaps {
+			switch gap.Status {
+			case "pending":
+				detail.Gaps.Pending++
+			case "resolved":
+				detail.Gaps.Resolved++
+			case "expired":
+				detail.Gaps.Expired++
+			}
+		}
 	}
 	detail.Runs, err = m.store.WatchRuns(ctx, id)
 	return detail, err

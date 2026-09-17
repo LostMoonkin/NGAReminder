@@ -1,0 +1,6 @@
+{{define "recovery"}}<section class="card">
+{{if eq .Watch.Kind "uid"}}<h2>历史回帖回填</h2><p>按 {{.Timezone}} 的起始日零点至任务创建时刻，只保存目标 UID 的回复。回填保持静默，不改变实时水位、基线、手动暂停和调度配置。可在暂停实时监控时回填，仍需有效 Cookie；不受免拉取时段限制。</p>
+<form method="post" action="/admin/watches/{{.Watch.ID}}/backfills"><label>起始日期<input name="start_date" type="date" required></label><button>开始静默回填</button></form>
+{{range .Backfills}}<article><p>回填 #{{.ID}} · {{status .Status}} · {{when .StartAt}} 至 {{when .EndAt}}</p><p>请求 {{.Pages}} 页 · 处理 {{.Candidates}} 个候选 · 新增 {{.Saved}} 条</p>{{if .Error}}<p class="notice">{{.Error}}</p>{{end}}<p class="small">关联 ID：{{.TraceID}}</p>{{if eq .Status "running"}}<script>setTimeout(()=>location.reload(),3000)</script>{{end}}</article>{{else}}<p>尚无回填记录。</p>{{end}}
+{{else}}<h2>楼层缺口</h2><p>待补 {{.Gaps.Pending}} · 已恢复 {{.Gaps.Resolved}} · 已过期 {{.Gaps.Expired}}</p><p>仅记录完成基线后新跨过的实际楼层缺口。在首次发现后的第 5、15、35、65、95、120 分钟附近合并尝试，最晚 120 分钟停止主动重试。暂停与免拉取期间不自动补偿；手动运行可顺带恢复已记录缺口。基线旧断层不补，重置或删除监控清除旧缺口。</p>{{end}}
+</section>{{end}}

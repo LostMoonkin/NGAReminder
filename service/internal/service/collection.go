@@ -59,13 +59,20 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 	stop := context.AfterFunc(m.ctx, cancel)
 	run = repository.Run{WatchID: watch.ID, TID: watch.TID, UID: watch.UID, Source: source, Status: "running", Silent: !watch.BaselineComplete,
 		StartedAt: now.UTC(), TraceID: taskSpan.TraceID, SourceTraceID: logging.TraceID(ctx)}
-	watch.NextRunAt = m.nextRun(watch, now)
-	if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); source == "automatic" && active {
+	if source != "gap_recovery" {
+		watch.NextRunAt = m.nextRun(watch, now)
+	}
+	if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); source != "manual" && active {
 		finished := now.UTC()
 		run.Status, run.FinishedAt, run.Error = "skipped_no_fetch", &finished, "当前处于免拉取时段"
 		watch.NextRunAt = until
 	}
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if watch.Kind == "tid" && run.Status == "running" {
+			if e := advanceGapAttempts(ctx, tx, watch.ID, now); e != nil {
+				return e
+			}
+		}
 		if e := tx.SaveWatch(ctx, &watch); e != nil {
 			return e
 		}
@@ -105,7 +112,9 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 			runErr = decryptErr
 			return
 		}
-		if watch.Kind == "uid" {
+		if source == "gap_recovery" {
+			runErr = m.collectGaps(taskCtx, credentials, &watch, &run)
+		} else if watch.Kind == "uid" {
 			runErr = m.collectUser(taskCtx, credentials, &watch, &run)
 		} else {
 			runErr = m.collect(taskCtx, credentials, &watch, &run)
@@ -120,6 +129,11 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		return err
 	}
 	watch.Title = first.Title
+	gaps, err := loadGapMap(ctx, m.store, watch.ID)
+	if err != nil {
+		return err
+	}
+	seen := map[int64]bool{}
 	maxFloor := watch.CursorFloor
 	if !watch.BaselineComplete && watch.InitMode == "from_now" {
 		last := first
@@ -138,7 +152,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		}
 		now := time.Now().UTC()
 		watch.HistoryFloor, watch.HistoryBefore = maxFloor, &now
-		return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil)
+		return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil, nil)
 	}
 	// 采集逐页读、按自然键增量写，也能发现旧楼层下新增的楼中楼。
 	// 页数固定为首个响应的快照；采集期间继续增长的尾页留到下一轮，避免追赶不停。
@@ -152,6 +166,9 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		}
 		posts := []repository.Post{}
 		for _, post := range result.Posts {
+			if post.Kind != "comment" {
+				seen[post.Floor] = true
+			}
 			if post.Kind != "comment" && post.Floor > maxFloor {
 				maxFloor = post.Floor
 			}
@@ -163,6 +180,11 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 					continue
 				}
 			}
+			if watch.BaselineComplete && post.Kind != "comment" && post.Floor <= watch.CursorFloor {
+				if _, ok := gaps[post.Floor]; !ok {
+					continue
+				}
+			}
 			posts = append(posts, storedPost(post))
 		}
 		next := *run
@@ -171,7 +193,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 			if e != nil {
 				return e
 			}
-			if e = m.notifications.Record(ctx, tx, *watch, posts, run.Silent); e != nil {
+			if e = m.recordThreadPosts(ctx, tx, *watch, posts, run.Silent, gaps); e != nil {
 				return e
 			}
 			next.Pages, next.Saved = next.Pages+1, next.Saved+saved
@@ -185,16 +207,27 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("page", page).Int("total_pages", first.TotalPages).
 			Int64("saved", run.Saved).Msg("Thread page saved; cursor will advance after the entire run completes")
 	}
-	return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil)
+	return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil, newFloorGaps(*watch, seen, maxFloor, time.Now()))
 }
 
-func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.Watch, run *repository.Run, maxFloor int64, posts []repository.Post) error {
+func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.Watch, run *repository.Run, maxFloor int64, posts []repository.Post, newGaps []repository.FloorGap) error {
 	now := time.Now().UTC()
 	watch.NextRunAt = m.nextRun(*watch, now)
 	watch.BaselineComplete, watch.CursorFloor, watch.State = true, maxFloor, "ready"
 	next := *run
 	next.Status, next.FinishedAt = "success", &now
 	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if len(newGaps) > 0 {
+			zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("gap_count", len(newGaps)).Time("deadline", newGaps[0].Deadline).Msg("Recording newly crossed floor gaps")
+		}
+		if e := tx.AddFloorGaps(ctx, newGaps); e != nil {
+			return e
+		}
+		if watch.Kind == "tid" {
+			if e := expireCompletedGaps(ctx, tx, watch.ID); e != nil {
+				return e
+			}
+		}
 		saved, err := tx.InsertPosts(ctx, posts)
 		if err != nil {
 			return err
@@ -233,25 +266,26 @@ func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, w
 	triggerRenewal := false
 	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		if run.Status == "auth_paused" {
-			account, err := tx.Account(ctx)
-			if err != nil {
-				return err
-			}
-			triggerRenewal = account.Status != "auth_paused"
-			account.Status, account.LastError, account.CheckedAt = "auth_paused", run.Error, &now
-			if err = tx.SaveAccount(ctx, &account); err != nil {
-				return err
-			}
-			if err = tx.SetAuthPaused(ctx, true); err != nil {
-				return err
+			var e error
+			triggerRenewal, e = pauseAccount(ctx, tx, now, run.Error)
+			if e != nil {
+				return e
 			}
 		}
+		if watch.Kind == "tid" {
+			if e := expireCompletedGaps(ctx, tx, watch.ID); e != nil {
+				return e
+			}
+		}
+
 		// 只更新调度和故障状态，不提交本轮尚未完成的水位。
 		persisted, err := tx.Watch(ctx, watch.ID)
 		if err != nil {
 			return err
 		}
-		persisted.NextRunAt = m.nextRun(persisted, now)
+		if run.Source != "gap_recovery" {
+			persisted.NextRunAt = m.nextRun(persisted, now)
+		}
 		if run.Status == "missing" {
 			persisted.State = "missing"
 		}

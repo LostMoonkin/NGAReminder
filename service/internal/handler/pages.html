@@ -149,6 +149,7 @@ document.addEventListener('click', event => {
     <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/delete" class="actions"><button class="danger">删除监控（保留帖子）</button></form>
   </details>
 </section>
+{{template "recovery" .Data}}
 <section class="card">{{template "runs" .Data.Runs}}</section>
 <footer>页面关联 ID：<code>{{.TraceID}}</code></footer>
 </main></body></html>{{end}}
