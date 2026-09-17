@@ -1,0 +1,12 @@
+{
+  "listen_address": "127.0.0.1:8080",
+  "database_path": "data/nga-reminder.db",
+  "assets_path": "data/assets",
+  "admin_username": "admin",
+  "admin_password": "replace-with-a-long-password",
+  "api_token": "replace-with-a-random-api-token-at-least-32-bytes",
+  "encryption_key": "replace-with-32-random-bytes-in-base64",
+  "timezone": "Asia/Shanghai",
+  "background_enabled": true,
+  "cookie_secure": false
+}

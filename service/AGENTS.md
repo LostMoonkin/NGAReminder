@@ -4,6 +4,7 @@
 
 - 本项目由个人维护。优先选择能直接读懂、定位和修改的实现，用明确的业务代码解决当前问题。
 - 使用 Go、Gin、GORM、SQLite、zerolog；飞书使用 [官方 Go SDK](https://github.com/larksuite/oapi-sdk-go)。只支持单机单进程和 SQLite。
+- 不启用 CGO。SQLite 使用纯 Go 驱动，构建、自测及发布均设置 `CGO_ENABLED=0`，不能依赖系统 SQLite 或 C 编译器。
 - 保留已使用的监控、通知、Bot、Cookie 续期、Web 管理和导出能力。阶段边界及 Spec 链接见 [重构计划](docs/plan/README.md)。
 - 在 `service/` 内开发。文档、面向维护者的解释和必要注释使用中文，专业术语和代码标识符可使用英语。
 - 服务端文档统一放在 `docs/`：`plan/` 维护计划与阶段安排，`spec/` 维护功能需求与验收，`ticket/` 存放按需拆分的实施任务。[文档入口](docs/README.md) 维护导航，本文件保留在服务端根目录作为规范入口。
@@ -74,6 +75,6 @@
 
 - 不要求 TDD、覆盖率门槛、每函数单测或全量 mock。用实际运行和最少的必要检查验证当前需求。
 - 解析/格式转换、游标规则、凭据写入、删除清理和已修复回归优先使用少量 fixture 或本地 SQLite 检查；简单 CRUD 和纯 UI 改动无需机械补测。
-- Go 工程建立后，在 `service/` 内执行 `gofmt` 并检查差异、`go build ./...`、`go vet ./...`；存在相关测试时运行 `go test ./...`，不为满足命令空造测试。
+- Go 工程建立后，在 `service/` 内执行 `gofmt` 并检查差异、`CGO_ENABLED=0 go build ./...`、`CGO_ENABLED=0 go vet ./...`；存在相关测试时运行 `CGO_ENABLED=0 go test ./...`，不为满足命令空造测试。
 - 联调 NGA、飞书和 Bark 按需手工执行，不作为自动检查的网络依赖；用假数据验证日志的调用关系、错误栈和脱敏。
 - 文档改动检查相对链接和 `git diff --check`。报告已完成的验收、实际运行的命令及阻塞原因，不能把未运行的检查写成通过。

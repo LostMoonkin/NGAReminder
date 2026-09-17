@@ -37,6 +37,11 @@ server/nga_data.db
 # Configuration (keep examples)
 server/config/config.json
 !server/config/config.example.json
+service/config.json
+service/config.local.json
+
+# Go build output
+service/bin/
 
 # Environment Variables
 .env

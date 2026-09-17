@@ -1,10 +1,11 @@
 # Go 服务端重构计划
 
-当前已确定工程规范和以下阶段 Spec，尚未开始 Go 实现。这里统一维护新服务端的阶段安排与进度，具体需求和验收见相应 Spec；[历史项目计划](../../../archive/rust-service/PROJECT_PLAN.md) 保留在归档中。
+阶段 01 已完成实现与自测，其余阶段待实现。这里统一维护新服务端的阶段安排与进度，具体需求和验收见相应 Spec；[历史项目计划](../../../archive/rust-service/PROJECT_PLAN.md) 保留在归档中。
 
 ## 已确认的方向
 
 - 个人 side project，人工可维护性优先；Go + Gin + GORM + SQLite + zerolog，飞书接入官方 Go SDK。
+- 不启用 CGO，SQLite 驱动与构建、自测、发布流程均按 `CGO_ENABLED=0` 验证。
 - 按 handler、service、repository 分层，外部服务接入 infrastructure；具体规则见 [服务端 AGENTS.md](../../AGENTS.md)。
 - 保留 TID/UID 监控、调度、通知、Bot 指令、Cookie 续期、Web 管理、内容保存与导出。
 - Go 运行时仅支持 SQLite 和单机单进程，移除 PostgreSQL、多实例协调及为未来扩展预留的框架；旧 PG 数据通过一次停机迁移导入。
@@ -16,7 +17,7 @@
 
 | 阶段 | Spec | 完成后可做什么 | 依赖 | 状态 |
 | --- | --- | --- | --- | --- |
-| 01 | [运行基础与日志](../spec/01-runtime-and-logging.md) | 启动服务、进入管理页、查询健康状态并追踪请求和错误 | 无 | 待实现 |
+| 01 | [运行基础与日志](../spec/01-runtime-and-logging.md) | 启动服务、进入管理页、查询健康状态并追踪请求和错误 | 无 | 已完成 |
 | 02 | [NGA 账号与 TID 监控](../spec/02-nga-and-thread-monitoring.md) | 配置 Cookie，手动保存主题历史和新增楼层 | 01 | 待实现 |
 | 03 | [UID 监控与统一调度](../spec/03-user-monitoring-and-scheduling.md) | 自动监控主题和用户，配置拉取频率与免拉取时段 | 02 | 待实现 |
 | 04 | [通知与收件箱](../spec/04-notifications.md) | 匹配新内容，通过 Bark/飞书发送通知并查看结果 | 03 | 待实现 |
