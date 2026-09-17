@@ -77,7 +77,7 @@ func request(t *testing.T, router http.Handler, method, path, bearer string) *ht
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 	if recorder.Header().Get("X-Request-ID") == "" {
-		t.Fatal("每个响应都必须有 X-Request-ID")
+		t.Fatal("every response must include X-Request-ID")
 	}
 	return recorder
 }
@@ -85,7 +85,7 @@ func request(t *testing.T, router http.Handler, method, path, bearer string) *ht
 func expectStatus(t *testing.T, response *httptest.ResponseRecorder, want int) {
 	t.Helper()
 	if response.Code != want {
-		t.Fatalf("HTTP 状态 %d，预期 %d，响应 %s", response.Code, want, response.Body.String())
+		t.Fatalf("HTTP status %d, want %d, response %s", response.Code, want, response.Body.String())
 	}
 }
 
@@ -108,10 +108,10 @@ func TestPasswordlessAdminAndRequestChain(t *testing.T) {
 	}
 	expectStatus(t, dashboard, 200)
 	if !strings.Contains(dashboard.Body.String(), "后台任务已关闭") {
-		t.Fatal("管理页缺少迁移核验模式提示")
+		t.Fatal("admin page is missing the migration verification notice")
 	}
 	if len(dashboard.Result().Cookies()) != 0 || strings.Contains(dashboard.Body.String(), "/admin/login") {
-		t.Fatal("内网管理页不应建立会话或出现登录入口")
+		t.Fatal("LAN admin page must not create sessions or show a login entry")
 	}
 	assertChain(t, logs.Bytes(), dashboard.Header().Get("X-Request-ID"))
 	settings := request(t, router, "GET", "/api/v1/settings", cfg.APIToken)
@@ -121,11 +121,11 @@ func TestPasswordlessAdminAndRequestChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload["timezone"] != "Asia/Shanghai" || payload["background_enabled"] != false || payload["database_status"] != "ok" {
-		t.Fatalf("运行设置不正确：%v", payload)
+		t.Fatalf("incorrect runtime settings: %v", payload)
 	}
 	for _, field := range []string{"api_token", "encryption_key"} {
 		if _, exists := payload[field]; exists {
-			t.Fatalf("API 泄露秘密字段 %s", field)
+			t.Fatalf("API exposed secret field %s", field)
 		}
 	}
 	assertChain(t, logs.Bytes(), settings.Header().Get("X-Request-ID"))
@@ -139,10 +139,10 @@ func TestPasswordlessAdminAndRequestChain(t *testing.T) {
 	for _, secret := range cfg.Secrets() {
 		encoded, _ := json.Marshal(secret)
 		if bytes.Contains(logs.Bytes(), []byte(secret)) || bytes.Contains(logs.Bytes(), encoded[1:len(encoded)-1]) {
-			t.Fatal("日志包含凭据")
+			t.Fatal("logs contain credentials")
 		}
 		if strings.Contains(dashboard.Body.String(), secret) {
-			t.Fatal("管理页包含凭据")
+			t.Fatal("admin page contains credentials")
 		}
 	}
 }
@@ -157,7 +157,7 @@ func TestFailureAndPanicLogs(t *testing.T) {
 	expectStatus(t, response, 500)
 	assertErrorStack(t, logs.Bytes(), response.Header().Get("X-Request-ID"), "panicInService")
 	if strings.Contains(response.Body.String(), "stack") || strings.Contains(response.Body.String(), cfg.APIToken) {
-		t.Fatal("panic 响应泄露内部信息")
+		t.Fatal("panic response exposed internal details")
 	}
 	if err := store.Close(context.Background()); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestFailureAndPanicLogs(t *testing.T) {
 	for _, event := range events(t, logs.Bytes()) {
 		encoded, _ := json.Marshal(event)
 		if strings.Contains(string(encoded), "fake-quoted") {
-			t.Fatal("panic 错误信息未脱敏")
+			t.Fatal("panic error was not redacted")
 		}
 	}
 }
@@ -189,7 +189,7 @@ func TestCrossOriginWriteRejected(t *testing.T) {
 	router.ServeHTTP(w, req)
 	expectStatus(t, w, 403)
 	if w.Header().Get("X-Request-ID") == "" {
-		t.Fatal("被拒绝请求仍应可关联")
+		t.Fatal("rejected requests must still include a trace ID")
 	}
 }
 
@@ -199,7 +199,7 @@ func events(t *testing.T, data []byte) []map[string]any {
 	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
 		var event map[string]any
 		if err := json.Unmarshal(line, &event); err != nil {
-			t.Fatalf("日志必须是有效 JSON：%v", err)
+			t.Fatalf("logs must contain valid JSON: %v", err)
 		}
 		result = append(result, event)
 	}
@@ -230,14 +230,14 @@ func assertChain(t *testing.T, data []byte, traceID string) {
 	}
 	for id, e := range starts {
 		if id == "" || !ends[id] {
-			t.Fatal("调用链缺少开始/结束、结果或耗时")
+			t.Fatal("call chain is missing start/end, result, or duration")
 		}
 		if parent, _ := e["parent_span_id"].(string); parent != "" && starts[parent] == nil {
-			t.Fatal("调用链父操作无法追溯")
+			t.Fatal("call chain references an unknown parent operation")
 		}
 	}
 	if !layers["handler"] || !layers["service"] || !layers["repository"] || !sawSQL {
-		t.Fatal("请求日志未覆盖 handler、service、repository 和 SQL")
+		t.Fatal("request logs do not cover handler, service, repository, and SQL")
 	}
 }
 
@@ -251,21 +251,21 @@ func assertErrorStack(t *testing.T, data []byte, traceID, function string) {
 		count++
 		stack, ok := e["stack"].([]any)
 		if !ok || len(stack) == 0 || e["error"] == nil || e["causes"] == nil {
-			t.Fatal("错误缺少原因链或 stack trace")
+			t.Fatal("error is missing causes or a stack trace")
 		}
 		found := false
 		for _, raw := range stack {
 			f := raw.(map[string]any)
 			if f["file"] == "" || f["line"].(float64) == 0 {
-				t.Fatal("错误栈缺少文件或行号")
+				t.Fatal("error stack is missing file or line information")
 			}
 			found = found || strings.Contains(f["func"].(string), function)
 		}
 		if !found {
-			t.Fatalf("错误栈未保留起点 %s", function)
+			t.Fatalf("error stack did not preserve origin %s", function)
 		}
 	}
 	if count != 1 {
-		t.Fatalf("同一个请求错误应打印一次，实际 %d 次", count)
+		t.Fatalf("request error must be logged once, got %d entries", count)
 	}
 }

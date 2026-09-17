@@ -51,7 +51,7 @@ func fixtureNGA(t *testing.T) *ngaFixture {
 	second := readFixture(t, "thread_page_success")
 	second["currentPage"], second["totalPage"] = 2, 2
 	p := second["result"].([]any)[1].(map[string]any)
-	p["pid"], p["lou"], p["content"] = 4003, 7, `<script>fixture-only</script>[b]第 7 楼[/b]`
+	p["pid"], p["lou"], p["content"] = 4003, 7, "<script>fixture-only</script>[b]Floor 7[/b]"
 	second["result"] = []any{p}
 	return &ngaFixture{page1: first, page2: second}
 }
@@ -77,7 +77,7 @@ func (f *ngaFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		return fixtureResponse(`{"code":0,"result":{"__T":[],"__ROWS":null}}`), nil
 	}
 	if r.URL.Path != "/app_api.php" {
-		return nil, fmt.Errorf("测试中出现非契约路径")
+		return nil, fmt.Errorf("unexpected endpoint in fixture request")
 	}
 	f.seenCookie = r.Header.Get("Cookie")
 	if err := r.ParseForm(); err != nil {
@@ -100,11 +100,11 @@ func (f *ngaFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	_ = json.Unmarshal(b, &copy)
 	if f.newPosts {
 		if page == "2" {
-			post := map[string]any{"tid": 1001, "pid": 4004, "lou": 9, "postdatetimestamp": 1767225900, "content": "新楼层", "author": map[string]any{"uid": 2005, "username": "fixture user"}}
+			post := map[string]any{"tid": 1001, "pid": 4004, "lou": 9, "postdatetimestamp": 1767225900, "content": "New reply", "author": map[string]any{"uid": 2005, "username": "fixture user"}}
 			copy["result"] = append(copy["result"].([]any), post)
 		} else {
 			parent := copy["result"].([]any)[1].(map[string]any)
-			comment := map[string]any{"tid": 1001, "pid": 5003, "lou": 0, "postdatetimestamp": 1767225900, "content": "旧楼层下的新评论", "author": map[string]any{"uid": 2005, "username": "fixture commenter"}}
+			comment := map[string]any{"tid": 1001, "pid": 5003, "lou": 0, "postdatetimestamp": 1767225900, "content": "New comment on an existing reply", "author": map[string]any{"uid": 2005, "username": "fixture commenter"}}
 			parent["comments"] = append(parent["comments"].([]any), comment)
 		}
 	}
@@ -138,7 +138,7 @@ func send(t *testing.T, router http.Handler, method, path, token string, data an
 	r := httptest.NewRecorder()
 	router.ServeHTTP(r, req)
 	if r.Header().Get("X-Request-ID") == "" {
-		t.Fatal("响应缺少关联 ID")
+		t.Fatal("response is missing a trace ID")
 	}
 	return r
 }
@@ -146,7 +146,7 @@ func send(t *testing.T, router http.Handler, method, path, token string, data an
 func payload[T any](t *testing.T, response *httptest.ResponseRecorder) (value T) {
 	t.Helper()
 	if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
-		t.Fatalf("解析响应：%v %s", err, response.Body.String())
+		t.Fatalf("decode response: %v %s", err, response.Body.String())
 	}
 	return value
 }
@@ -172,7 +172,7 @@ func runWatch(t *testing.T, router http.Handler, token string, id int64) reposit
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("采集没有在本地 fixture 时限内完成")
+	t.Fatal("collection did not finish within the fixture timeout")
 	return run
 }
 
@@ -205,78 +205,78 @@ func TestThreadMonitoringWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if account.Status != "valid" || !bytes.Equal(ciphertext, account.Cookie) || account.LastError == "" {
-		t.Fatal("无效替换破坏了原有凭据或缺少校验错误")
+		t.Fatal("invalid replacement changed existing credentials or omitted the validation error")
 	}
-	response = send(t, router, "POST", "/admin/watches", "", url.Values{"tid": {"1001"}, "init_mode": {"full"}, "label": {"中文主题"}})
+	response = send(t, router, "POST", "/admin/watches", "", url.Values{"tid": {"1001"}, "init_mode": {"full"}, "label": {"Fixture thread"}})
 	expectStatus(t, response, 303)
 	if response.Header().Get("Location") != "/admin/watches/1" {
-		t.Fatal("创建后未跳转监控详情")
+		t.Fatal("creation did not redirect to the watch detail page")
 	}
 	f.mu.Lock()
 	f.code, f.failPage = 51, 2
 	f.mu.Unlock()
 	run := runWatch(t, router, cfg.APIToken, 1)
 	if run.Status != "skipped_pending" || run.Pages != 1 || run.Saved != 4 || !run.Silent {
-		t.Fatalf("不完整初始化结果：%+v", run)
+		t.Fatalf("unexpected incomplete initialization result: %+v", run)
 	}
 	watch, err := store.Watch(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if watch.BaselineComplete || watch.CursorFloor != 0 {
-		t.Fatalf("失败提前完成基线：%+v", watch)
+		t.Fatalf("failure completed the baseline prematurely: %+v", watch)
 	}
 	f.mu.Lock()
 	f.code = 0
 	f.mu.Unlock()
 	run = runWatch(t, router, cfg.APIToken, 1)
 	if run.Status != "success" || run.Saved != 1 || !run.Silent {
-		t.Fatalf("重跑没有复用已保存内容：%+v", run)
+		t.Fatalf("rerun did not reuse saved content: %+v", run)
 	}
 	watch, _ = store.Watch(ctx, 1)
 	if !watch.BaselineComplete || watch.CursorFloor != 7 {
-		t.Fatalf("未按实际楼层设置水位：%+v", watch)
+		t.Fatalf("cursor does not reflect the actual floor: %+v", watch)
 	}
 	run = runWatch(t, router, cfg.APIToken, 1)
 	if run.Saved != 0 || run.Silent {
-		t.Fatalf("重跑重复保存或未进入增量：%+v", run)
+		t.Fatalf("rerun saved duplicates or did not enter incremental collection: %+v", run)
 	}
 	f.mu.Lock()
 	f.newPosts = true
 	f.mu.Unlock()
 	run = runWatch(t, router, cfg.APIToken, 1)
 	if run.Status != "success" || run.Saved != 2 {
-		t.Fatalf("新回复和旧楼层下新增评论未保存：%+v", run)
+		t.Fatalf("new reply or comment on an existing reply was not saved: %+v", run)
 	}
 	posts, total, err := store.Posts(ctx, 1001, 1)
 	if err != nil || total != 7 || len(posts) != 7 {
-		t.Fatalf("帖子去重不正确 %d %v", total, err)
+		t.Fatalf("incorrect post deduplication: %d %v", total, err)
 	}
 	response = request(t, router, "GET", "/admin/threads/1001", "")
 	expectStatus(t, response, 200)
 	if strings.Contains(response.Body.String(), "<script>fixture-only</script>") || !strings.Contains(response.Body.String(), "&lt;script&gt;") {
-		t.Fatal("纯文本预览没有转义 HTML")
+		t.Fatal("plain-text preview did not escape HTML")
 	}
 	for _, action := range []string{"pause", "resume", "reset"} {
 		response = send(t, router, "POST", "/admin/watches/1/"+action, "", url.Values{"init_mode": {"full"}})
 		expectStatus(t, response, 303)
 		watch, _ = store.Watch(ctx, 1)
 		if action == "pause" && !watch.Paused || action == "resume" && watch.Paused || action == "reset" && watch.BaselineComplete {
-			t.Fatalf("%s 未生效：%+v", action, watch)
+			t.Fatalf("%s did not take effect: %+v", action, watch)
 		}
 	}
-	response = send(t, router, "POST", "/admin/watches/1", "", url.Values{"tid": {"1001"}, "init_mode": {"full"}, "label": {"已修改备注"}})
+	response = send(t, router, "POST", "/admin/watches/1", "", url.Values{"tid": {"1001"}, "init_mode": {"full"}, "label": {"Updated label"}})
 	expectStatus(t, response, 303)
 	response = request(t, router, "GET", "/admin/watches/1", "")
 	expectStatus(t, response, 200)
-	if !strings.Contains(response.Body.String(), "已修改备注") || !strings.Contains(response.Body.String(), run.TraceID) {
-		t.Fatal("详情未展示配置和日志关联 ID")
+	if !strings.Contains(response.Body.String(), "Updated label") || !strings.Contains(response.Body.String(), run.TraceID) {
+		t.Fatal("detail page did not display configuration and log trace ID")
 	}
 	response = send(t, router, "POST", "/admin/watches/1/delete", "", nil)
 	expectStatus(t, response, 303)
 	_, total, _ = store.Posts(ctx, 1001, 1)
 	if total != 7 {
-		t.Fatal("删除监控删除了已保存内容")
+		t.Fatal("deleting the watch removed saved content")
 	}
 	expectStatus(t, request(t, router, "GET", "/admin/threads/1001", ""), 200)
 	// 新目标的 from-now 基线不导入历史；下一轮只保存水位之后的新楼层。
@@ -287,26 +287,26 @@ func TestThreadMonitoringWorkflow(t *testing.T) {
 	run = runWatch(t, router, cfg.APIToken, watch.ID)
 	_, total, _ = store.Posts(ctx, 1002, 1)
 	if run.Status != "success" || !run.Silent || total != 0 {
-		t.Fatalf("from-now 导入了历史：%+v total=%d", run, total)
+		t.Fatalf("from-now imported historical content: %+v total=%d", run, total)
 	}
 	f.mu.Lock()
 	f.newPosts = true
 	f.mu.Unlock()
 	run = runWatch(t, router, cfg.APIToken, watch.ID)
 	if run.Status != "success" || run.Saved != 1 || run.Silent {
-		t.Fatalf("from-now 后续新回复未保存：%+v", run)
+		t.Fatalf("from-now did not save the subsequent reply: %+v", run)
 	}
 	monitor.Close()
 	f.mu.Lock()
 	usedCookie := f.seenCookie
 	f.mu.Unlock()
 	if usedCookie != fullCookie {
-		t.Fatal("失败的候选凭据影响了采集或完整 Cookie 被丢弃")
+		t.Fatal("rejected credentials affected collection or the full Cookie was lost")
 	}
 	response = request(t, router, "GET", "/api/v1/nga-account", cfg.APIToken)
 	for _, secret := range []string{"fixture-valid-secret", "fixture-invalid-secret", "fixture-browser-secret"} {
 		if bytes.Contains(logs.Bytes(), []byte(secret)) || strings.Contains(response.Body.String(), secret) || bytes.Contains(ciphertext, []byte(secret)) {
-			t.Fatal("凭据出现在日志、API 或明文存储中")
+			t.Fatal("credentials appeared in logs, API responses, or plaintext storage")
 		}
 	}
 	assertCollectionChain(t, logs.Bytes(), run.TraceID, run.SourceTraceID)
@@ -317,13 +317,13 @@ func TestThreadMonitoringWorkflow(t *testing.T) {
 	router, restarted, _ := openAppWithTransport(t, cfg, io.Discard, f)
 	account, err = restarted.Account(ctx)
 	if err != nil || !bytes.Equal(account.Cookie, ciphertext) {
-		t.Fatal("重启后丢失凭据")
+		t.Fatal("credentials were lost after restart")
 	}
 	response = send(t, router, "POST", "/api/v1/nga-account/check", cfg.APIToken, nil)
 	expectStatus(t, response, 200)
 	watch, _ = restarted.Watch(ctx, watch.ID)
 	if !watch.BaselineComplete || watch.HistoryFloor != 7 || watch.CursorFloor != 9 {
-		t.Fatalf("重启丢失边界：%+v", watch)
+		t.Fatalf("baseline boundaries were lost after restart: %+v", watch)
 	}
 }
 
@@ -357,20 +357,20 @@ func assertCollectionChain(t *testing.T, raw []byte, trace, source string) {
 	}
 	for _, operation := range []string{"service.collect_thread", "infrastructure.nga.thread_page", "infrastructure.nga.http", "repository.transaction", "repository.insert_posts", "repository.save_watch"} {
 		if !seen[operation] {
-			t.Fatalf("采集 trace 缺少 %s", operation)
+			t.Fatalf("collection trace is missing %s", operation)
 		}
 	}
 	if !sourceFound {
-		t.Fatal("采集 trace 缺少来源 HTTP 请求")
+		t.Fatal("collection trace is missing its originating HTTP request")
 	}
 	for id := range starts {
 		if !ended[id] {
-			t.Fatalf("操作缺少结束日志 %s", id)
+			t.Fatalf("operation is missing its end log: %s", id)
 		}
 	}
 	for _, id := range parents {
 		if !starts[id] {
-			t.Fatalf("操作缺少父 span %s", id)
+			t.Fatalf("operation is missing parent span: %s", id)
 		}
 	}
 }
@@ -397,51 +397,51 @@ func TestCollectionFailuresKeepCommittedCursor(t *testing.T) {
 		f.mu.Unlock()
 		run := runWatch(t, router, cfg.APIToken, watch.ID)
 		if run.Status != scenario.status || run.Error == "" || run.FinishedAt == nil {
-			t.Fatalf("业务/解析失败被误判成功：%+v", run)
+			t.Fatalf("business or decoding failure was reported as success: %+v", run)
 		}
 		persisted, err := store.Watch(ctx, watch.ID)
 		if err != nil || !persisted.BaselineComplete || persisted.CursorFloor != 7 {
-			t.Fatalf("失败改变了原有效水位：%+v %v", persisted, err)
+			t.Fatalf("failure changed the committed cursor: %+v %v", persisted, err)
 		}
 		if scenario.code == 14 && persisted.State != "missing" || scenario.code == 46 && persisted.State != "auth_paused" {
-			t.Fatalf("监控状态未区分业务错误：%+v", persisted)
+			t.Fatalf("watch state did not distinguish the business error: %+v", persisted)
 		}
 		if scenario.code == 14 {
 			f.mu.Lock()
 			f.code = 0
 			f.mu.Unlock()
 			if recovered := runWatch(t, router, cfg.APIToken, watch.ID); recovered.Status != "success" {
-				t.Fatalf("主题恢复可见后不能手动恢复采集：%+v", recovered)
+				t.Fatalf("manual collection did not recover after the thread became accessible: %+v", recovered)
 			}
 		}
 	}
 	account, _ := store.Account(ctx)
 	if account.Status != "auth_paused" {
-		t.Fatal("认证失效未暂停账号")
+		t.Fatal("authentication failure did not pause the account")
 	}
 	expectStatus(t, send(t, router, "POST", "/api/v1/watches/1/run", cfg.APIToken, nil), 422)
 	expectStatus(t, send(t, router, "POST", "/api/v1/watches/1/pause", cfg.APIToken, nil), 200)
 	expectStatus(t, send(t, router, "PUT", "/api/v1/nga-account", cfg.APIToken, credentials), 200)
 	watch, _ = store.Watch(ctx, watch.ID)
 	if watch.State != "ready" || !watch.Paused {
-		t.Fatalf("校验成功未解除认证暂停，或覆盖了用户暂停：%+v", watch)
+		t.Fatalf("validation did not clear the authentication pause or overwrote the user pause: %+v", watch)
 	}
 	f.mu.Lock()
 	f.code = 0
 	f.mu.Unlock()
 	if run := runWatch(t, router, cfg.APIToken, watch.ID); run.Status != "success" || run.Saved != 0 {
-		t.Fatalf("恢复后不能去重重跑：%+v", run)
+		t.Fatalf("rerun after recovery did not deduplicate content: %+v", run)
 	}
 	monitor.Close()
 	for _, event := range events(t, logs.Bytes()) {
 		if event["error"] != nil && (event["stack"] == nil || event["causes"] == nil) {
-			t.Fatal("错误日志缺少原因或 stack")
+			t.Fatal("error log is missing causes or stack")
 		}
 	}
 }
 
 func TestVerificationModeAndInterruptedRun(t *testing.T) {
-	t.Run("核验模式不发请求", func(t *testing.T) {
+	t.Run("verification mode makes no requests", func(t *testing.T) {
 		cfg := testConfig(t)
 		f := fixtureNGA(t)
 		router, _, _ := openAppWithTransport(t, cfg, io.Discard, f)
@@ -449,10 +449,10 @@ func TestVerificationModeAndInterruptedRun(t *testing.T) {
 		expectStatus(t, send(t, router, "PUT", "/api/v1/nga-account", cfg.APIToken, service.AccountInput{PassportUID: "2001", PassportCID: "fixture-valid-secret"}), 409)
 		expectStatus(t, send(t, router, "POST", fmt.Sprintf("/api/v1/watches/%d/run", watch.ID), cfg.APIToken, nil), 409)
 		if f.calls != 0 {
-			t.Fatal("核验模式访问了 NGA")
+			t.Fatal("verification mode contacted NGA")
 		}
 	})
-	t.Run("停止中断采集并允许重启重跑", func(t *testing.T) {
+	t.Run("shutdown interrupts collection and permits rerun after restart", func(t *testing.T) {
 		cfg := testConfig(t)
 		cfg.BackgroundEnabled = true
 		f := fixtureNGA(t)
@@ -472,11 +472,11 @@ func TestVerificationModeAndInterruptedRun(t *testing.T) {
 		monitor.Close()
 		run, err := store.Run(context.Background(), run.ID)
 		if err != nil || run.Status != "interrupted" {
-			t.Fatalf("停止后仍显示运行中：%+v %v", run, err)
+			t.Fatalf("run still appears active after shutdown: %+v %v", run, err)
 		}
 		watch, _ = store.Watch(context.Background(), watch.ID)
 		if watch.BaselineComplete || watch.CursorFloor != 0 {
-			t.Fatal("中断提前推进基线")
+			t.Fatal("interruption advanced the baseline prematurely")
 		}
 		// 模拟未执行退出清理的旧 running 行；重启只标记中断，不自动补抓。
 		stale := repository.Run{TID: 1001, WatchID: watch.ID, Status: "running", StartedAt: time.Now().UTC()}
@@ -490,7 +490,7 @@ func TestVerificationModeAndInterruptedRun(t *testing.T) {
 		router, reopened, _ := openAppWithTransport(t, cfg, io.Discard, f)
 		stale, _ = reopened.Run(context.Background(), stale.ID)
 		if stale.Status != "interrupted" {
-			t.Fatal("重启没有标记上次中断的任务")
+			t.Fatal("restart did not mark the previous run as interrupted")
 		}
 		if run = runWatch(t, router, cfg.APIToken, watch.ID); run.Status != "success" {
 			t.Fatal(run)

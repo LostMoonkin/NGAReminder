@@ -129,7 +129,7 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 	if err != nil {
 		return account, err
 	}
-	zerolog.Ctx(ctx).Info().Bool("check_only", checkOnly).Bool("full_cookie", credentials.FullCookie).Msg("校验 NGA 凭据")
+	zerolog.Ctx(ctx).Info().Bool("check_only", checkOnly).Bool("full_cookie", credentials.FullCookie).Msg("Validating NGA credentials")
 	checkCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer stop()
@@ -218,7 +218,7 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 		watch.Title = ""
 	}
 	watch.TID, watch.Label, watch.InitMode = input.TID, strings.TrimSpace(input.Label), input.InitMode
-	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Str("init_mode", input.InitMode).Msg("保存 TID 监控")
+	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Str("init_mode", input.InitMode).Msg("Saving TID watch")
 	err = m.store.SaveWatch(ctx, &watch)
 	return watch, err
 }
@@ -238,7 +238,7 @@ func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode str
 	if err != nil {
 		return watch, err
 	}
-	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Str("action", action).Msg("修改监控状态")
+	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Str("action", action).Msg("Changing watch state")
 	switch action {
 	case "pause":
 		watch.Paused = true

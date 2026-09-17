@@ -33,41 +33,41 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	})
 	if err != nil {
-		return nil, logging.Wrap(err, "打开 SQLite")
+		return nil, logging.Wrap(err, "open SQLite")
 	}
 	pool, err := db.DB()
 	if err != nil {
-		return nil, logging.Wrap(err, "取得 SQLite 连接")
+		return nil, logging.Wrap(err, "get SQLite connection")
 	}
 	pool.SetMaxOpenConns(1)
 	pool.SetMaxIdleConns(1)
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, logging.Wrap(pool.Close(), "关闭未初始化的 SQLite"))
+			err = errors.Join(err, logging.Wrap(pool.Close(), "close uninitialized SQLite connection"))
 		}
 	}()
 	db = db.WithContext(ctx)
 	var id, tables int
 	if err = db.Raw("PRAGMA application_id").Scan(&id).Error; err != nil {
-		return nil, logging.Wrap(err, "读取 SQLite 标识")
+		return nil, logging.Wrap(err, "read SQLite application ID")
 	}
 	if err = db.Raw("SELECT count(*) FROM sqlite_master WHERE type = ? AND name NOT LIKE ?", "table", "sqlite_%").Scan(&tables).Error; err != nil {
-		return nil, logging.Wrap(err, "读取 SQLite schema")
+		return nil, logging.Wrap(err, "read SQLite schema")
 	}
 	if id != applicationID && (id != 0 || tables > 0) {
-		return nil, logging.WithStack(errors.New("database_path 指向未识别的数据库；请使用独立空库，旧数据需显式迁移"))
+		return nil, logging.WithStack(errors.New("database_path points to an unrecognized database; use a separate empty database and explicitly migrate existing data"))
 	}
 	if err = db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
-		return nil, logging.Wrap(err, "启用 SQLite WAL")
+		return nil, logging.Wrap(err, "enable SQLite WAL")
 	}
 	if err = db.Exec(fmt.Sprintf("PRAGMA application_id = %d", applicationID)).Error; err != nil {
-		return nil, logging.Wrap(err, "写入 SQLite 标识")
+		return nil, logging.Wrap(err, "write SQLite application ID")
 	}
 	if err = os.Chmod(path, 0600); err != nil {
-		return nil, logging.Wrap(err, "设置数据库文件权限")
+		return nil, logging.Wrap(err, "set database file permissions")
 	}
 	if err = db.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}); err != nil {
-		return nil, logging.Wrap(err, "初始化 NGA 账号和监控表")
+		return nil, logging.Wrap(err, "initialize NGA account and monitoring tables")
 	}
 	return &Store{db: db, pool: pool}, nil
 }
@@ -77,11 +77,11 @@ func (s *Store) Check(ctx context.Context) (err error) {
 	defer span.End(&err)
 	var one int
 	err = s.db.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error
-	return logging.Wrap(err, "SQLite 不可访问")
+	return logging.Wrap(err, "SQLite is unavailable")
 }
 
 func (s *Store) Close(ctx context.Context) (err error) {
 	_, span := logging.Start(ctx, "repository.close")
 	defer span.End(&err)
-	return logging.Wrap(s.pool.Close(), "关闭 SQLite")
+	return logging.Wrap(s.pool.Close(), "close SQLite")
 }

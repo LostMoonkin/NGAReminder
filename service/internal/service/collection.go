@@ -57,7 +57,7 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 		taskSpan.End(&err)
 		return run, err
 	}
-	zerolog.Ctx(ctx).Info().Int64("run_id", run.ID).Int64("watch_id", id).Str("run_trace_id", run.TraceID).Msg("已开始手动采集")
+	zerolog.Ctx(ctx).Info().Int64("run_id", run.ID).Int64("watch_id", id).Str("run_trace_id", run.TraceID).Msg("Manual collection started")
 	started = true
 	go func(run repository.Run) {
 		defer m.work.Unlock()
@@ -73,12 +73,12 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 				finishCtx, done := context.WithTimeout(context.WithoutCancel(taskCtx), 5*time.Second)
 				defer done()
 				runErr = errors.Join(runErr, m.finishFailedRun(finishCtx, &run, &watch, runErr))
-				logging.Error(taskCtx, runErr, "主题采集未完成", zerolog.ErrorLevel)
+				logging.Error(taskCtx, runErr, "Thread collection did not complete", zerolog.ErrorLevel)
 			}
-			zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Str("status", run.Status).Int("pages", run.Pages).Int64("saved", run.Saved).Msg("主题采集结束")
+			zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Str("status", run.Status).Int("pages", run.Pages).Int64("saved", run.Saved).Msg("Thread collection finished")
 		}()
 		zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Int64("tid", watch.TID).
-			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Bool("silent", run.Silent).Msg("开始采集主题")
+			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Bool("silent", run.Silent).Msg("Starting thread collection")
 		runErr = m.collect(taskCtx, credentials, &watch, &run)
 	}(run)
 	return run, nil
@@ -151,7 +151,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		}
 		*run = next
 		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("page", page).Int("total_pages", first.TotalPages).
-			Int64("saved", run.Saved).Msg("主题页已保存，完成全轮后推进水位")
+			Int64("saved", run.Saved).Msg("Thread page saved; cursor will advance after the entire run completes")
 	}
 	return m.finishSuccessfulRun(ctx, watch, run, maxFloor)
 }

@@ -14,7 +14,7 @@ NGA Reminder 用于 NGA 主题与用户监控、内容保存和通知。服务�
 
 Go 服务端从 [开发规范](service/AGENTS.md) 和 [重构计划与阶段 Spec](service/docs/plan/README.md) 开始。文档统一在 `service/docs/` 下按 `plan/`、`spec/`、`ticket/` 维护。重构保留当前在用功能，移除运行时 PostgreSQL 和多实例设计；现有部署按“Rust 停机 → PG 迁移 SQLite → 核验 → Go 上线”切换，见 [数据迁移 Spec](service/docs/spec/09-data-migration.md)。详细实现随阶段确定，暂不拆 tickets。
 
-本地启动和配置说明见 [服务端文档](service/docs/README.md#本地运行)，需要 Go 1.26 或更新版本，构建和自测均使用 `CGO_ENABLED=0`。
+本地启动和配置说明见 [服务端文档](service/docs/README.md#本地运行)，需要 Go 1.27.0 或更新版本，构建和自测均使用 `CGO_ENABLED=0`。
 
 ## Rust 服务端归档
 

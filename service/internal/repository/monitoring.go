@@ -87,7 +87,7 @@ func (s *Store) Transaction(ctx context.Context, fn func(context.Context, *Store
 	ctx, span := logging.Start(ctx, "repository.transaction")
 	defer span.End(&err)
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return fn(ctx, &Store{db: tx, pool: s.pool}) })
-	return logging.Wrap(err, "提交业务事务")
+	return logging.Wrap(err, "commit business transaction")
 }
 
 func (s *Store) Account(ctx context.Context) (account Account, err error) {
@@ -97,13 +97,13 @@ func (s *Store) Account(ctx context.Context) (account Account, err error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Account{ID: 1, Status: "unconfigured"}, nil
 	}
-	return account, logging.Wrap(err, "读取 NGA 账号")
+	return account, logging.Wrap(err, "read NGA account")
 }
 
 func (s *Store) SaveAccount(ctx context.Context, account *Account) (err error) {
 	ctx, span := logging.Start(ctx, "repository.save_account")
 	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Save(account).Error, "保存 NGA 账号")
+	return logging.Wrap(s.db.WithContext(ctx).Save(account).Error, "save NGA account")
 }
 
 func (s *Store) SetAuthPaused(ctx context.Context, paused bool) (err error) {
@@ -113,7 +113,7 @@ func (s *Store) SetAuthPaused(ctx context.Context, paused bool) (err error) {
 	if !paused {
 		from, to = to, from
 	}
-	return logging.Wrap(s.db.WithContext(ctx).Model(&Watch{}).Where("state = ?", from).Update("state", to).Error, "更新监控认证状态")
+	return logging.Wrap(s.db.WithContext(ctx).Model(&Watch{}).Where("state = ?", from).Update("state", to).Error, "update watch authentication state")
 }
 
 func (s *Store) Watches(ctx context.Context) (watches []Watch, err error) {
@@ -121,39 +121,39 @@ func (s *Store) Watches(ctx context.Context) (watches []Watch, err error) {
 	defer span.End(&err)
 	watches = []Watch{}
 	err = s.db.WithContext(ctx).Order("id DESC").Find(&watches).Error
-	return watches, logging.Wrap(err, "读取监控列表")
+	return watches, logging.Wrap(err, "read watches")
 }
 
 func (s *Store) Watch(ctx context.Context, id int64) (watch Watch, err error) {
 	ctx, span := logging.Start(ctx, "repository.watch")
 	defer span.End(&err)
 	err = s.db.WithContext(ctx).First(&watch, id).Error
-	return watch, logging.Wrap(err, "读取监控")
+	return watch, logging.Wrap(err, "read watch")
 }
 
 func (s *Store) SaveWatch(ctx context.Context, watch *Watch) (err error) {
 	ctx, span := logging.Start(ctx, "repository.save_watch")
 	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Save(watch).Error, "保存监控")
+	return logging.Wrap(s.db.WithContext(ctx).Save(watch).Error, "save watch")
 }
 
 func (s *Store) DeleteWatch(ctx context.Context, id int64) (err error) {
 	ctx, span := logging.Start(ctx, "repository.delete_watch")
 	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Delete(&Watch{}, id).Error, "删除监控")
+	return logging.Wrap(s.db.WithContext(ctx).Delete(&Watch{}, id).Error, "delete watch")
 }
 
 func (s *Store) SaveRun(ctx context.Context, run *Run) (err error) {
 	ctx, span := logging.Start(ctx, "repository.save_run")
 	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Save(run).Error, "保存采集运行")
+	return logging.Wrap(s.db.WithContext(ctx).Save(run).Error, "save collection run")
 }
 
 func (s *Store) Run(ctx context.Context, id int64) (run Run, err error) {
 	ctx, span := logging.Start(ctx, "repository.run")
 	defer span.End(&err)
 	err = s.db.WithContext(ctx).First(&run, id).Error
-	return run, logging.Wrap(err, "读取采集运行")
+	return run, logging.Wrap(err, "read collection run")
 }
 
 func (s *Store) Runs(ctx context.Context, tid int64) (runs []Run, err error) {
@@ -161,7 +161,7 @@ func (s *Store) Runs(ctx context.Context, tid int64) (runs []Run, err error) {
 	defer span.End(&err)
 	runs = []Run{}
 	err = s.db.WithContext(ctx).Where("tid = ?", tid).Order("id DESC").Limit(20).Find(&runs).Error
-	return runs, logging.Wrap(err, "读取最近采集运行")
+	return runs, logging.Wrap(err, "read recent collection runs")
 }
 
 func (s *Store) InterruptRuns(ctx context.Context) (err error) {
@@ -169,7 +169,7 @@ func (s *Store) InterruptRuns(ctx context.Context) (err error) {
 	defer span.End(&err)
 	return logging.Wrap(s.db.WithContext(ctx).Model(&Run{}).Where("status = ?", "running").Updates(map[string]any{
 		"status": "interrupted", "finished_at": time.Now().UTC(), "error": "上次进程中断，请手动重跑",
-	}).Error, "标记中断的采集")
+	}).Error, "mark interrupted collection runs")
 }
 
 func (s *Store) InsertPosts(ctx context.Context, posts []Post) (saved int64, err error) {
@@ -179,7 +179,7 @@ func (s *Store) InsertPosts(ctx context.Context, posts []Post) (saved int64, err
 		return 0, nil
 	}
 	result := s.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tid"}, {Name: "key"}}, DoNothing: true}).CreateInBatches(&posts, 50)
-	return result.RowsAffected, logging.Wrap(result.Error, "保存新帖子")
+	return result.RowsAffected, logging.Wrap(result.Error, "save new posts")
 }
 
 func (s *Store) Posts(ctx context.Context, tid int64, page int) (posts []Post, total int64, err error) {
@@ -187,11 +187,11 @@ func (s *Store) Posts(ctx context.Context, tid int64, page int) (posts []Post, t
 	defer span.End(&err)
 	query := s.db.WithContext(ctx).Model(&Post{}).Where("tid = ?", tid)
 	if err = query.Count(&total).Error; err != nil {
-		return nil, 0, logging.Wrap(err, "统计帖子")
+		return nil, 0, logging.Wrap(err, "count posts")
 	}
 	posts = []Post{}
 	err = query.Order("CASE WHEN kind = 'comment' THEN parent_floor ELSE floor END, CASE WHEN kind = 'comment' THEN 1 ELSE 0 END, published_at, id").Offset((page - 1) * 50).Limit(50).Find(&posts).Error
-	return posts, total, logging.Wrap(err, "读取帖子")
+	return posts, total, logging.Wrap(err, "read posts")
 }
 
 func (s *Store) Threads(ctx context.Context) (threads []ThreadSummary, err error) {
@@ -199,5 +199,5 @@ func (s *Store) Threads(ctx context.Context) (threads []ThreadSummary, err error
 	defer span.End(&err)
 	threads = []ThreadSummary{}
 	err = s.db.WithContext(ctx).Model(&Post{}).Select("tid, MAX(CASE WHEN kind = 'main' THEN subject ELSE '' END) AS title, COUNT(*) AS count").Group("tid").Order("MAX(id) DESC").Scan(&threads).Error
-	return threads, logging.Wrap(err, "读取已保存主题")
+	return threads, logging.Wrap(err, "read saved threads")
 }

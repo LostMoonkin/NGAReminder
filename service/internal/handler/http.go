@@ -27,7 +27,7 @@ type Handler struct {
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
 	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText}).Parse(pages)
 	if err != nil {
-		return nil, logging.Wrap(err, "加载管理页")
+		return nil, logging.Wrap(err, "load admin templates")
 	}
 	h := &Handler{admin, monitor, templates}
 	gin.SetMode(gin.ReleaseMode)
@@ -35,7 +35,7 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	// Gin 的自动尾斜杠重定向会跳过中间件；让所有路由结果都经过调用链日志。
 	router.RedirectTrailingSlash = false
 	if err = router.SetTrustedProxies(nil); err != nil {
-		return nil, logging.Wrap(err, "设置 HTTP 代理策略")
+		return nil, logging.Wrap(err, "configure trusted HTTP proxies")
 	}
 	router.HandleMethodNotAllowed = true
 	router.Use(traceRequests(log))
@@ -43,7 +43,7 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	router.Use(func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		if err := origin.Check(c.Request); err != nil {
-			fail(c, http.StatusForbidden, "请从本站页面提交操作", logging.Wrap(err, "跨站操作被拒绝"))
+			fail(c, http.StatusForbidden, "请从本站页面提交操作", logging.Wrap(err, "cross-origin request rejected"))
 			return
 		}
 		c.Next()
@@ -55,10 +55,10 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
 	h.monitoringRoutes(router)
 	router.NoRoute(func(c *gin.Context) {
-		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("路由不存在")))
+		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("route not found")))
 	})
 	router.NoMethod(func(c *gin.Context) {
-		fail(c, http.StatusMethodNotAllowed, "请求方法不支持", logging.WithStack(errors.New("请求方法不支持")))
+		fail(c, http.StatusMethodNotAllowed, "请求方法不支持", logging.WithStack(errors.New("method not allowed")))
 	})
 	return router, nil
 }
@@ -89,7 +89,7 @@ func traceRequests(log *logging.Logger) gin.HandlerFunc {
 				if c.Writer.Status() >= 500 {
 					level = zerolog.ErrorLevel
 				}
-				logging.Error(ctx, err, "HTTP 请求未完成预期操作", level)
+				logging.Error(ctx, err, "HTTP request failed", level)
 			}
 			zerolog.Ctx(ctx).Info().Str("event", "http").Str("method", c.Request.Method).
 				Str("route", path).Int("status", c.Writer.Status()).Int("response_bytes", c.Writer.Size()).Msg("")
@@ -150,7 +150,7 @@ func (h *Handler) dashboard(c *gin.Context) {
 func (h *Handler) render(c *gin.Context, status int, name string, data any) {
 	var body bytes.Buffer
 	if err := h.pages.ExecuteTemplate(&body, name, data); err != nil {
-		fail(c, http.StatusInternalServerError, "页面暂时不可用", logging.Wrap(err, "渲染管理页"))
+		fail(c, http.StatusInternalServerError, "页面暂时不可用", logging.Wrap(err, "render admin page"))
 		return
 	}
 	c.Data(status, "text/html; charset=utf-8", body.Bytes())

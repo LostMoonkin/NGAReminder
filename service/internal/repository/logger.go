@@ -31,7 +31,7 @@ func (l sqlLogger) Warn(ctx context.Context, message string, args ...any) {
 }
 
 func (l sqlLogger) Error(ctx context.Context, message string, args ...any) {
-	logging.Error(l.context(ctx), logging.WithStack(fmt.Errorf(message, args...)), "GORM 内部错误", zerolog.ErrorLevel)
+	logging.Error(l.context(ctx), logging.WithStack(fmt.Errorf(message, args...)), "GORM internal error", zerolog.ErrorLevel)
 }
 
 func (l sqlLogger) Trace(ctx context.Context, begin time.Time, query func() (string, int64), err error) {

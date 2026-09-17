@@ -36,14 +36,14 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Timezone != "Asia/Shanghai" || cfg.BackgroundEnabled || cfg.DatabasePath != filepath.Join(dir, "data/nga-reminder.db") {
-		t.Fatal("环境变量覆盖或相对路径解析不正确")
+		t.Fatal("incorrect environment override or relative path resolution")
 	}
 	if cfg.APIToken != "x" || cfg.ListenAddress != "127.0.0.1:0" {
-		t.Fatal("旧服务允许的短 token 和动态端口应原样保留")
+		t.Fatal("short tokens and dynamic ports supported by the old service must be preserved")
 	}
 	saved, err := os.ReadFile(filename)
 	if err != nil || string(saved) != string(body) {
-		t.Fatal("加载配置不应写回文件")
+		t.Fatal("loading configuration must not modify the file")
 	}
 	for _, tc := range []struct{ name, value, field string }{
 		{"NGA_REMINDER_API_TOKEN", "", "api_token"},
@@ -56,10 +56,10 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 			t.Setenv(tc.name, tc.value)
 			_, err := Load(ctx, filename)
 			if err == nil || !strings.Contains(err.Error(), tc.field) {
-				t.Fatalf("应指出无效字段 %s，得到 %v", tc.field, err)
+				t.Fatalf("expected invalid field %s in error, got %v", tc.field, err)
 			}
 			if strings.Contains(err.Error(), "bad-private") {
-				t.Fatal("错误不应包含无效配置的秘密值")
+				t.Fatal("errors must not contain secret values from invalid configuration")
 			}
 		})
 	}

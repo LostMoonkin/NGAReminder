@@ -14,7 +14,7 @@ import (
 	"ngareminder/service/internal/repository"
 )
 
-var ErrUnauthorized = errors.New("API token 无效")
+var ErrUnauthorized = errors.New("invalid API token")
 
 type Admin struct {
 	store     *repository.Store
@@ -34,9 +34,9 @@ func NewAdmin(ctx context.Context, cfg config.Config, store *repository.Store) (
 	defer span.End(&err)
 	location, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
-		return nil, logging.Wrap(err, "加载调度时区")
+		return nil, logging.Wrap(err, "load scheduling time zone")
 	}
-	zerolog.Ctx(ctx).Info().Bool("background_enabled", cfg.BackgroundEnabled).Str("timezone", cfg.Timezone).Msg("运行设置已加载")
+	zerolog.Ctx(ctx).Info().Bool("background_enabled", cfg.BackgroundEnabled).Str("timezone", cfg.Timezone).Msg("Runtime settings loaded")
 	return &Admin{store, cfg.Public(), sha256.Sum256([]byte(cfg.APIToken)), location}, nil
 }
 

@@ -71,8 +71,8 @@ func (n *NGA) CheckCredentials(ctx context.Context, credentials Credentials) (er
 		if err == nil || (!errors.Is(err, ErrNGABusy) && !errors.Is(err, ErrNGASearchUnavailable)) || attempt >= limit {
 			return err
 		}
-		logging.Error(ctx, err, "NGA 用户回复接口稍后重试", zerolog.WarnLevel)
-		zerolog.Ctx(ctx).Info().Int("attempt", attempt).Msg("重试凭据校验")
+		logging.Error(ctx, err, "NGA user replies request will be retried", zerolog.WarnLevel)
+		zerolog.Ctx(ctx).Info().Int("attempt", attempt).Msg("Retrying credential validation")
 		if err = wait(ctx, delay); err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ func (n *NGA) CheckCredentials(ctx context.Context, credentials Credentials) (er
 func (n *NGA) ThreadPage(ctx context.Context, credentials Credentials, tid int64, page int) (result ThreadPage, err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.nga.thread_page")
 	defer span.End(&err)
-	zerolog.Ctx(ctx).Info().Int64("tid", tid).Int("page", page).Msg("读取 NGA 主题页")
+	zerolog.Ctx(ctx).Info().Int64("tid", tid).Int("page", page).Msg("Fetching NGA thread page")
 	form := url.Values{"tid": {fmt.Sprint(tid)}, "page": {fmt.Sprint(page)}}
 	body, err := n.request(ctx, http.MethodPost, "/app_api.php?__lib=post&__act=list", form.Encode(), credentials.Cookie)
 	if err != nil {
@@ -103,7 +103,7 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	n.lastRequest = time.Now()
 	req, err := http.NewRequestWithContext(ctx, method, ngaBaseURL+path, strings.NewReader(form))
 	if err != nil {
-		return nil, logging.Wrap(err, "创建 NGA 请求")
+		return nil, logging.Wrap(err, "create NGA request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", n.userAgent)
@@ -116,7 +116,7 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	status := 0
 	defer func() {
 		zerolog.Ctx(ctx).Info().Str("method", method).Str("url", ngaBaseURL+req.URL.Path).
-			Int("status", status).Dur("duration_ms", time.Since(started)).Msg("NGA HTTP 请求")
+			Int("status", status).Dur("duration_ms", time.Since(started)).Msg("NGA HTTP request")
 	}()
 	response, err := n.http.Do(req)
 	if err != nil {
@@ -124,29 +124,29 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 		if errors.As(err, &requestError) {
 			err = &url.Error{Op: requestError.Op, URL: ngaBaseURL + req.URL.Path, Err: requestError.Err}
 		}
-		return nil, logging.Wrap(err, "请求 NGA")
+		return nil, logging.Wrap(err, "request NGA")
 	}
 	defer response.Body.Close()
 	status = response.StatusCode
 	body, err = io.ReadAll(response.Body)
 	if err != nil {
-		return nil, logging.Wrap(err, "读取 NGA 响应")
+		return nil, logging.Wrap(err, "read NGA response")
 	}
 	if status == http.StatusServiceUnavailable && len(body) == 0 && req.URL.Path == "/thread.php" {
 		return nil, logging.WithStack(ErrNGASearchUnavailable)
 	}
 	if status != http.StatusOK {
-		return nil, logging.WithStack(fmt.Errorf("NGA 返回 HTTP %d", status))
+		return nil, logging.WithStack(fmt.Errorf("NGA returned HTTP %d", status))
 	}
 	var envelope struct {
 		Code    *number `json:"code"`
 		Message string  `json:"msg"`
 	}
 	if err = json.Unmarshal(body, &envelope); err != nil {
-		return nil, logging.Wrap(err, "解析 NGA 响应")
+		return nil, logging.Wrap(err, "decode NGA response")
 	}
 	if envelope.Code == nil {
-		return nil, logging.WithStack(errors.New("NGA 响应缺少业务码"))
+		return nil, logging.WithStack(errors.New("NGA response is missing its business code"))
 	}
 	switch code := int64(*envelope.Code); code {
 	case 0:
@@ -158,16 +158,17 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	case 51:
 		err = ErrNGAPending
 	case 2048:
+		// 同一个 2048 业务码需要根据原始消息区分认证失效与服务器繁忙。
 		switch {
 		case strings.Contains(envelope.Message, "必须登录"), strings.Contains(envelope.Message, "请登录"):
 			err = ErrNGAAuth
 		case strings.Contains(envelope.Message, "服务器忙"):
 			err = ErrNGABusy
 		default:
-			err = fmt.Errorf("NGA 返回业务错误 %d", code)
+			err = fmt.Errorf("NGA returned business error %d", code)
 		}
 	default:
-		err = fmt.Errorf("NGA 返回业务错误 %d", code)
+		err = fmt.Errorf("NGA returned business error %d", code)
 	}
 	// 上游 msg 可能含用户输入，不把完整响应或消息放入错误/日志。
 	return nil, logging.WithStack(err)

@@ -21,13 +21,13 @@ func TestShortSecretsPreserveLogStructure(t *testing.T) {
 			Error(l.WithContext(context.Background()), WithStack(errors.New("credential "+secret)), "request failed", zerolog.ErrorLevel)
 			var event map[string]any
 			if err := json.Unmarshal(output.Bytes(), &event); err != nil {
-				t.Fatalf("短 token 不应破坏 JSON：%v", err)
+				t.Fatalf("short tokens must not corrupt JSON: %v", err)
 			}
 			if event["trace_id"] != "trace:1" || event["status"] != float64(201) || event["level"] != "error" {
-				t.Fatal("脱敏修改了关联字段、数字或级别")
+				t.Fatal("redaction modified trace fields, numbers, or log level")
 			}
 			if event["error"] != "credential [REDACTED]" || !strings.Contains(event["causes"].([]any)[0].(string), "[REDACTED]") {
-				t.Fatal("错误中的凭据没有脱敏")
+				t.Fatal("credentials in errors were not redacted")
 			}
 		})
 	}

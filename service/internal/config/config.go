@@ -52,15 +52,15 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 		var file *os.File
 		file, err = os.Open(filename)
 		if err != nil {
-			return cfg, logging.Wrap(err, "读取配置文件")
+			return cfg, logging.Wrap(err, "read configuration file")
 		}
 		defer file.Close()
 		decoder := json.NewDecoder(file)
 		if err = decoder.Decode(&cfg); err != nil {
-			return cfg, logging.Wrap(err, "解析配置文件")
+			return cfg, logging.Wrap(err, "decode configuration file")
 		}
 		if err = decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			return cfg, logging.WithStack(errors.New("配置文件必须只包含一个 JSON 对象"))
+			return cfg, logging.WithStack(errors.New("configuration file must contain exactly one JSON object"))
 		}
 		err = nil
 		base = filepath.Dir(filename)
@@ -78,7 +78,7 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	if value, ok := os.LookupEnv("NGA_REMINDER_BACKGROUND_ENABLED"); ok {
 		cfg.BackgroundEnabled, err = strconv.ParseBool(value)
 		if err != nil {
-			return cfg, logging.WithStack(errors.New("NGA_REMINDER_BACKGROUND_ENABLED 必须是 true 或 false"))
+			return cfg, logging.WithStack(errors.New("NGA_REMINDER_BACKGROUND_ENABLED must be true or false"))
 		}
 	}
 	if err = cfg.validate(); err != nil {
@@ -90,7 +90,7 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 		}
 		*path, err = filepath.Abs(*path)
 		if err != nil {
-			return cfg, logging.Wrap(err, "解析数据路径")
+			return cfg, logging.Wrap(err, "resolve data paths")
 		}
 	}
 	return cfg, nil
@@ -99,27 +99,27 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 func (c Config) validate() error {
 	_, port, err := net.SplitHostPort(c.ListenAddress)
 	if err != nil {
-		return logging.WithStack(errors.New("listen_address 必须采用 host:port 格式"))
+		return logging.WithStack(errors.New("listen_address must use the host:port format"))
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 0 || portNumber > 65535 {
-		return logging.WithStack(errors.New("listen_address 端口必须在 0～65535 之间"))
+		return logging.WithStack(errors.New("listen_address port must be between 0 and 65535"))
 	}
 	if c.DatabasePath == "" || c.DatabasePath == ":memory:" || c.AssetsPath == "" {
-		return logging.WithStack(errors.New("database_path 和 assets_path 必须是非空的本地持久化路径"))
+		return logging.WithStack(errors.New("database_path and assets_path must be non-empty local persistent paths"))
 	}
 	if strings.TrimSpace(c.APIToken) == "" {
-		return logging.WithStack(errors.New("api_token 不能为空或全为空白"))
+		return logging.WithStack(errors.New("api_token must not be empty or contain only whitespace"))
 	}
 	key, err := base64.StdEncoding.DecodeString(c.EncryptionKey)
 	if err != nil || len(key) != 32 {
-		return logging.WithStack(errors.New("encryption_key 必须是标准 Base64 编码，解码后为 32 字节"))
+		return logging.WithStack(errors.New("encryption_key must be standard Base64 encoding of 32 bytes"))
 	}
 	if c.Timezone == "" {
-		return logging.WithStack(errors.New("timezone 不能为空"))
+		return logging.WithStack(errors.New("timezone must not be empty"))
 	}
 	if _, err = time.LoadLocation(c.Timezone); err != nil {
-		return logging.Wrap(err, "timezone 无效")
+		return logging.Wrap(err, "invalid timezone")
 	}
 	return nil
 }

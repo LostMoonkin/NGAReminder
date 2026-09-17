@@ -38,23 +38,23 @@ func execute() (exitCode int) {
 			exitCode = 1
 		}
 		if err != nil {
-			logging.Error(ctx, err, "服务启动或运行失败", zerolog.ErrorLevel)
+			logging.Error(ctx, err, "Server startup or execution failed", zerolog.ErrorLevel)
 		}
 		span.End(&err)
 	}()
 	flags := flag.NewFlagSet("nga-reminder", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	filename := flags.String("config", "", "JSON 配置文件；省略时使用默认值和环境变量")
+	filename := flags.String("config", "", "JSON configuration file; omit to use defaults and environment variables")
 	if err = flags.Parse(os.Args[1:]); errors.Is(err, flag.ErrHelp) {
-		fmt.Fprintln(os.Stdout, "用法：nga-reminder [-config config.json]\n配置字段可通过 NGA_REMINDER_ 前缀的环境变量覆盖，见 service/docs/README.md。")
+		fmt.Fprintln(os.Stdout, "Usage: nga-reminder [-config config.json]\nOverride configuration with NGA_REMINDER_ environment variables; see service/docs/README.md.")
 		err = nil
 		return 0
 	} else if err != nil {
-		err = logging.Wrap(err, "解析命令行参数")
+		err = logging.Wrap(err, "parse command-line arguments")
 		return 1
 	}
 	if flags.NArg() != 0 {
-		err = logging.WithStack(errors.New("不接受位置参数，请使用 -config 指定配置文件"))
+		err = logging.WithStack(errors.New("positional arguments are not supported; use -config to specify the configuration file"))
 		return 1
 	}
 	cfg, loadErr := config.Load(ctx, *filename)
@@ -93,7 +93,7 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 	}
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	if err != nil {
-		return logging.Wrap(err, "监听 HTTP 地址")
+		return logging.Wrap(err, "listen on HTTP address")
 	}
 	server := &http.Server{
 		Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
@@ -106,20 +106,20 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 		if errors.Is(serveErr, http.ErrServerClosed) {
 			serveErr = nil
 		}
-		result <- logging.Wrap(serveErr, "HTTP 服务退出")
+		result <- logging.Wrap(serveErr, "HTTP server exited")
 	}()
 	// 当前仅接受手动采集；后续调度和 Bot 也统一服从后台开关。
 	zerolog.Ctx(ctx).Info().Str("event", "server_started").Str("listen_address", listener.Addr().String()).
-		Bool("background_enabled", cfg.BackgroundEnabled).Msg("HTTP 服务已启动")
+		Bool("background_enabled", cfg.BackgroundEnabled).Msg("HTTP server started")
 	select {
 	case err = <-result:
 		return err
 	case <-ctx.Done():
-		zerolog.Ctx(ctx).Info().Msg("停止接收请求，等待当前请求结束")
+		zerolog.Ctx(ctx).Info().Msg("Stopping new requests and waiting for active requests")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err = server.Shutdown(shutdownCtx); err != nil {
-			return errors.Join(logging.Wrap(err, "HTTP 停止超时"), logging.Wrap(server.Close(), "强制关闭 HTTP"))
+			return errors.Join(logging.Wrap(err, "HTTP shutdown timed out"), logging.Wrap(server.Close(), "force-close HTTP server"))
 		}
 		return <-result
 	}

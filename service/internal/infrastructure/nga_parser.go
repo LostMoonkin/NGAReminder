@@ -20,7 +20,7 @@ type number int64
 func (n *number) UnmarshalJSON(raw []byte) error {
 	value, err := strconv.ParseInt(strings.Trim(string(raw), "\""), 10, 64)
 	if err != nil {
-		return logging.WithStack(errors.New("NGA 响应包含无效数字字段"))
+		return logging.WithStack(errors.New("NGA response contains an invalid numeric field"))
 	}
 	*n = number(value)
 	return nil
@@ -72,10 +72,10 @@ func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPa
 		Posts        []rawPost `json:"result"`
 	}
 	if err = json.Unmarshal(body, &raw); err != nil {
-		return result, logging.Wrap(err, "解析 NGA 主题")
+		return result, logging.Wrap(err, "decode NGA thread")
 	}
 	if int(raw.Page) != requestedPage || raw.Page < 1 || raw.Total < raw.Page || raw.PerPage < 1 || raw.Rows < 1 || len(raw.Posts) == 0 {
-		return result, logging.WithStack(errors.New("NGA 主题页为空或分页信息不一致"))
+		return result, logging.WithStack(errors.New("NGA thread page is empty or has inconsistent pagination"))
 	}
 	result = ThreadPage{Title: raw.Title, Page: int(raw.Page), TotalPages: int(raw.Total)}
 	for _, rawPost := range raw.Posts {
@@ -94,7 +94,7 @@ func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPa
 
 func parsePost(raw rawPost, tid int64, parent *ParsedPost, prefix string) ([]ParsedPost, error) {
 	if int64(raw.TID) != tid || raw.Floor == nil || *raw.Floor < 0 || raw.Author.UID == nil {
-		return nil, logging.WithStack(errors.New("NGA 帖子缺少 TID、楼层、作者或 TID 与请求不符"))
+		return nil, logging.WithStack(errors.New("NGA post is missing its TID, floor, or author, or its TID differs from the request"))
 	}
 	p := ParsedPost{TID: tid, PID: int64(raw.PID), Floor: int64(*raw.Floor), AuthorUID: int64(*raw.Author.UID),
 		Author: raw.Author.Name, Subject: raw.Subject, Body: raw.Content, Kind: "reply", Key: "pid:" + fmt.Sprint(raw.PID), Resources: []string{}}
@@ -108,7 +108,7 @@ func parsePost(raw rawPost, tid int64, parent *ParsedPost, prefix string) ([]Par
 		p.Kind, p.Key = "main", "main"
 	}
 	if p.Kind != "main" && p.PID <= 0 {
-		return nil, logging.WithStack(errors.New("NGA 回复或评论缺少有效 PID"))
+		return nil, logging.WithStack(errors.New("NGA reply or comment is missing a valid PID"))
 	}
 	if raw.Timestamp != nil {
 		published := time.Unix(int64(*raw.Timestamp), 0).UTC()
@@ -123,7 +123,7 @@ func parsePost(raw rawPost, tid int64, parent *ParsedPost, prefix string) ([]Par
 			}
 		}
 		if p.PublishedAt == nil {
-			return nil, logging.WithStack(errors.New("NGA 发帖时间无效"))
+			return nil, logging.WithStack(errors.New("invalid NGA post timestamp"))
 		}
 	}
 	p.SourceURL = fmt.Sprintf("%s/read.php?tid=%d", ngaBaseURL, tid)

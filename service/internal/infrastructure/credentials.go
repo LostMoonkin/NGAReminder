@@ -70,15 +70,15 @@ type CredentialCipher struct{ aead cipher.AEAD }
 func NewCredentialCipher(key string) (*CredentialCipher, error) {
 	decoded, err := base64.StdEncoding.DecodeString(key)
 	if err != nil || len(decoded) != 32 {
-		return nil, logging.WithStack(errors.New("encryption_key 必须是标准 Base64 编码的 32 字节密钥"))
+		return nil, logging.WithStack(errors.New("encryption_key must be a standard Base64-encoded 32-byte key"))
 	}
 	block, err := aes.NewCipher(decoded)
 	if err != nil {
-		return nil, logging.Wrap(err, "创建凭据加密器")
+		return nil, logging.Wrap(err, "create credential cipher")
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, logging.Wrap(err, "创建 AES-GCM")
+		return nil, logging.Wrap(err, "create AES-GCM cipher")
 	}
 	return &CredentialCipher{aead}, nil
 }
@@ -88,7 +88,7 @@ func (c *CredentialCipher) Encrypt(ctx context.Context, cookie string) (encrypte
 	defer span.End(&err)
 	nonce := make([]byte, c.aead.NonceSize())
 	if _, err = rand.Read(nonce); err != nil {
-		return nil, logging.Wrap(err, "生成凭据 nonce")
+		return nil, logging.Wrap(err, "generate credential nonce")
 	}
 	return c.aead.Seal(nonce, nonce, []byte(cookie), []byte("nga-account-v1")), nil
 }
@@ -98,11 +98,11 @@ func (c *CredentialCipher) Decrypt(ctx context.Context, encrypted []byte) (crede
 	defer span.End(&err)
 	n := c.aead.NonceSize()
 	if len(encrypted) < n {
-		return credentials, logging.WithStack(errors.New("已保存的 NGA 凭据密文不完整"))
+		return credentials, logging.WithStack(errors.New("stored NGA credential ciphertext is incomplete"))
 	}
 	plain, err := c.aead.Open(nil, encrypted[:n], encrypted[n:], []byte("nga-account-v1"))
 	if err != nil {
-		return credentials, logging.Wrap(err, "解密 NGA 凭据失败，请检查部署密钥")
+		return credentials, logging.Wrap(err, "decrypt NGA credentials; check the deployment key")
 	}
 	return ParseCredentials(string(plain), "", "")
 }
