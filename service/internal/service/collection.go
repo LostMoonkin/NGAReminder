@@ -181,6 +181,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 			return err
 		}
 		*run = next
+		m.resources.Collect(ctx, posts)
 		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("page", page).Int("total_pages", first.TotalPages).
 			Int64("saved", run.Saved).Msg("Thread page saved; cursor will advance after the entire run completes")
 	}
@@ -208,6 +209,7 @@ func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.
 		return tx.SaveRun(ctx, &next)
 	})
 	if err == nil {
+		m.resources.Collect(ctx, posts)
 		*run = next
 	}
 	return err

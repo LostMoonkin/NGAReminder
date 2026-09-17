@@ -198,7 +198,7 @@ func (h *Handler) posts(c *gin.Context) {
 		h.problem(c, service.InvalidInput("page 必须为有效正整数"))
 		return
 	}
-	data, err := h.monitor.Posts(c.Request.Context(), tid, page)
+	data, err := h.monitor.Content(c.Request.Context(), "threads", tid, page)
 	if err != nil {
 		h.problem(c, err)
 		return

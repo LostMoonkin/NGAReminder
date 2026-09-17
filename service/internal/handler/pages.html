@@ -32,7 +32,7 @@
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 12px 0; background: #f4f6f8; padding: 16px; border-radius: 6px; }
   article + article { border-top: 1px solid #dde3ea; padding-top: 20px; } .small { font-size: 13px; } details { margin-top: 14px; } summary { cursor: pointer; }
   @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; flex-direction: column; } .card { padding: 20px; } dl { grid-template-columns: 1fr; } dt { padding-bottom: 0; border: 0; } }
-</style>
+.post-body img{max-width:100%;height:auto}.post-body blockquote{border-left:3px solid #a1b2c4;padding-left:1em;margin-left:0}.post-body pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
 <script>
 document.addEventListener('click', event => {
   const add = event.target.closest('[data-add-rule]');
@@ -141,7 +141,7 @@ document.addEventListener('click', event => {
   <div class="actions">
     <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button>手动运行一次</button></form>
     {{if .Data.Watch.Paused}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/resume"><button class="secondary">恢复监控</button></form>{{else}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/pause"><button class="secondary">暂停监控</button></form>{{end}}
-    {{if eq .Data.Watch.Kind "tid"}}<a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>{{else}}<a class="button secondary" href="/admin#saved-threads">查看已保存主题</a>{{end}}
+    {{if eq .Data.Watch.Kind "tid"}}<a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>{{else}}<a class="button secondary" href="/admin/users/{{.Data.Watch.UID}}">查看用户帖子</a>{{end}}
   </div>
   <p class="small muted">手动暂停会阻止自动和手动运行；认证暂停需修复账号后才恢复。手动运行绕过免拉取时段。运行中页面每 3 秒刷新。</p>
   <details><summary>重置基线或删除监控</summary>
@@ -155,12 +155,13 @@ document.addEventListener('click', event => {
 
 {{define "posts"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head"}}</head><body><main>
-<header><div><p class="brand">NGA REMINDER</p><h1>TID {{.Data.TID}} · 已保存帖子</h1><p>共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div><a class="button secondary" href="/admin">返回概览</a></header>
+<header><div><p class="brand">NGA REMINDER</p><h1>{{if .Data.UID}}UID {{.Data.UID}}{{else}}TID {{.Data.TID}}{{end}} · 已保存帖子</h1><p>共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div><a class="button secondary" href="/admin">返回概览</a></header>
 <section class="card">
-  <p class="muted small">正文按纯文本显示，保留原始 BBCode；富文本和资源导出在阶段 07 提供。</p>
-  {{range .Data.Posts}}<article>
+  <p><a href="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}?format=markdown">下载 Markdown</a> · <a href="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}?format=zip">下载 ZIP（含已保存资源）</a></p>
+ {{$tid := 0}}
+  {{range .Data.Posts}}{{if ne $tid .TID}}<h2>TID {{.TID}} {{.Subject}}</h2>{{$tid = .TID}}{{end}}<article>
     <p><strong>{{if eq .Kind "main"}}主楼{{else if eq .Kind "comment"}}{{.ParentFloor}} 楼下的评论{{else}}{{.Floor}} 楼{{end}} · {{.Author}}</strong> <span class="muted small">UID {{.AuthorUID}} · PID {{.PID}} · {{when .PublishedAt}}</span></p>
-    {{if .Subject}}<p>{{.Subject}}</p>{{end}}<pre>{{.Body}}</pre>
+    {{if .Subject}}<p>{{.Subject}}</p>{{end}}<div class="post-body">{{rich .Body .Resources}}</div>
     <p class="small"><a href="{{.SourceURL}}" target="_blank" rel="noreferrer">NGA 原帖</a>{{if .ParentKey}} · 父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}{{end}}</p>
     {{if .Resources}}<details><summary>资源地址（{{len .Resources}}）</summary>{{range .Resources}}<p class="small"><a href="{{.}}" target="_blank" rel="noreferrer">{{.}}</a></p>{{end}}</details>{{end}}
   </article>{{else}}<p>尚无保存内容；从现在开始的基线不会导入旧楼层。</p>{{end}}

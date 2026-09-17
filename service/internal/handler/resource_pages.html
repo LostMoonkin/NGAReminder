@@ -1,0 +1,9 @@
+{{define "resources"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
+<header><h1>资源维护</h1><a href="/admin">返回概览</a></header>
+<section class="card"><form method="post" action="/admin/resources"><label>下载资源<select name="download_enabled"><option value="false" {{if not .Data.Settings.DownloadEnabled}}selected{{end}}>关闭，仅保留远程地址</option><option value="true" {{if .Data.Settings.DownloadEnabled}}selected{{end}}>开启</option></select></label><button>保存</button></form><p>仅下载认可 NGA 站点的图片、PDF 和压缩附件，每个文件最多 20 MiB。单个失败不影响正文。内容、资源目录及 SQLite 应一同备份。</p></section>
+<section class="card"><h2>只读扫描</h2><p>缺失或尚未下载 {{len .Data.Missing}} 项；无引用元数据 {{len .Data.Unreferenced}} 项；无引用文件 {{len .Data.Files}} 个；临时文件 {{len .Data.Temporary}} 个。</p>
+{{range .Data.Missing}}<p class="small"><a href="{{.URL}}" rel="noreferrer">{{.URL}}</a> {{.Error}}</p>{{end}}
+<form method="post" action="/admin/resources/redownload"><button>重新下载缺失资源</button></form><p>需要已开启下载；完成后重新扫描可查看仍失败的项目。</p>
+<details><summary>无引用与临时文件</summary>{{range .Data.Files}}<p>{{.Path}} · {{.Size}} 字节 · {{when .Modified}}</p>{{end}}{{range .Data.Temporary}}<p>{{.Path}} · {{.Size}} 字节 · {{when .Modified}}</p>{{end}}</details>
+<form method="post" action="/admin/resources/cleanup"><label><input style="width:auto" type="checkbox" name="confirm" value="true" required>我已查看扫描结果，确认清理超过 24 小时的无引用普通文件及临时文件。</label><button class="danger">确认清理</button></form><p>提交时重新扫描；仍被正文引用的文件、符号链接和较新文件均保留。不会删除正文。</p></section>
+<footer>关联 ID：{{.TraceID}}</footer></main></body></html>{{end}}

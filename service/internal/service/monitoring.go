@@ -40,6 +40,7 @@ type Monitoring struct {
 	notifications *Notifications
 	bot           *Bot
 	renewal       *Renewal
+	resources     *Resources
 	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
 	work sync.Mutex
 }
@@ -63,6 +64,7 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	monitor = &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
 	monitor.bot = &Bot{monitor: monitor}
 	monitor.renewal = &Renewal{monitor: monitor}
+	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}}
 	if err = store.InterruptRenewals(initCtx); err != nil {
 		cancel()
 		return nil, err
@@ -80,6 +82,8 @@ func (m *Monitoring) Close() {
 	m.notifications.Close()
 	m.work.Lock()
 	defer m.work.Unlock()
+	m.resources.work.Lock()
+	defer m.resources.work.Unlock()
 	m.nga.Close()
 }
 
@@ -392,26 +396,6 @@ func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, e
 	}
 	detail.Runs, err = m.store.WatchRuns(ctx, id)
 	return detail, err
-}
-
-type ThreadContent struct {
-	TID   int64             `json:"tid"`
-	Posts []repository.Post `json:"posts"`
-	Total int64             `json:"total"`
-	Page  int               `json:"page"`
-	Runs  []repository.Run  `json:"runs"`
-}
-
-func (m *Monitoring) Posts(ctx context.Context, tid int64, page int) (data ThreadContent, err error) {
-	ctx, span := logging.Start(ctx, "service.thread_content")
-	defer span.End(&err)
-	data.TID, data.Page = tid, page
-	data.Posts, data.Total, err = m.store.Posts(ctx, tid, page)
-	if err != nil {
-		return data, err
-	}
-	data.Runs, err = m.store.Runs(ctx, tid)
-	return data, err
 }
 
 func (m *Monitoring) Run(ctx context.Context, id int64) (run repository.Run, err error) {

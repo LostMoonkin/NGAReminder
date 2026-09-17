@@ -83,7 +83,7 @@ NGA_REMINDER_BACKGROUND_ENABLED=false ./start.sh
 | `GET /` | 跳转 `/admin` |
 | `GET /admin` | 无需认证，账号、监控、已保存主题和运行设置 |
 | `GET /admin/watches/:id` | 监控配置、手动运行和最近 20 次结果；运行中每 3 秒刷新 |
-| `GET /admin/threads/:tid?page=1` | 已保存帖子及纯文本正文，每页 50 条 |
+| `GET /admin/threads/:tid?page=1` | 已保存帖子及安全富文本，每页 50 条 |
 | `GET /api/v1/settings` | `Authorization: Bearer <api_token>`；未认证返回 401 |
 | `GET /healthz` | 无需认证，进程能处理请求时返回 200 |
 | `GET /readyz` | 无需认证，SQLite 查询成功返回 200，不可访问返回 503 |
@@ -108,7 +108,7 @@ curl -i -H "Authorization: Bearer $NGA_REMINDER_API_TOKEN" http://127.0.0.1:8989
 1. 在管理页粘贴完整 Cookie（可带 `Cookie:` 前缀），或留空 Cookie、填写 passport UID/CID。点击“校验并保存凭据”。校验请求使用需要认证的用户回复接口；公开资料页可读不能证明 Cookie 有效。
 2. 展开“新增 TID 监控”或“新增 UID 监控”，填写目标、备注和采集频率。每个 TID、每个 UID 各只保留一个监控。创建后进入自动调度，未配置或未验证账号时等待账号恢复。TID 可选择初始化模式，UID 固定从首次成功运行的水位开始。
 3. 进入详情，可调整星期/时间段覆盖间隔和免拉取时段，也可点击“手动运行一次”。手动请求立即返回，自动和手动采集在本进程中串行执行；页面展示来源、开始/结束时间、页数、新增数量、错误摘要和运行关联 ID。运行时可浏览数据，其他采集、账号操作和监控修改返回 409，等待完成后重试。
-4. 从详情或概览的“已保存主题”进入帖子列表。正文按转义后的纯文本显示，保留 BBCode、来源链接与资源地址；通知图片按需临时下载，不在此阶段保存附件文件。
+4. 从详情或概览的“已保存主题”进入帖子列表。正文按安全富文本显示，支持常用 NGA 标记、来源链接与资源地址；UID watch 详情可进入该用户内容。资源下载和导出见下文。
 
 账号只保留一份。Cookie 以 AES-256-GCM 加密后写入 SQLite；页面/API 只显示脱敏 UID、可用状态和最近校验结果。替换失败保留原凭据及其状态，并展示新凭据失败原因。“校验已保存凭据”确认失效或采集返回认证错误时，账号进入 `auth_paused`；重新校验成功或保存有效新凭据后解除认证暂停，保留用户的暂停选择。
 
@@ -182,9 +182,9 @@ UID 初始化与增量规则：
 
 ## 数据与日志
 
-当前创建 `accounts`、`watches`、`runs`、`posts` 四张业务表；GORM 启动时升级已有 Go 数据库，保留阶段 02 的 TID 水位、内容和暂停状态，并将旧 TID 唯一索引替换为分别约束 TID/UID 的索引。旧会话表不再读写，其他业务表随后续功能增加。帖子通过 `(tid, key)` 唯一键去重：主楼为 `main`，普通回复和楼中楼均为 `pid:<PID>`；楼中楼保留 JSON 嵌套确定的父键，`comment_to_id` 仅作为原始元数据保存。
+基础业务表为 `accounts`、`watches`、`runs`、`posts`，阶段 04～07 增加通知、Bot、续期与资源元数据表；GORM 启动时升级已有 Go 数据库，保留阶段 02 的 TID 水位、内容和暂停状态，并将旧 TID 唯一索引替换为分别约束 TID/UID 的索引。旧会话表不再读写，其他业务表随后续功能增加。帖子通过 `(tid, key)` 唯一键去重：主楼为 `main`，普通回复和楼中楼均为 `pid:<PID>`；楼中楼保留 JSON 嵌套确定的父键，`comment_to_id` 仅作为原始元数据保存。
 
-持久化时间统一使用 UTC，页面按配置时区展示。部署密钥用于 NGA 凭据加密落盘，API token 保留在配置中；密钥丢失后不能解密已存 Cookie。资源目录当前只创建并检查可写性。
+持久化时间统一使用 UTC，页面按配置时区展示。部署密钥用于 NGA 凭据加密落盘，API token 保留在配置中；密钥丢失后不能解密已存 Cookie。资源文件与导出临时文件保存在资源目录；备份时与数据库一同保存。
 
 SQLite 使用 WAL、5 秒 busy timeout 和单连接。数据库通过 `application_id` 标记归属；非空且没有 Go 标记的 SQLite 会被拒绝打开，避免误用旧 Rust 数据库。Go 必须使用独立的数据路径，旧 PG 数据通过 [阶段 09](spec/09-data-migration.md) 显式迁移。
 
@@ -265,3 +265,24 @@ watch 创建/更新额外接受 `channel_ids` 与 `author_uids` 数组；省略�
 | `POST /api/v1/renewal/start` | 向指定私聊发送确认，返回活动交互；核验模式禁用 |
 
 页面和普通 API 不返回密码、验证码或 Cookie；结果带可理解的阶段与错误，内部日志保留调用链及错误栈。
+
+
+## 内容、导出与资源（阶段 07）
+
+TID 内容在 `/admin/threads/:tid`，UID watch 详情中的“查看用户帖子”进入 `/admin/users/:uid`，每页 50 条。UID 页面和导出只读取该 UID 已保存内容，按 TID 分组，不额外访问 NGA。Web、Markdown 和通知共用标记解析：段落、强调、引用、代码、链接、图片及折叠；未知标记保留文本，HTML 只输出允许标签和 HTTP(S) 链接。相对图片路径通过已存资源元数据解析。
+
+页面提供 Markdown 和 ZIP 下载。以开始时的最大帖子 ID 固定内容范围，每批最多 200 条、按 TID/楼层/父子关系/内部 ID 稳定排序。Markdown 包含标题、作者、时间、楼层/父帖和原帖链接。ZIP 包含 `content.md`、`metadata.json` 和 `assets/` 中已保存的相关资源，共享文件只打包一次，缺失项使用远程地址。服务生成临时文件后流式发送，完成、客户端断开或生成失败都会清理；异常退出遗留项可从资源页清理。
+
+`/admin/resources` 管理下载开关及维护。默认关闭下载，仅保留资源地址；开启后采集在正文提交后下载，单个失败不会回滚正文、水位或通知。也可重新下载已有内容缺失的资源。下载仅允许 HTTPS 的 `img.nga.cn`、`img.nga.178.com`、`img4.nga.178.com`，禁止跳转，检查实际文件类型，单文件最多 20 MiB；支持 PNG/JPEG/GIF/WebP/BMP、PDF、ZIP/RAR/7z。文件名使用内容 SHA-256 与类型扩展名，二进制不写入 SQLite。
+
+资源页的扫描只读，显示缺失/未下载、无引用元数据、无引用普通文件和临时文件。勾选确认再清理时重新扫描，只删除超过 24 小时且没有正文引用的普通文件和临时文件；保护同内容共享文件，不跟随文件或目录符号链接，不删除正文。资源下载期间清理会等待；有采集或账号操作时返回忙碌提示。元数据保留，便于定位和显式重新下载。
+
+| API（Bearer token） | 行为 |
+| --- | --- |
+| `GET /api/v1/users/:uid/posts?page=1` | 目标用户的已保存内容及分页信息 |
+| `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`，下载已有内容 |
+| `GET /api/v1/resources` | 只读资源扫描及下载设置 |
+| `POST /api/v1/resources` | `{"download_enabled":true}`，修改下载开关 |
+| `POST /api/v1/resources/redownload` | 下载缺失项，返回成功数；失败项保留错误并写日志 |
+| `POST /api/v1/resources/cleanup` | `{"confirm":true}`，重新扫描并清理符合条件的旧文件 |
+| `GET /api/v1/assets/:name` | 下载资源目录内的普通文件，拒绝越界和符号链接 |

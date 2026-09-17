@@ -26,7 +26,7 @@ type Handler struct {
 }
 
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary}).ParseFS(pageFiles, "*.html")
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(pageFiles, "*.html")
 	if err != nil {
 		return nil, logging.Wrap(err, "load admin templates")
 	}
@@ -58,6 +58,7 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	h.notificationRoutes(router)
 	h.botRoutes(router)
 	h.renewalRoutes(router)
+	h.contentRoutes(router)
 	router.NoRoute(func(c *gin.Context) {
 		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("route not found")))
 	})
