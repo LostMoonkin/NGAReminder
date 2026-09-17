@@ -25,7 +25,9 @@ type Account struct {
 
 type Watch struct {
 	ID               int64  `json:"id"`
-	TID              int64  `json:"tid" gorm:"column:tid;uniqueIndex"`
+	TID              int64  `json:"tid" gorm:"column:tid"`
+	UID              int64  `json:"uid" gorm:"column:uid"`
+	Kind             string `json:"kind" gorm:"default:tid"`
 	Label            string `json:"label"`
 	Title            string `json:"title"`
 	InitMode         string `json:"init_mode"`
@@ -34,16 +36,43 @@ type Watch struct {
 	BaselineComplete bool   `json:"baseline_complete"`
 	CursorFloor      int64  `json:"cursor_floor"`
 	// From-now 的原始边界独立于持续前移的游标；重跑不能把未保存内容误当成历史。
-	HistoryFloor  int64      `json:"history_floor"`
-	HistoryBefore *time.Time `json:"history_before"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	HistoryFloor    int64          `json:"history_floor"`
+	HistoryBefore   *time.Time     `json:"history_before"`
+	TopicCursor     UserCursor     `json:"topic_cursor" gorm:"serializer:json"`
+	ReplyCursor     UserCursor     `json:"reply_cursor" gorm:"serializer:json"`
+	IntervalSeconds int            `json:"interval_seconds" gorm:"default:60"`
+	IntervalRules   []IntervalRule `json:"interval_rules" gorm:"serializer:json"`
+	NoFetchPeriods  []TimeWindow   `json:"no_fetch_periods" gorm:"serializer:json"`
+	NextRunAt       *time.Time     `json:"next_run_at"`
+	LastRun         *Run           `json:"last_run,omitempty" gorm:"-"`
+	NoFetch         bool           `json:"no_fetch" gorm:"-"`
+	NoFetchUntil    *time.Time     `json:"no_fetch_until" gorm:"-"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+}
+
+// 用户列表分别按发布时间和 TID/PID 建立水位，同秒内容通过 ID 区分。
+type UserCursor struct {
+	Timestamp int64 `json:"timestamp"`
+	ID        int64 `json:"id"`
+}
+
+type TimeWindow struct {
+	Weekdays []int  `json:"weekdays"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
+}
+
+type IntervalRule struct {
+	TimeWindow
+	IntervalSeconds int `json:"interval_seconds"`
 }
 
 type Run struct {
 	ID            int64      `json:"id"`
 	WatchID       int64      `json:"watch_id" gorm:"index"`
 	TID           int64      `json:"tid" gorm:"column:tid;index"`
+	UID           int64      `json:"uid" gorm:"column:uid"`
 	Source        string     `json:"source"`
 	Status        string     `json:"status"`
 	Silent        bool       `json:"silent"`
@@ -162,6 +191,21 @@ func (s *Store) Runs(ctx context.Context, tid int64) (runs []Run, err error) {
 	runs = []Run{}
 	err = s.db.WithContext(ctx).Where("tid = ?", tid).Order("id DESC").Limit(20).Find(&runs).Error
 	return runs, logging.Wrap(err, "read recent collection runs")
+}
+
+func (s *Store) WatchRuns(ctx context.Context, id int64) (runs []Run, err error) {
+	ctx, span := logging.Start(ctx, "repository.watch_runs")
+	defer span.End(&err)
+	runs = []Run{}
+	err = s.db.WithContext(ctx).Where("watch_id = ?", id).Order("id DESC").Limit(20).Find(&runs).Error
+	return runs, logging.Wrap(err, "read recent watch runs")
+}
+
+func (s *Store) LatestRuns(ctx context.Context) (runs []Run, err error) {
+	ctx, span := logging.Start(ctx, "repository.latest_runs")
+	defer span.End(&err)
+	err = s.db.WithContext(ctx).Where("id IN (?)", s.db.Model(&Run{}).Select("MAX(id)").Group("watch_id")).Find(&runs).Error
+	return runs, logging.Wrap(err, "read latest watch results")
 }
 
 func (s *Store) InterruptRuns(ctx context.Context) (err error) {

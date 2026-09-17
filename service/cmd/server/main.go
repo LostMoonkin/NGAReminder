@@ -108,7 +108,7 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 		}
 		result <- logging.Wrap(serveErr, "HTTP server exited")
 	}()
-	// 当前仅接受手动采集；后续调度和 Bot 也统一服从后台开关。
+	monitor.StartScheduler()
 	zerolog.Ctx(ctx).Info().Str("event", "server_started").Str("listen_address", listener.Addr().String()).
 		Bool("background_enabled", cfg.BackgroundEnabled).Msg("HTTP server started")
 	select {

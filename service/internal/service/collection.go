@@ -31,34 +31,55 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 	if err != nil {
 		return run, err
 	}
+	run, started, err = m.startRunLocked(ctx, watch, "manual", time.Now())
+	return run, err
+}
+
+// 调度和手动入口共用状态判断，启动成功后由采集 goroutine 持有串行锁直到收尾。
+func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch, source string, now time.Time) (run repository.Run, started bool, err error) {
+	if watch.Paused {
+		return run, false, logging.WithStack(ErrPaused)
+	}
+	if watch.State == "auth_paused" {
+		return run, false, logging.WithStack(infrastructure.ErrNGAAuth)
+	}
 	account, err := m.store.Account(ctx)
 	if err != nil {
-		return run, err
+		return run, false, err
 	}
 	if len(account.Cookie) == 0 {
-		return run, InvalidInput("请先保存并验证 NGA Cookie")
+		return run, false, InvalidInput("请先保存并验证 NGA Cookie")
 	}
 	if account.Status != "valid" {
-		return run, logging.WithStack(infrastructure.ErrNGAAuth)
-	}
-	credentials, err := m.cipher.Decrypt(ctx, account.Cookie)
-	if err != nil {
-		return run, err
+		return run, false, logging.WithStack(infrastructure.ErrNGAAuth)
 	}
 	// HTTP 返回后仍需运行，用进程 context 建立独立 trace，并记录来源请求。
-	taskCtx, taskSpan := logging.Start(m.log.WithContext(context.Background()), "service.collect_thread")
+	taskCtx, taskSpan := logging.Start(m.log.WithContext(context.Background()), "service.collect_"+map[string]string{"tid": "thread", "uid": "user"}[watch.Kind])
 	taskCtx, cancel := context.WithCancel(taskCtx)
 	stop := context.AfterFunc(m.ctx, cancel)
-	run = repository.Run{WatchID: watch.ID, TID: watch.TID, Source: "manual", Status: "running", Silent: !watch.BaselineComplete,
-		StartedAt: time.Now().UTC(), TraceID: taskSpan.TraceID, SourceTraceID: logging.TraceID(ctx)}
-	if err = m.store.SaveRun(ctx, &run); err != nil {
+	run = repository.Run{WatchID: watch.ID, TID: watch.TID, UID: watch.UID, Source: source, Status: "running", Silent: !watch.BaselineComplete,
+		StartedAt: now.UTC(), TraceID: taskSpan.TraceID, SourceTraceID: logging.TraceID(ctx)}
+	watch.NextRunAt = m.nextRun(watch, now)
+	if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); source == "automatic" && active {
+		finished := now.UTC()
+		run.Status, run.FinishedAt, run.Error = "skipped_no_fetch", &finished, "当前处于免拉取时段"
+		watch.NextRunAt = until
+	}
+	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if e := tx.SaveWatch(ctx, &watch); e != nil {
+			return e
+		}
+		return tx.SaveRun(ctx, &run)
+	})
+	if err != nil || run.Status == "skipped_no_fetch" {
+		zerolog.Ctx(taskCtx).Info().Int64("watch_id", watch.ID).Int64("run_id", run.ID).
+			Str("source", source).Str("status", run.Status).Str("source_trace_id", run.SourceTraceID).Any("next_run_at", watch.NextRunAt).Msg("Collection not started")
 		stop()
 		cancel()
 		taskSpan.End(&err)
-		return run, err
+		return run, false, err
 	}
-	zerolog.Ctx(ctx).Info().Int64("run_id", run.ID).Int64("watch_id", id).Str("run_trace_id", run.TraceID).Msg("Manual collection started")
-	started = true
+	zerolog.Ctx(ctx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Str("source", source).Str("run_trace_id", run.TraceID).Msg("Collection started")
 	go func(run repository.Run) {
 		defer m.work.Unlock()
 		defer cancel()
@@ -73,15 +94,24 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 				finishCtx, done := context.WithTimeout(context.WithoutCancel(taskCtx), 5*time.Second)
 				defer done()
 				runErr = errors.Join(runErr, m.finishFailedRun(finishCtx, &run, &watch, runErr))
-				logging.Error(taskCtx, runErr, "Thread collection did not complete", zerolog.ErrorLevel)
+				logging.Error(taskCtx, runErr, "Collection did not complete", zerolog.ErrorLevel)
 			}
-			zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Str("status", run.Status).Int("pages", run.Pages).Int64("saved", run.Saved).Msg("Thread collection finished")
+			zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Str("status", run.Status).Int("pages", run.Pages).Int64("saved", run.Saved).Msg("Collection finished")
 		}()
-		zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Int64("tid", watch.TID).
-			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Bool("silent", run.Silent).Msg("Starting thread collection")
-		runErr = m.collect(taskCtx, credentials, &watch, &run)
+		zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Int64("tid", watch.TID).Int64("uid", watch.UID).Str("source", source).
+			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Bool("silent", run.Silent).Msg("Starting collection")
+		credentials, decryptErr := m.cipher.Decrypt(taskCtx, account.Cookie)
+		if decryptErr != nil {
+			runErr = decryptErr
+			return
+		}
+		if watch.Kind == "uid" {
+			runErr = m.collectUser(taskCtx, credentials, &watch, &run)
+		} else {
+			runErr = m.collect(taskCtx, credentials, &watch, &run)
+		}
 	}(run)
-	return run, nil
+	return run, true, nil
 }
 
 func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Credentials, watch *repository.Watch, run *repository.Run) error {
@@ -108,9 +138,9 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		}
 		now := time.Now().UTC()
 		watch.HistoryFloor, watch.HistoryBefore = maxFloor, &now
-		return m.finishSuccessfulRun(ctx, watch, run, maxFloor)
+		return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil)
 	}
-	// 当前手动采集逐页读、按自然键增量写，也能发现旧楼层下新增的楼中楼。
+	// 采集逐页读、按自然键增量写，也能发现旧楼层下新增的楼中楼。
 	// 页数固定为首个响应的快照；采集期间继续增长的尾页留到下一轮，避免追赶不停。
 	for page := 1; page <= first.TotalPages; page++ {
 		result := first
@@ -133,9 +163,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 					continue
 				}
 			}
-			posts = append(posts, repository.Post{TID: post.TID, Key: post.Key, PID: post.PID, Kind: post.Kind, Floor: post.Floor,
-				ParentKey: post.ParentKey, ParentFloor: post.ParentFloor, CommentToID: post.CommentToID, AuthorUID: post.AuthorUID,
-				Author: post.Author, Subject: post.Subject, Body: post.Body, PublishedAt: post.PublishedAt, SourceURL: post.SourceURL, Resources: post.Resources})
+			posts = append(posts, storedPost(post))
 		}
 		next := *run
 		err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
@@ -153,19 +181,30 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("page", page).Int("total_pages", first.TotalPages).
 			Int64("saved", run.Saved).Msg("Thread page saved; cursor will advance after the entire run completes")
 	}
-	return m.finishSuccessfulRun(ctx, watch, run, maxFloor)
+	return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil)
 }
 
-func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.Watch, run *repository.Run, maxFloor int64) error {
+func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.Watch, run *repository.Run, maxFloor int64, posts []repository.Post) error {
 	now := time.Now().UTC()
+	watch.NextRunAt = m.nextRun(*watch, now)
 	watch.BaselineComplete, watch.CursorFloor, watch.State = true, maxFloor, "ready"
-	run.Status, run.FinishedAt = "success", &now
-	return m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+	next := *run
+	next.Status, next.FinishedAt = "success", &now
+	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		saved, err := tx.InsertPosts(ctx, posts)
+		if err != nil {
+			return err
+		}
+		next.Saved += saved
 		if err := tx.SaveWatch(ctx, watch); err != nil {
 			return err
 		}
-		return tx.SaveRun(ctx, run)
+		return tx.SaveRun(ctx, &next)
 	})
+	if err == nil {
+		*run = next
+	}
+	return err
 }
 
 func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, watch *repository.Watch, cause error) error {
@@ -197,16 +236,17 @@ func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, w
 				return err
 			}
 		}
+		// 只更新调度和故障状态，不提交本轮尚未完成的水位。
+		persisted, err := tx.Watch(ctx, watch.ID)
+		if err != nil {
+			return err
+		}
+		persisted.NextRunAt = m.nextRun(persisted, now)
 		if run.Status == "missing" {
-			// 重新读取持久化水位，不能写入本轮尚未提交的内存进度。
-			persisted, err := tx.Watch(ctx, watch.ID)
-			if err != nil {
-				return err
-			}
 			persisted.State = "missing"
-			if err = tx.SaveWatch(ctx, &persisted); err != nil {
-				return err
-			}
+		}
+		if err = tx.SaveWatch(ctx, &persisted); err != nil {
+			return err
 		}
 		return tx.SaveRun(ctx, run)
 	})

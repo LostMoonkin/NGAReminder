@@ -1,6 +1,6 @@
 # Go 服务端重构计划
 
-阶段 01～02 已完成实现与自测，其余阶段待实现。这里统一维护新服务端的阶段安排与进度，具体需求和验收见相应 Spec；[历史项目计划](../../../archive/rust-service/PROJECT_PLAN.md) 保留在归档中。
+阶段 01～03 已完成实现与自测，其余阶段待实现。这里统一维护新服务端的阶段安排与进度，具体需求和验收见相应 Spec；[历史项目计划](../../../archive/rust-service/PROJECT_PLAN.md) 保留在归档中。
 
 ## 已确认的方向
 
@@ -19,7 +19,7 @@
 | --- | --- | --- | --- | --- |
 | 01 | [运行基础与日志](../spec/01-runtime-and-logging.md) | 启动服务、进入管理页、查询健康状态并追踪请求和错误 | 无 | 已完成 |
 | 02 | [NGA 账号与 TID 监控](../spec/02-nga-and-thread-monitoring.md) | 配置 Cookie，手动保存主题历史和新增楼层 | 01 | 已完成 |
-| 03 | [UID 监控与统一调度](../spec/03-user-monitoring-and-scheduling.md) | 自动监控主题和用户，配置拉取频率与免拉取时段 | 02 | 待实现 |
+| 03 | [UID 监控与统一调度](../spec/03-user-monitoring-and-scheduling.md) | 自动监控主题和用户，配置拉取频率与免拉取时段 | 02 | 已完成 |
 | 04 | [通知与收件箱](../spec/04-notifications.md) | 匹配新内容，通过 Bark/飞书发送通知并查看结果 | 03 | 待实现 |
 | 05 | [飞书机器人](../spec/05-feishu-bot.md) | 绑定管理员，在飞书查询状态、查看监控和手动运行 | 04 | 待实现 |
 | 06 | [Cookie 续期](../spec/06-cookie-renewal.md) | 在飞书确认登录、提交验证码并恢复因认证暂停的监控 | 05 | 待实现 |

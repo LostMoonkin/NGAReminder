@@ -22,7 +22,7 @@ var (
 	ErrNGAMissing           = errors.New("NGA 主题不存在，已停止自动采集")
 	ErrNGAPending           = errors.New("NGA 主题待审核，本轮跳过")
 	ErrNGABusy              = errors.New("NGA 服务器忙，请稍后重试")
-	ErrNGASearchUnavailable = errors.New("NGA 用户回复查询暂不可用（空 HTTP 503）")
+	ErrNGASearchUnavailable = errors.New("NGA 用户查询暂不可用（空 HTTP 503）")
 )
 
 const ngaBaseURL = "https://bbs.nga.cn"
@@ -53,30 +53,7 @@ func (n *NGA) Close() { n.http.CloseIdleConnections() }
 func (n *NGA) CheckCredentials(ctx context.Context, credentials Credentials) (err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.nga.check_credentials")
 	defer span.End(&err)
-	query := url.Values{"searchpost": {"1"}, "authorid": {credentials.UID}, "__output": {"12"}, "page": {"1"}}
-	// 用户搜索只发送已验证需要的 Cookie，其他浏览器 Cookie 不影响认证判断。
-	parts := []string{}
-	for _, part := range strings.Split(credentials.Cookie, ";") {
-		name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-		if name == "ngaPassportUid" || name == "ngaPassportCid" || name == "ngaPassportUrlencodedUname" {
-			parts = append(parts, strings.TrimSpace(part))
-		}
-	}
-	for attempt := 1; attempt <= 10; attempt++ {
-		_, err = n.request(ctx, http.MethodGet, "/thread.php?"+query.Encode(), "", strings.Join(parts, "; "))
-		limit, delay := 10, time.Second
-		if errors.Is(err, ErrNGASearchUnavailable) {
-			limit, delay = 3, 2*time.Second
-		}
-		if err == nil || (!errors.Is(err, ErrNGABusy) && !errors.Is(err, ErrNGASearchUnavailable)) || attempt >= limit {
-			return err
-		}
-		logging.Error(ctx, err, "NGA user replies request will be retried", zerolog.WarnLevel)
-		zerolog.Ctx(ctx).Info().Int("attempt", attempt).Msg("Retrying credential validation")
-		if err = wait(ctx, delay); err != nil {
-			return err
-		}
-	}
+	_, err = n.userRequest(ctx, credentials, credentials.UID, true, 1)
 	return err
 }
 

@@ -33,6 +33,17 @@
   article + article { border-top: 1px solid #dde3ea; padding-top: 20px; } .small { font-size: 13px; } details { margin-top: 14px; } summary { cursor: pointer; }
   @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; flex-direction: column; } .card { padding: 20px; } dl { grid-template-columns: 1fr; } dt { padding-bottom: 0; border: 0; } }
 </style>
+<script>
+document.addEventListener('click', event => {
+  const add = event.target.closest('[data-add-rule]');
+  if (add) {
+    const group = add.closest('[data-rule-group]');
+    group.querySelector('[data-rule-list]').append(group.querySelector('template').content.cloneNode(true));
+  }
+  const remove = event.target.closest('[data-remove-rule]');
+  if (remove) remove.closest('[data-rule-row]').remove();
+});
+</script>
 {{end}}
 {{define "admin"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head"}}</head><body>
@@ -55,19 +66,31 @@
     <form method="post" action="/admin/nga-account/check" class="actions"><button class="secondary">校验已保存凭据</button></form>
   </section>
   <section class="card">
-    <h2>TID 监控</h2>
-    <p class="muted">本阶段仅手动采集；每次只运行一个任务，运行期间可以浏览进度和已保存内容。</p>
-    <div class="scroll"><table><thead><tr><th>TID / 备注</th><th>状态</th><th>基线 / 水位</th><th></th></tr></thead><tbody>
-      {{range .Data.Watches}}<tr><td>{{.TID}}<br>{{.Label}}<br><span class="small muted">{{.Title}}</span></td><td>{{if .Paused}}已暂停 · {{end}}{{status .State}}</td><td>{{if .BaselineComplete}}已完成{{else}}待初始化{{end}} · {{.CursorFloor}} 楼</td><td><a href="/admin/watches/{{.ID}}">配置与运行</a></td></tr>{{else}}<tr><td colspan="4">还没有监控。</td></tr>{{end}}
+    <h2>TID / UID 监控</h2>
+    <p class="muted">按配置间隔自动采集，同一时间只执行一个任务。时段按 {{.Settings.Timezone}} 解释；手动运行可绕过免拉取，但需先恢复手动暂停。</p>
+    <div class="scroll"><table><thead><tr><th>目标 / 备注</th><th>状态 / 水位</th><th>最近结果 / 下次执行</th><th></th></tr></thead><tbody>
+      {{range .Data.Watches}}<tr><td>{{if eq .Kind "uid"}}UID {{.UID}}{{else}}TID {{.TID}}{{end}}<br>{{.Label}}<br><span class="small muted">{{.Title}}</span></td>
+      <td>{{if .Paused}}已暂停 · {{end}}{{status .State}}<br>{{template "watermark" .}}<br>{{template "no-fetch" .}}</td>
+      <td>{{with .LastRun}}<span>{{status .Source}} · {{status .Status}} · 新增 {{.Saved}} 条</span><br><span class="small muted">{{when .FinishedAt}}</span>{{else}}尚未运行{{end}}<br>下次：{{if or .Paused (ne .State "ready")}}暂停{{else if .NextRunAt}}{{when .NextRunAt}}{{else if .NoFetch}}每周全天免拉取{{else}}等待调度{{end}}</td>
+      <td><a href="/admin/watches/{{.ID}}">配置与运行</a></td></tr>{{else}}<tr><td colspan="4">还没有监控。</td></tr>{{end}}
     </tbody></table></div>
     <details><summary>新增 TID 监控</summary><form method="post" action="/admin/watches">
+      <input type="hidden" name="kind" value="tid">
       <div class="grid"><label>TID<input name="tid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
       <label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>
       <p class="small muted">首次运行建立静默基线。从现在开始以首次运行成功时的水位为界，不导入旧楼层。</p>
-      <button>创建监控</button>
+      {{template "schedule"}}
+      <button>创建 TID 监控</button>
+    </form></details>
+    <details><summary>新增 UID 监控</summary><form method="post" action="/admin/watches">
+      <input type="hidden" name="kind" value="uid">
+      <div class="grid"><label>UID<input name="uid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
+      <p class="small muted">首次只建立主题和回帖水位，不导入历史；后续只保存该用户的新主楼与新回帖。</p>
+      {{template "schedule"}}
+      <button>创建 UID 监控</button>
     </form></details>
   </section>
-  <section class="card">
+  <section class="card" id="saved-threads">
     <h2>已保存主题</h2><p class="muted">删除监控后，已保存帖子仍可在这里浏览。</p>
     {{range .Data.Threads}}<p><a href="/admin/threads/{{.TID}}">TID {{.TID}} {{.Title}}</a> · {{.Count}} 条</p>{{else}}<p>尚无帖子。</p>{{end}}
   </section>
@@ -89,7 +112,7 @@
 {{define "runs"}}
 <h2>最近运行</h2>
 {{range .}}
-<article><p><strong>#{{.ID}} · {{status .Status}}</strong> · {{if .Silent}}静默基线{{else}}增量采集{{end}} · 来源 {{.Source}} · 已读 {{.Pages}} 页 / 新增 {{.Saved}} 条</p>
+<article><p><strong>#{{.ID}} · {{status .Status}}</strong> · {{if .Silent}}静默基线{{else}}增量采集{{end}} · 来源 {{status .Source}} · 已读 {{.Pages}} 页 / 新增 {{.Saved}} 条</p>
 <p class="small muted">{{when .StartedAt}} → {{when .FinishedAt}}</p>
 {{if .Error}}<p class="notice">{{.Error}}</p>{{end}}
 <p class="small">运行关联 ID：<code>{{.TraceID}}</code><br>来源请求 ID：<code>{{.SourceTraceID}}</code></p></article>
@@ -98,23 +121,27 @@
 
 {{define "watch"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head"}}{{range .Data.Runs}}{{if eq .Status "running"}}<meta http-equiv="refresh" content="3">{{end}}{{end}}</head><body><main>
-<header><div><p class="brand">NGA REMINDER</p><h1>TID {{.Data.Watch.TID}}</h1><p>{{.Data.Watch.Title}}</p></div><a class="button secondary" href="/admin">返回概览</a></header>
+<header><div><p class="brand">NGA REMINDER</p><h1>{{if eq .Data.Watch.Kind "uid"}}UID {{.Data.Watch.UID}}{{else}}TID {{.Data.Watch.TID}}{{end}}</h1><p>{{.Data.Watch.Title}}</p></div><a class="button secondary" href="/admin">返回概览</a></header>
 <section class="card">
   <h2>监控配置</h2>
-  <p>{{if .Data.Watch.Paused}}已暂停 · {{end}}{{status .Data.Watch.State}} · {{if .Data.Watch.BaselineComplete}}基线已完成{{else}}基线未完成{{end}} · 水位 {{.Data.Watch.CursorFloor}} 楼</p>
+  {{if not .Data.BackgroundEnabled}}<p class="notice">后台任务已关闭；自动和手动采集均已停用。</p>{{end}}
+  <p>{{if .Data.Watch.Paused}}已暂停 · {{end}}{{status .Data.Watch.State}} · {{template "watermark" .Data.Watch}}</p>
+  <p>{{template "no-fetch" .Data.Watch}} · 下次：{{if or .Data.Watch.Paused (ne .Data.Watch.State "ready")}}暂停{{else if .Data.Watch.NextRunAt}}{{when .Data.Watch.NextRunAt}}{{else if .Data.Watch.NoFetch}}每周全天免拉取{{else}}等待调度{{end}} · 时区 {{.Data.Timezone}}</p>
   <form method="post" action="/admin/watches/{{.Data.Watch.ID}}">
-    <div class="grid"><label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label><label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
-    <label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>
-    <p class="small muted">修改 TID 或初始化模式会重置基线，已保存内容保留。修改备注不影响水位。</p><button>保存配置</button>
+    <input type="hidden" name="kind" value="{{.Data.Watch.Kind}}">
+    <div class="grid">{{if eq .Data.Watch.Kind "uid"}}<label>UID<input name="uid" type="number" min="1" value="{{.Data.Watch.UID}}" required></label>{{else}}<label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label>{{end}}<label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
+    {{if eq .Data.Watch.Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>{{else}}<p>UID 首次运行与重置后只建立水位，不导入历史。</p>{{end}}
+    {{template "schedule" .Data.Watch}}
+    <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改备注、频率或免拉取时段不影响水位。</p><button>保存配置</button>
   </form>
   <div class="actions">
     <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button>手动运行一次</button></form>
     {{if .Data.Watch.Paused}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/resume"><button class="secondary">恢复监控</button></form>{{else}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/pause"><button class="secondary">暂停监控</button></form>{{end}}
-    <a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>
+    {{if eq .Data.Watch.Kind "tid"}}<a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>{{else}}<a class="button secondary" href="/admin#saved-threads">查看已保存主题</a>{{end}}
   </div>
-  <p class="small muted">暂停控制后续自动调度，仍可主动手动运行；本阶段尚未启用自动调度。运行中页面每 3 秒刷新。</p>
+  <p class="small muted">手动暂停会阻止自动和手动运行；认证暂停需修复账号后才恢复。手动运行绕过免拉取时段。运行中页面每 3 秒刷新。</p>
   <details><summary>重置基线或删除监控</summary>
-    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/reset"><label>重建模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label><button class="secondary">重置基线（保留帖子）</button></form>
+    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/reset">{{if eq .Data.Watch.Kind "tid"}}<label>重建模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>{{end}}<button class="secondary">重置基线（保留帖子）</button></form>
     <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/delete" class="actions"><button class="danger">删除监控（保留帖子）</button></form>
   </details>
 </section>
@@ -143,3 +170,31 @@
 <html lang="zh-CN"><head>{{template "head"}}</head><body><main><section class="card">
 <h1>操作未完成</h1><p class="notice">{{.Message}}</p><p>关联 ID：<code>{{.TraceID}}</code></p><a class="button secondary" href="/admin">返回管理页</a>
 </section></main></body></html>{{end}}
+
+{{define "watermark"}}{{if .BaselineComplete}}基线已完成{{else}}待初始化{{end}}{{if eq .Kind "uid"}}<br><span class="small">主题水位 {{.TopicCursor.Timestamp}} / TID {{.TopicCursor.ID}}<br>回帖水位 {{.ReplyCursor.Timestamp}} / PID {{.ReplyCursor.ID}}</span>{{else}} · 水位 {{.CursorFloor}} 楼{{end}}{{end}}
+
+{{define "no-fetch"}}{{if .NoFetch}}<span class="badge">免拉取中{{if .NoFetchUntil}}，至 {{when .NoFetchUntil}}{{else}}，每周全天{{end}}</span>{{else}}当前不在免拉取时段{{end}}{{end}}
+
+{{define "interval-row"}}<div data-rule-row class="card">
+<div class="grid"><label>星期<input name="interval_weekdays" value="{{if .}}{{weekdays .Weekdays}}{{else}}1,2,3,4,5{{end}}" required></label><label>间隔（秒）<input name="interval_override_seconds" type="number" min="30" max="86400" value="{{if .}}{{.IntervalSeconds}}{{else}}60{{end}}" required></label></div>
+<div class="grid"><label>开始<input name="interval_start" type="time" value="{{if .}}{{.Start}}{{else}}09:00{{end}}" required></label><label>结束<input name="interval_end" type="time" value="{{if .}}{{.End}}{{else}}18:00{{end}}" required></label></div>
+<button type="button" class="secondary" data-remove-rule>删除规则</button></div>{{end}}
+
+{{define "period-row"}}<div data-rule-row class="card">
+<label>星期<input name="period_weekdays" value="{{if .}}{{weekdays .Weekdays}}{{else}}1,2,3,4,5,6,7{{end}}" required></label>
+<div class="grid"><label>开始<input name="period_start" type="time" value="{{if .}}{{.Start}}{{else}}23:00{{end}}" required></label><label>结束<input name="period_end" type="time" value="{{if .}}{{.End}}{{else}}07:00{{end}}" required></label></div>
+<button type="button" class="secondary" data-remove-rule>删除时段</button></div>{{end}}
+
+{{define "schedule"}}
+<input type="hidden" name="schedule_present" value="1">
+<label>基础采集间隔（秒）<input name="interval_seconds" type="number" min="30" max="86400" value="{{if .}}{{.IntervalSeconds}}{{else}}60{{end}}" required></label>
+<p class="small muted">星期用逗号分隔，1 为周一、7 为周日。时段开始包含、结束不包含；跨午夜归属开始日，开始与结束相同表示整天。</p>
+<details data-rule-group><summary>按时段覆盖间隔（按页面顺序，首条匹配生效）</summary>
+<div data-rule-list>{{if .}}{{range .IntervalRules}}{{template "interval-row" .}}{{end}}{{end}}</div>
+<template>{{template "interval-row"}}</template><button type="button" class="secondary" data-add-rule>添加间隔规则</button>
+</details>
+<details data-rule-group><summary>免拉取时段（仅阻止自动采集，与间隔分开配置）</summary>
+<div data-rule-list>{{if .}}{{range .NoFetchPeriods}}{{template "period-row" .}}{{end}}{{end}}</div>
+<template>{{template "period-row"}}</template><button type="button" class="secondary" data-add-rule>添加免拉取时段</button>
+</details>
+{{end}}

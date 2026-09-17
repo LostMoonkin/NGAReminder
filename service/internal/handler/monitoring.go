@@ -90,6 +90,12 @@ func (h *Handler) saveWatch(c *gin.Context) {
 		h.problem(c, service.InvalidInput("监控参数格式无效"))
 		return
 	}
+	if !strings.HasPrefix(c.ContentType(), "application/json") {
+		if err := bindScheduleForm(c, &input); err != nil {
+			h.problem(c, err)
+			return
+		}
+	}
 	id := int64(0)
 	if c.Param("id") != "" {
 		var ok bool
@@ -234,7 +240,7 @@ func (h *Handler) problem(c *gin.Context, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, repository.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, service.ErrBusy), errors.Is(err, service.ErrBackgroundDisabled):
+	case errors.Is(err, service.ErrBusy), errors.Is(err, service.ErrPaused), errors.Is(err, service.ErrBackgroundDisabled):
 		status = http.StatusConflict
 	case errors.Is(err, infrastructure.ErrNGAAuth):
 		status = http.StatusUnprocessableEntity
@@ -253,8 +259,55 @@ func (h *Handler) problem(c *gin.Context, err error) {
 
 func statusText(value string) string {
 	if label, ok := map[string]string{"unconfigured": "未配置", "valid": "可用", "ready": "可采集", "auth_paused": "认证暂停", "missing": "主题不存在",
+		"manual": "手动", "automatic": "自动", "skipped_no_fetch": "免拉取，本轮跳过",
 		"running": "运行中", "success": "成功", "failed": "失败", "interrupted": "中断", "skipped_pending": "待审核，本轮跳过", "skipped_busy": "服务器忙，本轮跳过"}[value]; ok {
 		return label
 	}
 	return value
+}
+
+// 管理页以普通表单行编辑规则，API 使用 JSON 数组；校验和规则语义都留在 service。
+func bindScheduleForm(c *gin.Context, input *service.WatchInput) error {
+	// 旧表单没有调度字段时仍保留原规则。
+	if c.PostForm("schedule_present") != "1" {
+		return nil
+	}
+	input.IntervalRules = []repository.IntervalRule{}
+	input.NoFetchPeriods = []repository.TimeWindow{}
+	for _, prefix := range []string{"interval", "period"} {
+		days := c.PostFormArray(prefix + "_weekdays")
+		starts, ends := c.PostFormArray(prefix+"_start"), c.PostFormArray(prefix+"_end")
+		seconds := c.PostFormArray("interval_override_seconds")
+		if len(days) != len(starts) || len(days) != len(ends) || prefix == "interval" && len(days) != len(seconds) {
+			return service.InvalidInput("时段规则不完整")
+		}
+		for i, text := range days {
+			window := repository.TimeWindow{Start: starts[i], End: ends[i]}
+			for _, part := range strings.Split(text, ",") {
+				day, err := strconv.Atoi(strings.TrimSpace(part))
+				if err != nil {
+					return service.InvalidInput("星期请使用逗号分隔的 1～7，例如 1,2,3,4,5")
+				}
+				window.Weekdays = append(window.Weekdays, day)
+			}
+			if prefix == "period" {
+				input.NoFetchPeriods = append(input.NoFetchPeriods, window)
+			} else {
+				interval, err := strconv.Atoi(seconds[i])
+				if err != nil {
+					return service.InvalidInput("覆盖间隔必须为整数秒")
+				}
+				input.IntervalRules = append(input.IntervalRules, repository.IntervalRule{TimeWindow: window, IntervalSeconds: interval})
+			}
+		}
+	}
+	return nil
+}
+
+func weekdayList(days []int) string {
+	values := make([]string, len(days))
+	for i, day := range days {
+		values[i] = strconv.Itoa(day)
+	}
+	return strings.Join(values, ",")
 }

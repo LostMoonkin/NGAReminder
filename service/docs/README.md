@@ -36,7 +36,7 @@ cp config.example.json config.json
 ./service/start.sh -config ./service/config.local.json
 ```
 
-服务默认监听 `0.0.0.0:8989`。在局域网其他机器上打开 `http://<服务端局域网 IP>:8989/admin`；服务端本机也可打开 [本地管理页](http://127.0.0.1:8989/admin)。管理页直接访问，无需登录，可配置 NGA 账号、管理 TID 监控、手动采集和浏览已保存帖子。启动配置更改在重启后生效。
+服务默认监听 `0.0.0.0:8989`。在局域网其他机器上打开 `http://<服务端局域网 IP>:8989/admin`；服务端本机也可打开 [本地管理页](http://127.0.0.1:8989/admin)。管理页直接访问，无需登录，可配置 NGA 账号、管理 TID/UID 监控、配置自动频率与免拉取时段、手动采集和浏览已保存帖子。启动配置更改在重启后生效。
 
 已有配置文件需同步将 `listen_address` 改为 `0.0.0.0:8989`，或在启动时设置 `NGA_REMINDER_LISTEN_ADDRESS=0.0.0.0:8989`。旧配置中的 `admin_username`、`admin_password`、`cookie_secure` 已移除，升级时删除这些字段。
 
@@ -47,7 +47,7 @@ CGO_ENABLED=0 go build -o bin/nga-reminder ./cmd/server
 ./bin/nga-reminder -config config.json
 ```
 
-使用 Ctrl-C 或向服务进程发送 SIGTERM 停止。启动脚本通过 `exec` 运行二进制，脚本 PID 即服务 PID。服务取消正在执行的采集，最多等待 10 秒处理已有 HTTP 请求，保存中断结果后关闭网络和数据库连接；运行日志直接输出到当前终端。异常退出留下的 `running` 记录在下次启动时标为 `interrupted`，由用户手动重跑。
+使用 Ctrl-C 或向服务进程发送 SIGTERM 停止。启动脚本通过 `exec` 运行二进制，脚本 PID 即服务 PID。服务取消正在执行的采集，最多等待 10 秒处理已有 HTTP 请求，保存中断结果后关闭网络和数据库连接；运行日志直接输出到当前终端。异常退出留下的 `running` 记录在下次启动时标为 `interrupted`，保留已提交水位；未暂停的监控到期后重新运行，也可手动重跑，不补造离线期间的每次任务。
 
 ## 配置
 
@@ -72,7 +72,7 @@ CGO_ENABLED=0 go build -o bin/nga-reminder ./cmd/server
 NGA_REMINDER_BACKGROUND_ENABLED=false ./start.sh
 ```
 
-该开关仅改变本次进程的运行模式，不改写业务开关。管理页会显示“后台任务已关闭”；凭据校验和手动采集也返回 409，保证核验期间不访问 NGA。仍可查询和管理本地数据。后续阶段的自动任务同样受此开关控制。
+该开关仅改变本次进程的运行模式，不改写业务开关。管理页会显示“后台任务已关闭”；凭据校验和手动采集也返回 409，保证核验期间不访问 NGA。仍可查询和管理本地数据。自动调度和后续阶段的后台任务同样受此开关控制。
 
 启动失败会以非零退出码结束。日志指出配置字段或无法访问的路径，并保留错误原因和栈；常见原因是密钥编码不正确、端口被占用、数据目录不可写或数据库不属于 Go 服务。
 
@@ -103,25 +103,62 @@ curl -i http://127.0.0.1:8989/readyz
 curl -i -H "Authorization: Bearer $NGA_REMINDER_API_TOKEN" http://127.0.0.1:8989/api/v1/settings
 ```
 
-## NGA 账号与手动采集
+## NGA 账号与监控
 
 1. 在管理页粘贴完整 Cookie（可带 `Cookie:` 前缀），或留空 Cookie、填写 passport UID/CID。点击“校验并保存凭据”。校验请求使用需要认证的用户回复接口；公开资料页可读不能证明 Cookie 有效。
-2. 展开“新增 TID 监控”，填写 TID、可选备注和初始化模式。一个 TID 只保留一个监控。
-3. 进入详情，点击“手动运行一次”。请求立即返回，采集在本进程中串行执行；页面展示页数、新增数量、错误摘要和运行关联 ID。运行时可浏览数据，其他采集、账号操作和监控修改返回 409，等待完成后重试。
+2. 展开“新增 TID 监控”或“新增 UID 监控”，填写目标、备注和采集频率。每个 TID、每个 UID 各只保留一个监控。创建后进入自动调度，未配置或未验证账号时等待账号恢复。TID 可选择初始化模式，UID 固定从首次成功运行的水位开始。
+3. 进入详情，可调整星期/时间段覆盖间隔和免拉取时段，也可点击“手动运行一次”。手动请求立即返回，自动和手动采集在本进程中串行执行；页面展示来源、开始/结束时间、页数、新增数量、错误摘要和运行关联 ID。运行时可浏览数据，其他采集、账号操作和监控修改返回 409，等待完成后重试。
 4. 从详情或概览的“已保存主题”进入帖子列表。正文按转义后的纯文本显示，保留 BBCode、来源链接与资源地址；本阶段不下载资源，不发送通知。
 
 账号只保留一份。Cookie 以 AES-256-GCM 加密后写入 SQLite；页面/API 只显示脱敏 UID、可用状态和最近校验结果。替换失败保留原凭据及其状态，并展示新凭据失败原因。“校验已保存凭据”确认失效或采集返回认证错误时，账号进入 `auth_paused`；重新校验成功或保存有效新凭据后解除认证暂停，保留用户的暂停选择。
 
-初始化与重跑规则：
+TID 初始化与重跑规则：
 
 - **保存全部可访问历史（`full`）**：逐页保存主楼、回复和楼中楼，完成整轮后建立静默基线。热门引用不另存一份。
 - **从现在开始（`from_now`）**：首次成功运行读取首页和末页，以实际楼层建立水位，不导入旧帖子。后续保存新楼层及新评论；旧楼层下的评论按 NGA 发帖时间与基线时间区分，若未提供时间则不把它当作新评论。
-- 两种模式都不产生历史通知。后续手动采集逐页重读、按自然键仅插入新增内容，能发现旧楼层下新增的楼中楼；现阶段每轮请求量随主题页数增长。使用首页返回的页数快照，本轮期间新增的尾页留到下轮。
+- 两种模式都不产生历史通知。后续采集逐页重读、按自然键仅插入新增内容，能发现旧楼层下新增的楼中楼；现阶段每轮请求量随主题页数增长。使用首页返回的页数快照，本轮期间新增的尾页留到下轮。
 - 每页内容与本轮计数一并提交；整轮成功才提交最终水位和基线。中途失败可能已经保存部分页，但不会前移原水位或提前完成基线；重跑通过唯一键复用已存内容，不修改已有正文。
-- 暂停影响后续自动调度，仍允许显式手动运行。阶段 02 尚无自动调度；主题不存在时标为 `missing`，后续不得自动抓取，可手动重试恢复。待审核标为 `skipped_pending`，保留原水位。
-- 修改 TID 或初始化模式会重置基线；只改备注不影响水位。也可选择模式后单独重置基线。重置和删除监控都保留帖子及运行记录，已保存内容始终可从概览进入。
+- 手动暂停同时阻止自动和手动运行；恢复后继续使用原水位。主题不存在时标为 `missing`，后续不得自动抓取，可手动重试恢复。待审核标为 `skipped_pending`，保留原水位。
+- 修改 TID 或初始化模式会重置基线；只改备注或调度配置不影响水位。也可选择模式后单独重置基线。重置和删除监控都保留帖子及运行记录，已保存内容始终可从概览进入。
 
-NGA 单次 HTTP 请求超时 15 秒，请求间隔至少 500 毫秒。账号校验整体最多等待 25 秒；回复接口返回“服务器忙”时每秒重试，最多 10 次，空 HTTP 503 每两秒重试、最多 3 次。主题采集失败由用户显式重跑，不运行后台重试队列。
+NGA 单次 HTTP 请求超时 15 秒，请求间隔至少 500 毫秒。账号校验整体最多等待 25 秒；回复接口返回“服务器忙”时每秒重试，最多 10 次，空 HTTP 503 每两秒重试、最多 3 次。单轮采集失败保留已提交水位；可手动重跑，或等待下一次调度。认证暂停与主题不存在会停止自动抓取，待审核或临时失败则按间隔再次运行。
+
+UID 初始化与增量规则：
+
+- 首次成功读取主题/回帖列表，分别记录 `(发布时间, TID)` 与 `(发布时间, PID)` 水位，不访问历史帖子详情、不导入历史。主题列表按服务端总数分页，不能因无权记录使页面较短而提前结束；回复列表按发布时间倒序读取。
+- 后续只补全新候选：主题只请求第 1 页并保存目标 UID 的主楼；回帖只按 TID/PID 请求目标内容。详情作者必须仍为目标 UID；按 PID 获取的 `lou=0` 仍保存为回复，不会覆盖主楼或另一个 PID。
+- 主题列表可能受旧帖回复活动影响排序，因此每轮按总页数扫描；回复读到旧水位即可停止，同秒内容继续按 PID 区分。未知总数的回复列表满页继续，短页或成功页后的空体 503 结束；第一页空体 503、业务失败、缺少分页信息均不能当作空列表。
+- 两份列表和所需详情全部成功后，内容、两份水位和运行结果在一个 SQLite 事务中提交。失败不写入本轮部分内容，也不推进任意一份水位。明确的成功空列表可以建立空水位。
+- 重置或修改 UID 后重新静默建立水位；已有帖子保留并按自然键去重。详情页面显示两份水位，内容可在概览的“已保存主题”浏览。通知在阶段 04 接入。
+
+## 自动调度与免拉取
+
+每个监控的基础间隔默认 60 秒，范围 30～86400 秒；可以添加多个星期/时间段覆盖规则，按配置顺序取第一条命中规则，否则用基础间隔。正常运行结束后以结束时刻的规则计算下次执行时间。单进程每秒检查到期监控，按到期时间串行运行；前一个任务耗时较长时，后面的任务会顺延。
+
+星期为 `1`～`7`（周一至周日），时间使用严格 `HH:MM`。开始包含、结束不包含；例如周一 `23:00`～`02:00` 包含周二凌晨，归属于周一。起止相同表示开始日该时刻至次日同一时刻。所有判断使用服务配置时区。
+
+免拉取与间隔覆盖分别维护，自动到期时先判断免拉取；命中后不访问 NGA，记录 `skipped_no_fetch`，将下次时间移到相交或首尾相接时段的共同结束，不每分钟重复跳过。每周全天免拉取时，记录一次后等待配置变更，`next_run_at` 和 `no_fetch_until` 为 `null`。手动运行绕过免拉取，且不破坏已经记录的本段跳过；手动暂停、认证暂停和正在采集仍会阻止运行。
+
+创建、恢复或保存监控配置后重新进入到期检查；自动与手动使用同一个运行入口。启动时将遗留 `running` 记录标记为 `interrupted`，到期后只重新运行一次，不追补离线的定时次数。账号修复仅解除认证暂停，不改变手动暂停。
+
+调度字段可同时用于创建和修改，例如：
+
+```json
+{
+  "kind": "uid",
+  "uid": 2001,
+  "label": "关注用户",
+  "interval_seconds": 60,
+  "interval_rules": [
+    {"weekdays": [1, 2, 3, 4, 5], "start": "09:00", "end": "18:00", "interval_seconds": 300}
+  ],
+  "no_fetch_periods": [
+    {"weekdays": [1, 2, 3, 4, 5, 6, 7], "start": "23:00", "end": "07:00"}
+  ]
+}
+```
+
+修改时省略调度字段保留原值；传 `[]` 清空对应规则。兼容阶段 02 的 TID 请求：省略 `kind` 时默认 `tid`，原监控升级后使用 60 秒基础间隔，原暂停状态和基线保持。
 
 独立 API 均要求 `Authorization: Bearer <api_token>`，写入 body 为 JSON：
 
@@ -130,22 +167,22 @@ NGA 单次 HTTP 请求超时 15 秒，请求间隔至少 500 毫秒。账号校�
 | `GET /api/v1/nga-account` | 脱敏账号状态；不返回 Cookie 或密文 |
 | `PUT /api/v1/nga-account` | `{"cookie":"…"}` 或 `{"passport_uid":"…","passport_cid":"…"}`；校验成功才保存 |
 | `POST /api/v1/nga-account/check` | 校验当前已保存凭据，无需 body |
-| `GET /api/v1/watches` | 概览：`account`、`watches`、`threads` |
-| `POST /api/v1/watches` | `{"tid":1001,"label":"备注","init_mode":"full"}`；创建返回 201 |
-| `GET /api/v1/watches/:id` | `watch` 和该 TID 最近 20 次 `runs` |
-| `PUT /api/v1/watches/:id` | 完整的 `tid`、`label`、`init_mode` 配置 |
+| `GET /api/v1/watches` | 概览：`account`、`watches`、`threads`；监控附带 `last_run`、`next_run_at`、`no_fetch`、`no_fetch_until` |
+| `POST /api/v1/watches` | TID：`{"kind":"tid","tid":1001,"label":"备注","init_mode":"full"}`；UID：`{"kind":"uid","uid":2001,"label":"备注"}`；创建返回 201 |
+| `GET /api/v1/watches/:id` | `watch` 和该 watch 最近 20 次 `runs`，以及 `timezone`、`background_enabled` |
+| `PUT /api/v1/watches/:id` | 完整目标配置：`kind`、对应的 `tid` 或 `uid`、`label`；TID 还需 `init_mode`，可带调度字段 |
 | `POST /api/v1/watches/:id/pause`、`.../resume` | 暂停 / 恢复，无需 body |
-| `POST /api/v1/watches/:id/reset` | `{"init_mode":"full"}` 或 `{"init_mode":"from_now"}` |
+| `POST /api/v1/watches/:id/reset` | TID：`{"init_mode":"full"}` 或 `{"init_mode":"from_now"}`；UID 可省略 body，重新静默建立水位 |
 | `DELETE /api/v1/watches/:id` | 仅删除监控配置，保留帖子 |
 | `POST /api/v1/watches/:id/run` | 返回 202、运行记录和 `Location: /api/v1/runs/:id` |
 | `GET /api/v1/runs/:id` | 运行状态、时间、来源、页数、新增数量、错误摘要和关联 ID |
 | `GET /api/v1/threads/:tid/posts?page=1` | `posts`、`total`、`page` 和最近 `runs`，每页 50 条 |
 
-参数错误返回 400，记录不存在返回 404，已有任务或核验模式返回 409，NGA 认证拒绝返回 422。远端故障不会被当作空数据成功；错误响应包含 `trace_id`，详细原因和栈见日志。
+参数错误返回 400，记录不存在返回 404，已有任务、手动暂停或核验模式返回 409，NGA 认证拒绝返回 422。远端故障不会被当作空数据成功；错误响应包含 `trace_id`，详细原因和栈见日志。
 
 ## 数据与日志
 
-当前创建 `accounts`、`watches`、`runs`、`posts` 四张业务表；GORM 启动时升级已有 Go 数据库。旧会话表不再读写，其他业务表随后续功能增加。帖子通过 `(tid, key)` 唯一键去重：主楼为 `main`，普通回复和楼中楼均为 `pid:<PID>`；楼中楼保留 JSON 嵌套确定的父键，`comment_to_id` 仅作为原始元数据保存。
+当前创建 `accounts`、`watches`、`runs`、`posts` 四张业务表；GORM 启动时升级已有 Go 数据库，保留阶段 02 的 TID 水位、内容和暂停状态，并将旧 TID 唯一索引替换为分别约束 TID/UID 的索引。旧会话表不再读写，其他业务表随后续功能增加。帖子通过 `(tid, key)` 唯一键去重：主楼为 `main`，普通回复和楼中楼均为 `pid:<PID>`；楼中楼保留 JSON 嵌套确定的父键，`comment_to_id` 仅作为原始元数据保存。
 
 持久化时间统一使用 UTC，页面按配置时区展示。部署密钥用于 NGA 凭据加密落盘，API token 保留在配置中；密钥丢失后不能解密已存 Cookie。资源目录当前只创建并检查可写性。
 
@@ -153,7 +190,7 @@ SQLite 使用 WAL、5 秒 busy timeout 和单连接。数据库通过 `applicati
 
 日志默认以 info 级别逐行输出 JSON 到 stdout。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
 
-异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求；请求日志也记录 `run_id` 和 `run_trace_id`。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 TID、页码、初始化模式和数量，Cookie 不写入日志。
+异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求或调度 tick（每个 tick 独立 trace）；请求日志也记录 `run_id` 和 `run_trace_id`。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 watch ID、TID/UID、PID、页码、触发来源、初始化模式、水位和数量，Cookie 不写入日志。
 
 错误由终止操作的入口记录一次，带 `error`、`causes`、`stack`；栈在错误创建或第三方边界捕获，包含函数、文件和行号。panic 恢复为通用 500 响应，原始栈留在日志中。`message`、`error`、`causes` 中的已知凭据会脱敏，关联 ID、数字及 JSON 结构保持完整；业务代码仍需按 [规范](../AGENTS.md#调用链与日志) 显式选择安全字段。
 
@@ -168,4 +205,4 @@ CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test ./...
 ```
 
-测试使用假凭据和临时 SQLite，覆盖配置、免登录管理页、API token、数据库故障、panic、完整调用链和脱敏，以及 Cookie 失效/替换、初始化、去重、增量、重置/删除、中断和重启。故障入口只存在于测试中，不进入生产路由。NGA fixture 位于 [testdata/nga](../internal/infrastructure/testdata/nga/)，复制自 [Rust 脱敏样本](../../archive/rust-service/service/tests/fixtures/nga/README.md)；测试内构造分页、新楼层和业务错误，只有远端 HTTP transport 被替换，Gin、NGA Client、service 与 SQLite 均实际执行。测试不访问真实 NGA、飞书或 Bark。
+测试使用假凭据和临时 SQLite，覆盖配置、免登录管理页、API token、数据库故障、panic、完整调用链和脱敏，以及 Cookie 失效/替换、TID/UID 初始化与增量、详情作者核对、PID 回复身份、重置/删除、中断与重启、旧 Go SQLite 升级、调度边界和免拉取。故障入口只存在于测试中，不进入生产路由。NGA fixture 位于 [testdata/nga](../internal/infrastructure/testdata/nga/)，复制自 [Rust 脱敏样本](../../archive/rust-service/service/tests/fixtures/nga/README.md)；测试内构造分页、新楼层和业务错误，只有远端 HTTP transport 被替换，Gin、NGA Client、service 与 SQLite 均实际执行。测试不访问真实 NGA、飞书或 Bark。

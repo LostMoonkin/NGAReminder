@@ -429,6 +429,8 @@ func TestCollectionFailuresKeepCommittedCursor(t *testing.T) {
 	f.mu.Lock()
 	f.code = 0
 	f.mu.Unlock()
+	expectStatus(t, send(t, router, "POST", "/api/v1/watches/1/run", cfg.APIToken, nil), 409)
+	expectStatus(t, send(t, router, "POST", "/api/v1/watches/1/resume", cfg.APIToken, nil), 200)
 	if run := runWatch(t, router, cfg.APIToken, watch.ID); run.Status != "success" || run.Saved != 0 {
 		t.Fatalf("rerun after recovery did not deduplicate content: %+v", run)
 	}

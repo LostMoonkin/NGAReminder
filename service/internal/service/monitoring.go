@@ -16,6 +16,7 @@ import (
 )
 
 var (
+	ErrPaused             = errors.New("监控已手动暂停，请恢复后再运行")
 	ErrBusy               = errors.New("已有采集或账号操作正在执行，请完成后再试")
 	ErrBackgroundDisabled = errors.New("后台任务已关闭，核验模式不访问 NGA")
 )
@@ -26,13 +27,16 @@ func (e *InputError) Error() string     { return e.Message }
 func InvalidInput(message string) error { return logging.WithStack(&InputError{message}) }
 
 type Monitoring struct {
-	store   *repository.Store
-	nga     *infrastructure.NGA
-	cipher  *infrastructure.CredentialCipher
-	log     *logging.Logger
-	enabled bool
-	ctx     context.Context
-	cancel  context.CancelFunc
+	store         *repository.Store
+	nga           *infrastructure.NGA
+	cipher        *infrastructure.CredentialCipher
+	log           *logging.Logger
+	enabled       bool
+	ctx           context.Context
+	cancel        context.CancelFunc
+	location      *time.Location
+	scheduler     sync.WaitGroup
+	schedulerOnce sync.Once
 	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
 	work sync.Mutex
 }
@@ -47,14 +51,19 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	if err = store.InterruptRuns(initCtx); err != nil {
 		return nil, err
 	}
+	location, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return nil, logging.Wrap(err, "load monitoring timezone")
+	}
 	lifeCtx, cancel := context.WithCancel(ctx)
-	return &Monitoring{store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel}, nil
+	return &Monitoring{store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}, nil
 }
 
 func (m *Monitoring) Close() {
 	_, span := logging.Start(m.log.WithContext(m.ctx), "service.stop_monitoring")
 	defer span.End(nil)
 	m.cancel()
+	m.scheduler.Wait()
 	m.work.Lock()
 	defer m.work.Unlock()
 	m.nga.Close()
@@ -85,6 +94,18 @@ func (m *Monitoring) Overview(ctx context.Context) (data Overview, err error) {
 	}
 	if data.Watches, err = m.store.Watches(ctx); err != nil {
 		return data, err
+	}
+	latest, err := m.store.LatestRuns(ctx)
+	if err != nil {
+		return data, err
+	}
+	byWatch := make(map[int64]*repository.Run, len(latest))
+	for i := range latest {
+		byWatch[latest[i].WatchID] = &latest[i]
+	}
+	for i := range data.Watches {
+		m.describeWatch(&data.Watches[i], time.Now())
+		data.Watches[i].LastRun = byWatch[data.Watches[i].ID]
 	}
 	data.Threads, err = m.store.Threads(ctx)
 	return data, err
@@ -181,16 +202,30 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 }
 
 type WatchInput struct {
-	TID      int64  `json:"tid" form:"tid"`
-	Label    string `json:"label" form:"label"`
-	InitMode string `json:"init_mode" form:"init_mode"`
+	Kind            string                    `json:"kind" form:"kind"`
+	TID             int64                     `json:"tid" form:"tid"`
+	UID             int64                     `json:"uid" form:"uid"`
+	Label           string                    `json:"label" form:"label"`
+	InitMode        string                    `json:"init_mode" form:"init_mode"`
+	IntervalSeconds *int                      `json:"interval_seconds" form:"interval_seconds"`
+	IntervalRules   []repository.IntervalRule `json:"interval_rules" form:"-"`
+	NoFetchPeriods  []repository.TimeWindow   `json:"no_fetch_periods" form:"-"`
 }
 
 func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) (watch repository.Watch, err error) {
 	ctx, span := logging.Start(ctx, "service.save_watch")
 	defer span.End(&err)
-	if input.TID <= 0 || (input.InitMode != "full" && input.InitMode != "from_now") {
-		return watch, InvalidInput("TID 必须为正整数，初始化模式为 full 或 from_now")
+	if input.Kind == "" {
+		input.Kind = "tid"
+	}
+	if input.Kind == "uid" {
+		input.InitMode = "from_now"
+	}
+	if input.Kind != "tid" && input.Kind != "uid" || input.Kind == "tid" && (input.TID <= 0 || input.UID != 0) || input.Kind == "uid" && (input.UID <= 0 || input.TID != 0) {
+		return watch, InvalidInput("请选择 TID 或 UID 监控，只填写对应的正整数 ID")
+	}
+	if input.InitMode != "full" && input.InitMode != "from_now" {
+		return watch, InvalidInput("初始化模式为 full 或 from_now")
 	}
 	if err = m.lock(); err != nil {
 		return watch, err
@@ -202,28 +237,60 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 			return watch, err
 		}
 	}
+	interval := watch.IntervalSeconds
+	if id == 0 {
+		interval = 60
+	}
+	if input.IntervalSeconds != nil {
+		interval = *input.IntervalSeconds
+	}
+	// 旧 API 省略调度字段时保留配置；显式空数组表示清空规则。
+	if input.IntervalRules == nil {
+		input.IntervalRules = watch.IntervalRules
+	}
+	if input.NoFetchPeriods == nil {
+		input.NoFetchPeriods = watch.NoFetchPeriods
+	}
+	if err = validateSchedule(interval, input.IntervalRules, input.NoFetchPeriods); err != nil {
+		return watch, err
+	}
 	watches, err := m.store.Watches(ctx)
 	if err != nil {
 		return watch, err
 	}
 	for _, existing := range watches {
-		if existing.TID == input.TID && existing.ID != id {
-			return watch, InvalidInput("此 TID 已有监控")
+		if existing.ID != id && existing.Kind == input.Kind && (input.Kind == "tid" && existing.TID == input.TID || input.Kind == "uid" && existing.UID == input.UID) {
+			return watch, InvalidInput("此目标已有监控")
 		}
 	}
-	if watch.TID != input.TID || watch.InitMode != input.InitMode {
+	if watch.TID != input.TID || watch.UID != input.UID || watch.InitMode != input.InitMode {
 		resetBaseline(&watch)
 	}
-	if watch.TID != input.TID {
+	if watch.TID != input.TID || watch.UID != input.UID {
 		watch.Title = ""
 	}
-	watch.TID, watch.Label, watch.InitMode = input.TID, strings.TrimSpace(input.Label), input.InitMode
-	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Str("init_mode", input.InitMode).Msg("Saving TID watch")
+	watch.Kind, watch.TID, watch.UID = input.Kind, input.TID, input.UID
+	watch.Label, watch.InitMode = strings.TrimSpace(input.Label), input.InitMode
+	watch.IntervalSeconds, watch.IntervalRules, watch.NoFetchPeriods = interval, input.IntervalRules, input.NoFetchPeriods
+	now := time.Now().UTC()
+	watch.NextRunAt = &now
+	account, err := m.store.Account(ctx)
+	if err != nil {
+		return watch, err
+	}
+	if account.Status == "auth_paused" && watch.State == "ready" {
+		watch.State = "auth_paused"
+	}
+	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Int64("uid", input.UID).
+		Str("kind", input.Kind).Str("init_mode", input.InitMode).Int("interval_seconds", interval).
+		Int("interval_rules", len(input.IntervalRules)).Int("no_fetch_periods", len(input.NoFetchPeriods)).Msg("Saving watch")
 	err = m.store.SaveWatch(ctx, &watch)
+	m.describeWatch(&watch, now)
 	return watch, err
 }
 
 func resetBaseline(watch *repository.Watch) {
+	watch.TopicCursor, watch.ReplyCursor = repository.UserCursor{}, repository.UserCursor{}
 	watch.BaselineComplete, watch.CursorFloor, watch.HistoryFloor, watch.HistoryBefore, watch.State = false, 0, -1, nil, "ready"
 }
 
@@ -244,34 +311,50 @@ func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode str
 		watch.Paused = true
 	case "resume":
 		watch.Paused = false
+		now := time.Now().UTC()
+		watch.NextRunAt = &now
 	case "reset":
+		if watch.Kind == "uid" {
+			mode = "from_now"
+		}
 		if mode != "full" && mode != "from_now" {
 			return watch, InvalidInput("请选择重建基线的初始化模式")
 		}
+		state := watch.State
 		resetBaseline(&watch)
+		if state == "auth_paused" {
+			watch.State = state
+		}
 		watch.InitMode = mode
+		now := time.Now().UTC()
+		watch.NextRunAt = &now
 	case "delete":
 		return watch, m.store.DeleteWatch(ctx, id)
 	default:
 		return watch, InvalidInput("不支持的监控操作")
 	}
 	err = m.store.SaveWatch(ctx, &watch)
+	m.describeWatch(&watch, time.Now())
 	return watch, err
 }
 
 type WatchDetail struct {
-	Watch repository.Watch `json:"watch"`
-	Runs  []repository.Run `json:"runs"`
+	Timezone          string           `json:"timezone"`
+	BackgroundEnabled bool             `json:"background_enabled"`
+	Watch             repository.Watch `json:"watch"`
+	Runs              []repository.Run `json:"runs"`
 }
 
 func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, err error) {
 	ctx, span := logging.Start(ctx, "service.watch_detail")
 	defer span.End(&err)
+	detail.Timezone, detail.BackgroundEnabled = m.location.String(), m.enabled
 	detail.Watch, err = m.store.Watch(ctx, id)
 	if err != nil {
 		return detail, err
 	}
-	detail.Runs, err = m.store.Runs(ctx, detail.Watch.TID)
+	m.describeWatch(&detail.Watch, time.Now())
+	detail.Runs, err = m.store.WatchRuns(ctx, id)
 	return detail, err
 }
 
@@ -307,7 +390,7 @@ func FailureMessage(err error) string {
 	if errors.As(err, &input) {
 		return input.Message
 	}
-	for _, known := range []error{ErrBusy, ErrBackgroundDisabled, infrastructure.ErrCredentials, infrastructure.ErrNGAAuth,
+	for _, known := range []error{ErrBusy, ErrPaused, ErrBackgroundDisabled, infrastructure.ErrCredentials, infrastructure.ErrNGAAuth,
 		infrastructure.ErrNGAMissing, infrastructure.ErrNGAPending, infrastructure.ErrNGABusy, infrastructure.ErrNGASearchUnavailable} {
 		if errors.Is(err, known) {
 			return known.Error()

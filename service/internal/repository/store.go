@@ -66,7 +66,22 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	if err = os.Chmod(path, 0600); err != nil {
 		return nil, logging.Wrap(err, "set database file permissions")
 	}
-	if err = db.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}); err != nil {
+	// 阶段 02 的 TID 唯一索引会把所有 UID 监控的 tid=0 视为重复；原子升级为按类型的部分索引。
+	if err = db.Transaction(func(tx *gorm.DB) error {
+		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}); e != nil {
+			return e
+		}
+		for _, statement := range []string{
+			"DROP INDEX IF EXISTS idx_watches_tid",
+			"CREATE UNIQUE INDEX IF NOT EXISTS watch_tid ON watches(tid) WHERE kind = 'tid'",
+			"CREATE UNIQUE INDEX IF NOT EXISTS watch_uid ON watches(uid) WHERE kind = 'uid'",
+		} {
+			if e := tx.Exec(statement).Error; e != nil {
+				return e
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, logging.Wrap(err, "initialize NGA account and monitoring tables")
 	}
 	return &Store{db: db, pool: pool}, nil
