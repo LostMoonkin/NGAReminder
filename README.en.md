@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-NGA Reminder monitors NGA threads and users, saves content, and sends notifications. The Go rewrite has completed its runtime foundation, admin login, SQLite storage, and request tracing. Business features will follow in subsequent phases.
+NGA Reminder monitors NGA threads and users, saves content, and sends notifications. The Go rewrite has completed its runtime foundation, a passwordless LAN admin page, SQLite storage, and request tracing. Business features will follow in subsequent phases.
 
 ## Repository
 

@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -27,13 +28,12 @@ func New(out io.Writer) *Logger {
 }
 
 func (l *Logger) SetSecrets(secrets ...string) {
-	pairs := make([]string, 0, len(secrets)*4)
+	pairs := make([]string, 0, len(secrets)*2)
 	for _, secret := range secrets {
 		if secret == "" {
 			continue
 		}
-		encoded, _ := json.Marshal(secret)
-		pairs = append(pairs, string(encoded[1:len(encoded)-1]), "[REDACTED]", secret, "[REDACTED]")
+		pairs = append(pairs, secret, "[REDACTED]")
 	}
 	l.writer.mu.Lock()
 	defer l.writer.mu.Unlock()
@@ -49,7 +49,30 @@ type redactingWriter struct {
 func (w *redactingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, err := io.WriteString(w.out, w.replacements.Replace(string(p)))
+	// 只处理可能包含外部文本的字段，短 token 不能改写 JSON 标点、数字或关联 ID。
+	decoder := json.NewDecoder(bytes.NewReader(p))
+	decoder.UseNumber()
+	var event map[string]any
+	if err := decoder.Decode(&event); err != nil {
+		return 0, err
+	}
+	for _, key := range []string{"message", "error", "causes"} {
+		switch value := event[key].(type) {
+		case string:
+			event[key] = w.replacements.Replace(value)
+		case []any:
+			for i, item := range value {
+				if text, ok := item.(string); ok {
+					value[i] = w.replacements.Replace(text)
+				}
+			}
+		}
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return 0, err
+	}
+	_, err = w.out.Write(append(encoded, '\n'))
 	if err != nil {
 		return 0, err
 	}

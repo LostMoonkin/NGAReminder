@@ -5,6 +5,8 @@
 - 本项目由个人维护。优先选择能直接读懂、定位和修改的实现，用明确的业务代码解决当前问题。
 - 使用 Go、Gin、GORM、SQLite、zerolog；飞书使用 [官方 Go SDK](https://github.com/larksuite/oapi-sdk-go)。只支持单机单进程和 SQLite。
 - 不启用 CGO。SQLite 使用纯 Go 驱动，构建、自测及发布均设置 `CGO_ENABLED=0`，不能依赖系统 SQLite 或 C 编译器。
+- Web 管理面向可信内网，直接访问，不设后台账号、密码或 Cookie 会话；独立管理 API 使用 API token，Bot 沿用身份绑定与授权。
+- 已有配置项的取值和校验沿用 [Rust 配置](../archive/rust-service/service/src/config.rs) 与 [密钥校验](../archive/rust-service/service/src/crypto.rs)，以用户明确要求的变更为准；只保留实际协议、存储和算法需要的限制。
 - 保留已使用的监控、通知、Bot、Cookie 续期、Web 管理和导出能力。阶段边界及 Spec 链接见 [重构计划](docs/plan/README.md)。
 - 在 `service/` 内开发。文档、面向维护者的解释和必要注释使用中文，专业术语和代码标识符可使用英语。
 - 服务端文档统一放在 `docs/`：`plan/` 维护计划与阶段安排，`spec/` 维护功能需求与验收，`ticket/` 存放按需拆分的实施任务。[文档入口](docs/README.md) 维护导航，本文件保留在服务端根目录作为规范入口。

@@ -25,8 +25,8 @@ import (
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	dir := t.TempDir()
-	return config.Config{ListenAddress: "127.0.0.1:8080", DatabasePath: filepath.Join(dir, "app.db"), AssetsPath: filepath.Join(dir, "assets"),
-		AdminUsername: "admin", AdminPassword: "fake-quoted-\"password", APIToken: strings.Repeat("test-api-token-", 4),
+	return config.Config{ListenAddress: "0.0.0.0:8989", DatabasePath: filepath.Join(dir, "app.db"), AssetsPath: filepath.Join(dir, "assets"),
+		APIToken:      "fake-quoted-\"api-token-for-local-testing",
 		EncryptionKey: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)), Timezone: "Asia/Shanghai"}
 }
 
@@ -51,22 +51,16 @@ func openApp(t *testing.T, cfg config.Config, logs io.Writer) (*gin.Engine, *rep
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := New(admin, log, cfg.CookieSecure)
+	router, err := New(admin, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return router, store
 }
 
-func request(t *testing.T, router http.Handler, method, path, form string, cookie *http.Cookie, bearer string) *httptest.ResponseRecorder {
+func request(t *testing.T, router http.Handler, method, path, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, path, strings.NewReader(form))
-	if method == http.MethodPost {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-	if cookie != nil {
-		req.AddCookie(cookie)
-	}
+	req := httptest.NewRequest(method, path, nil)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -85,32 +79,29 @@ func expectStatus(t *testing.T, response *httptest.ResponseRecorder, want int) {
 	}
 }
 
-func TestAdminLifecycleAndRequestChain(t *testing.T) {
+func TestPasswordlessAdminAndRequestChain(t *testing.T) {
 	cfg := testConfig(t)
 	var logs bytes.Buffer
 	router, store := openApp(t, cfg, &logs)
-	expectStatus(t, request(t, router, "GET", "/healthz", "", nil, ""), 200)
-	expectStatus(t, request(t, router, "GET", "/readyz", "", nil, ""), 200)
-	expectStatus(t, request(t, router, "GET", "/admin", "", nil, ""), 303)
-	expectStatus(t, request(t, router, "GET", "/api/v1/settings", "", nil, ""), 401)
-	expectStatus(t, request(t, router, "GET", "/api/v1/settings", "", nil, "wrong-token"), 401)
-	expectStatus(t, request(t, router, "GET", "/missing", "", nil, ""), 404)
-	expectStatus(t, request(t, router, "GET", "/admin/", "", nil, ""), 404)
-	expectStatus(t, request(t, router, "POST", "/api/v1/settings", "", nil, cfg.APIToken), 405)
-	badLogin := request(t, router, "POST", "/admin/login", "username=admin&password=wrong", nil, "")
-	expectStatus(t, badLogin, 401)
-	if !strings.Contains(badLogin.Body.String(), "用户名或密码不正确") {
-		t.Fatal("管理页缺少登录错误反馈")
+	expectStatus(t, request(t, router, "GET", "/healthz", ""), 200)
+	expectStatus(t, request(t, router, "GET", "/readyz", ""), 200)
+	expectStatus(t, request(t, router, "GET", "/api/v1/settings", ""), 401)
+	expectStatus(t, request(t, router, "GET", "/api/v1/settings", "wrong-token"), 401)
+	expectStatus(t, request(t, router, "GET", "/missing", ""), 404)
+	expectStatus(t, request(t, router, "GET", "/admin/", ""), 404)
+	expectStatus(t, request(t, router, "GET", "/admin/login", ""), 404)
+	expectStatus(t, request(t, router, "POST", "/admin/logout", ""), 404)
+	expectStatus(t, request(t, router, "POST", "/api/v1/settings", cfg.APIToken), 405)
+	dashboard := request(t, router, "GET", "/admin", "")
+	expectStatus(t, dashboard, 200)
+	if !strings.Contains(dashboard.Body.String(), "后台任务已关闭") {
+		t.Fatal("管理页缺少迁移核验模式提示")
 	}
-	form := url.Values{"username": {cfg.AdminUsername}, "password": {cfg.AdminPassword}}.Encode()
-	login := request(t, router, "POST", "/admin/login", form, nil, "")
-	expectStatus(t, login, 303)
-	cookies := login.Result().Cookies()
-	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
-		t.Fatal("登录未设置正确的会话 Cookie")
+	if len(dashboard.Result().Cookies()) != 0 || strings.Contains(dashboard.Body.String(), "登录") {
+		t.Fatal("内网管理页不应建立会话或出现登录入口")
 	}
-	cookie := cookies[0]
-	settings := request(t, router, "GET", "/api/v1/settings", "", cookie, "")
+	assertChain(t, logs.Bytes(), dashboard.Header().Get("X-Request-ID"))
+	settings := request(t, router, "GET", "/api/v1/settings", cfg.APIToken)
 	expectStatus(t, settings, 200)
 	var payload map[string]any
 	if err := json.Unmarshal(settings.Body.Bytes(), &payload); err != nil {
@@ -119,30 +110,26 @@ func TestAdminLifecycleAndRequestChain(t *testing.T) {
 	if payload["timezone"] != "Asia/Shanghai" || payload["background_enabled"] != false || payload["database_status"] != "ok" {
 		t.Fatalf("运行设置不正确：%v", payload)
 	}
-	for _, field := range []string{"admin_password", "api_token", "encryption_key"} {
+	for _, field := range []string{"api_token", "encryption_key"} {
 		if _, exists := payload[field]; exists {
 			t.Fatalf("API 泄露秘密字段 %s", field)
 		}
 	}
 	assertChain(t, logs.Bytes(), settings.Header().Get("X-Request-ID"))
-	dashboard := request(t, router, "GET", "/admin", "", cookie, "")
-	expectStatus(t, dashboard, 200)
-	if !strings.Contains(dashboard.Body.String(), "后台任务已关闭") {
-		t.Fatal("管理页缺少迁移核验模式提示")
-	}
-	expectStatus(t, request(t, router, "GET", "/api/v1/settings?token="+url.QueryEscape(cfg.APIToken), "", nil, cfg.APIToken), 200)
+	expectStatus(t, request(t, router, "GET", "/api/v1/settings?token="+url.QueryEscape(cfg.APIToken), cfg.APIToken), 200)
 
 	if err := store.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	router, _ = openApp(t, cfg, &logs)
-	expectStatus(t, request(t, router, "GET", "/admin", "", cookie, ""), 200)
-	expectStatus(t, request(t, router, "POST", "/admin/logout", "", cookie, ""), 303)
-	expectStatus(t, request(t, router, "GET", "/api/v1/settings", "", cookie, ""), 401)
-	for _, secret := range append(cfg.Secrets(), cookie.Value) {
+	expectStatus(t, request(t, router, "GET", "/admin", ""), 200)
+	for _, secret := range cfg.Secrets() {
 		encoded, _ := json.Marshal(secret)
 		if bytes.Contains(logs.Bytes(), []byte(secret)) || bytes.Contains(logs.Bytes(), encoded[1:len(encoded)-1]) {
-			t.Fatal("日志包含凭据或会话 token")
+			t.Fatal("日志包含凭据")
+		}
+		if strings.Contains(dashboard.Body.String(), secret) {
+			t.Fatal("管理页包含凭据")
 		}
 	}
 }
@@ -152,20 +139,20 @@ func TestFailureAndPanicLogs(t *testing.T) {
 	var logs bytes.Buffer
 	router, store := openApp(t, cfg, &logs)
 	// 故障路由只注册在测试中，生产二进制没有该入口。
-	router.GET("/__test/panic", func(c *gin.Context) { panicInService(c.Request.Context(), cfg.AdminPassword) })
-	response := request(t, router, "GET", "/__test/panic", "", nil, "")
+	router.GET("/__test/panic", func(c *gin.Context) { panicInService(c.Request.Context(), cfg.APIToken) })
+	response := request(t, router, "GET", "/__test/panic", "")
 	expectStatus(t, response, 500)
 	assertErrorStack(t, logs.Bytes(), response.Header().Get("X-Request-ID"), "panicInService")
-	if strings.Contains(response.Body.String(), "stack") || strings.Contains(response.Body.String(), cfg.AdminPassword) {
+	if strings.Contains(response.Body.String(), "stack") || strings.Contains(response.Body.String(), cfg.APIToken) {
 		t.Fatal("panic 响应泄露内部信息")
 	}
 	if err := store.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response = request(t, router, "GET", "/readyz", "", nil, "")
+	response = request(t, router, "GET", "/readyz", "")
 	expectStatus(t, response, 503)
 	assertErrorStack(t, logs.Bytes(), response.Header().Get("X-Request-ID"), "repository.(*Store).Check")
-	expectStatus(t, request(t, router, "GET", "/healthz", "", nil, ""), 200)
+	expectStatus(t, request(t, router, "GET", "/healthz", ""), 200)
 	for _, event := range events(t, logs.Bytes()) {
 		encoded, _ := json.Marshal(event)
 		if strings.Contains(string(encoded), "fake-quoted") {
@@ -181,15 +168,15 @@ func panicInService(ctx context.Context, secret string) {
 	panic("synthetic failure: " + secret)
 }
 
-func TestCrossOriginLoginRejected(t *testing.T) {
+func TestCrossOriginWriteRejected(t *testing.T) {
 	router, _ := openApp(t, testConfig(t), io.Discard)
-	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader("username=admin&password=wrong"))
+	req := httptest.NewRequest("POST", "/api/v1/settings", nil)
 	req.Header.Set("Origin", "https://another-site.invalid")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	expectStatus(t, w, 403)
-	if len(w.Result().Cookies()) != 0 || w.Header().Get("X-Request-ID") == "" {
-		t.Fatal("被拒绝请求仍应可关联且不能创建登录会话")
+	if w.Header().Get("X-Request-ID") == "" {
+		t.Fatal("被拒绝请求仍应可关联")
 	}
 }
 

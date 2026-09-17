@@ -17,9 +17,10 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 	dir := t.TempDir()
 	filename := filepath.Join(dir, "config.json")
 	body, err := json.Marshal(map[string]any{
-		"admin_password": "test-password-from-file", "api_token": strings.Repeat("a", 40),
+		"api_token":      "x",
 		"encryption_key": base64.StdEncoding.EncodeToString(make([]byte, 32)),
 		"timezone":       "UTC", "background_enabled": true,
+		"listen_address": "127.0.0.1:0", "unused_setting": true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,12 +38,16 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 	if cfg.Timezone != "Asia/Shanghai" || cfg.BackgroundEnabled || cfg.DatabasePath != filepath.Join(dir, "data/nga-reminder.db") {
 		t.Fatal("环境变量覆盖或相对路径解析不正确")
 	}
+	if cfg.APIToken != "x" || cfg.ListenAddress != "127.0.0.1:0" {
+		t.Fatal("旧服务允许的短 token 和动态端口应原样保留")
+	}
 	saved, err := os.ReadFile(filename)
 	if err != nil || string(saved) != string(body) {
 		t.Fatal("加载配置不应写回文件")
 	}
 	for _, tc := range []struct{ name, value, field string }{
 		{"NGA_REMINDER_API_TOKEN", "", "api_token"},
+		{"NGA_REMINDER_API_TOKEN", " \t\n", "api_token"},
 		{"NGA_REMINDER_ENCRYPTION_KEY", "bad-private-key", "encryption_key"},
 		{"NGA_REMINDER_BACKGROUND_ENABLED", "bad-private-value", "BACKGROUND_ENABLED"},
 		{"NGA_REMINDER_TIMEZONE", "Not/A_Real_Zone", "timezone"},

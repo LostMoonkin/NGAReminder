@@ -7,7 +7,6 @@ import (
 	"html/template"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
@@ -19,20 +18,17 @@ import (
 //go:embed pages.html
 var pages string
 
-const sessionCookie = "nga_session"
-
 type Handler struct {
-	admin        *service.Admin
-	pages        *template.Template
-	cookieSecure bool
+	admin *service.Admin
+	pages *template.Template
 }
 
-func New(admin *service.Admin, log *logging.Logger, cookieSecure bool) (*gin.Engine, error) {
+func New(admin *service.Admin, log *logging.Logger) (*gin.Engine, error) {
 	templates, err := template.New("pages").Parse(pages)
 	if err != nil {
 		return nil, logging.Wrap(err, "加载管理页")
 	}
-	h := &Handler{admin, templates, cookieSecure}
+	h := &Handler{admin, templates}
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	// Gin 的自动尾斜杠重定向会跳过中间件；让所有路由结果都经过调用链日志。
@@ -54,11 +50,8 @@ func New(admin *service.Admin, log *logging.Logger, cookieSecure bool) (*gin.Eng
 	router.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/admin") })
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	router.GET("/readyz", h.ready)
-	router.GET("/admin/login", func(c *gin.Context) { h.render(c, http.StatusOK, "login", nil) })
-	router.POST("/admin/login", h.login)
-	router.POST("/admin/logout", h.logout)
-	router.GET("/admin", h.authorize(false), h.dashboard)
-	router.GET("/api/v1/settings", h.authorize(true), h.settings)
+	router.GET("/admin", h.dashboard)
+	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
 	router.NoRoute(func(c *gin.Context) {
 		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("路由不存在")))
 	})
@@ -109,70 +102,16 @@ func fail(c *gin.Context, status int, message string, err error) {
 	c.AbortWithStatusJSON(status, gin.H{"error": message, "trace_id": logging.TraceID(c.Request.Context())})
 }
 
-func (h *Handler) authorize(api bool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var err error
-		if authorization := c.GetHeader("Authorization"); api && authorization != "" {
-			scheme, token, _ := strings.Cut(authorization, " ")
-			if !strings.EqualFold(scheme, "Bearer") {
-				token = ""
-			}
-			err = h.admin.CheckToken(c.Request.Context(), token)
-		} else {
-			token, _ := c.Cookie(sessionCookie)
-			err = h.admin.CheckSession(c.Request.Context(), token)
-		}
-		if errors.Is(err, service.ErrUnauthorized) {
-			if api {
-				fail(c, http.StatusUnauthorized, "请登录或提供有效的 API token", err)
-			} else {
-				_ = c.Error(err)
-				c.Redirect(http.StatusSeeOther, "/admin/login")
-				c.Abort()
-			}
-			return
-		}
-		if err != nil {
-			fail(c, http.StatusServiceUnavailable, "暂时无法验证会话，请凭关联 ID 查看日志", err)
-			return
-		}
-		c.Next()
+func (h *Handler) authorizeAPI(c *gin.Context) {
+	scheme, token, _ := strings.Cut(c.GetHeader("Authorization"), " ")
+	if !strings.EqualFold(scheme, "Bearer") {
+		token = ""
 	}
-}
-
-func (h *Handler) login(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
-	if err := c.Request.ParseForm(); err != nil {
-		fail(c, http.StatusBadRequest, "登录表单无效或过大", logging.Wrap(err, "读取登录表单"))
+	if err := h.admin.CheckToken(c.Request.Context(), token); err != nil {
+		fail(c, http.StatusUnauthorized, "请提供有效的 API token", err)
 		return
 	}
-	token, expires, err := h.admin.Login(c.Request.Context(), c.PostForm("username"), c.PostForm("password"))
-	if errors.Is(err, service.ErrUnauthorized) {
-		_ = c.Error(err)
-		h.render(c, http.StatusUnauthorized, "login", gin.H{"Error": "用户名或密码不正确", "TraceID": logging.TraceID(c.Request.Context())})
-		return
-	}
-	if err != nil {
-		fail(c, http.StatusServiceUnavailable, "登录暂时不可用，请凭关联 ID 查看日志", err)
-		return
-	}
-	h.setCookie(c, token, expires, int(service.SessionLifetime.Seconds()))
-	c.Redirect(http.StatusSeeOther, "/admin")
-}
-
-func (h *Handler) logout(c *gin.Context) {
-	token, _ := c.Cookie(sessionCookie)
-	if err := h.admin.Logout(c.Request.Context(), token); err != nil {
-		fail(c, http.StatusServiceUnavailable, "退出未完成，请稍后重试", err)
-		return
-	}
-	h.setCookie(c, "", time.Unix(1, 0), -1)
-	c.Redirect(http.StatusSeeOther, "/admin/login")
-}
-
-func (h *Handler) setCookie(c *gin.Context, token string, expires time.Time, maxAge int) {
-	http.SetCookie(c.Writer, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
-		Secure: h.cookieSecure || c.Request.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: maxAge, Expires: expires})
+	c.Next()
 }
 
 func (h *Handler) ready(c *gin.Context) {

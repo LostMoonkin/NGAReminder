@@ -20,11 +20,6 @@ type Store struct {
 	pool *sql.DB
 }
 
-type Session struct {
-	TokenHash string `gorm:"primaryKey;size:64"`
-	ExpiresAt int64  `gorm:"not null;index"`
-}
-
 // application_id 标识 Go 数据库，防止配置失误把 Rust/其他 SQLite 当作新库升级。
 const applicationID = 0x4e474147
 
@@ -65,9 +60,6 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	if err = db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
 		return nil, logging.Wrap(err, "启用 SQLite WAL")
 	}
-	if err = db.AutoMigrate(&Session{}); err != nil {
-		return nil, logging.Wrap(err, "初始化登录会话表")
-	}
 	if err = db.Exec(fmt.Sprintf("PRAGMA application_id = %d", applicationID)).Error; err != nil {
 		return nil, logging.Wrap(err, "写入 SQLite 标识")
 	}
@@ -83,32 +75,6 @@ func (s *Store) Check(ctx context.Context) (err error) {
 	var one int
 	err = s.db.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error
 	return logging.Wrap(err, "SQLite 不可访问")
-}
-
-func (s *Store) SaveSession(ctx context.Context, session Session) (err error) {
-	ctx, span := logging.Start(ctx, "repository.save_session")
-	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Create(&session).Error, "保存管理员会话")
-}
-
-func (s *Store) SessionValid(ctx context.Context, tokenHash string, now int64) (valid bool, err error) {
-	ctx, span := logging.Start(ctx, "repository.session_valid")
-	defer span.End(&err)
-	var count int64
-	err = s.db.WithContext(ctx).Model(&Session{}).Where("token_hash = ? AND expires_at > ?", tokenHash, now).Count(&count).Error
-	return count == 1, logging.Wrap(err, "查询管理员会话")
-}
-
-func (s *Store) DeleteSession(ctx context.Context, tokenHash string) (err error) {
-	ctx, span := logging.Start(ctx, "repository.delete_session")
-	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Where("token_hash = ?", tokenHash).Delete(&Session{}).Error, "删除管理员会话")
-}
-
-func (s *Store) DeleteExpiredSessions(ctx context.Context, now int64) (err error) {
-	ctx, span := logging.Start(ctx, "repository.delete_expired_sessions")
-	defer span.End(&err)
-	return logging.Wrap(s.db.WithContext(ctx).Where("expires_at <= ?", now).Delete(&Session{}).Error, "清理过期会话")
 }
 
 func (s *Store) Close(ctx context.Context) (err error) {

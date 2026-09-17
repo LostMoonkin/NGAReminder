@@ -82,7 +82,7 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 	if err != nil {
 		return err
 	}
-	router, err := handler.New(admin, log, cfg.CookieSecure)
+	router, err := handler.New(admin, log)
 	if err != nil {
 		return err
 	}

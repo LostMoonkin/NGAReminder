@@ -37,8 +37,8 @@ server/nga_data.db
 # Configuration (keep examples)
 server/config/config.json
 !server/config/config.example.json
-service/config.json
-service/config.local.json
+service/config*.json
+!service/config.example.json
 
 # Go build output
 service/bin/
