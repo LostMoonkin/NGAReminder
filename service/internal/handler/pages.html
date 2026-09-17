@@ -25,6 +25,12 @@
   dt { color: #657282; } dd { overflow-wrap: anywhere; }
   code { font-size: 13px; overflow-wrap: anywhere; }
   footer { color: #758190; font-size: 12px; overflow-wrap: anywhere; }
+  a { color: #245a83; } input, textarea, select { width: 100%; padding: 9px 11px; border: 1px solid #bdc9d5; border-radius: 6px; font: inherit; background: white; color: inherit; }
+  label { display: block; margin: 10px 0; } textarea { min-height: 80px; } .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 14px; } .actions form { margin: 0; } .danger { background: #983d3d; }
+  .scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 12px 9px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 12px 0; background: #f4f6f8; padding: 16px; border-radius: 6px; }
+  article + article { border-top: 1px solid #dde3ea; padding-top: 20px; } .small { font-size: 13px; } details { margin-top: 14px; } summary { cursor: pointer; }
   @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; flex-direction: column; } .card { padding: 20px; } dl { grid-template-columns: 1fr; } dt { padding-bottom: 0; border: 0; } }
 </style>
 {{end}}
@@ -35,7 +41,36 @@
     <div><p class="brand">NGA REMINDER</p><h1>运行概览</h1><span class="badge">服务运行中 · SQLite 可用</span></div>
     <a class="button secondary" href="/admin">刷新</a>
   </header>
-  {{if not .Settings.BackgroundEnabled}}<div class="notice">后台任务已关闭。当前可检查配置和数据，不会自动采集、发送通知或处理机器人消息。</div>{{end}}
+  {{if not .Settings.BackgroundEnabled}}<div class="notice">后台任务已关闭。当前可检查配置和数据；凭据校验、手动采集及自动任务均已停用，不会访问 NGA。</div>{{end}}
+  <section class="card" id="account">
+    <h2>NGA 账号 <span class="badge">{{status .Data.Account.Status}}</span></h2>
+    <p class="muted">UID {{if .Data.Account.UIDMasked}}{{.Data.Account.UIDMasked}}{{else}}—{{end}} · 最近校验 {{when .Data.Account.CheckedAt}}</p>
+    {{if .Data.Account.LastError}}<p class="notice">{{.Data.Account.LastError}}</p>{{end}}
+    <form method="post" action="/admin/nga-account" autocomplete="off">
+      <label>完整 Cookie<textarea name="cookie" spellcheck="false" placeholder="ngaPassportUid=…; ngaPassportCid=…"></textarea></label>
+      <p class="muted small">Cookie 不回显。先校验新凭据，成功后才替换；失败保留原凭据。也可留空 Cookie，手动填写以下两项。</p>
+      <div class="grid"><label>passport UID<input name="passport_uid" inputmode="numeric"></label><label>passport CID<input name="passport_cid" type="password" autocomplete="new-password"></label></div>
+      <button type="submit">校验并保存凭据</button>
+    </form>
+    <form method="post" action="/admin/nga-account/check" class="actions"><button class="secondary">校验已保存凭据</button></form>
+  </section>
+  <section class="card">
+    <h2>TID 监控</h2>
+    <p class="muted">本阶段仅手动采集；每次只运行一个任务，运行期间可以浏览进度和已保存内容。</p>
+    <div class="scroll"><table><thead><tr><th>TID / 备注</th><th>状态</th><th>基线 / 水位</th><th></th></tr></thead><tbody>
+      {{range .Data.Watches}}<tr><td>{{.TID}}<br>{{.Label}}<br><span class="small muted">{{.Title}}</span></td><td>{{if .Paused}}已暂停 · {{end}}{{status .State}}</td><td>{{if .BaselineComplete}}已完成{{else}}待初始化{{end}} · {{.CursorFloor}} 楼</td><td><a href="/admin/watches/{{.ID}}">配置与运行</a></td></tr>{{else}}<tr><td colspan="4">还没有监控。</td></tr>{{end}}
+    </tbody></table></div>
+    <details><summary>新增 TID 监控</summary><form method="post" action="/admin/watches">
+      <div class="grid"><label>TID<input name="tid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
+      <label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>
+      <p class="small muted">首次运行建立静默基线。从现在开始以首次运行成功时的水位为界，不导入旧楼层。</p>
+      <button>创建监控</button>
+    </form></details>
+  </section>
+  <section class="card">
+    <h2>已保存主题</h2><p class="muted">删除监控后，已保存帖子仍可在这里浏览。</p>
+    {{range .Data.Threads}}<p><a href="/admin/threads/{{.TID}}">TID {{.TID}} {{.Title}}</a> · {{.Count}} 条</p>{{else}}<p>尚无帖子。</p>{{end}}
+  </section>
   <section class="card">
     <h2>当前运行设置</h2>
     <p class="muted">修改配置文件或环境变量后，重启服务生效。</p>
@@ -50,3 +85,61 @@
   </section>
   <footer>关联 ID：<code>{{.TraceID}}</code></footer>
 </main></body></html>{{end}}
+
+{{define "runs"}}
+<h2>最近运行</h2>
+{{range .}}
+<article><p><strong>#{{.ID}} · {{status .Status}}</strong> · {{if .Silent}}静默基线{{else}}增量采集{{end}} · 来源 {{.Source}} · 已读 {{.Pages}} 页 / 新增 {{.Saved}} 条</p>
+<p class="small muted">{{when .StartedAt}} → {{when .FinishedAt}}</p>
+{{if .Error}}<p class="notice">{{.Error}}</p>{{end}}
+<p class="small">运行关联 ID：<code>{{.TraceID}}</code><br>来源请求 ID：<code>{{.SourceTraceID}}</code></p></article>
+{{else}}<p class="muted">尚未运行。</p>{{end}}
+{{end}}
+
+{{define "watch"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head"}}{{range .Data.Runs}}{{if eq .Status "running"}}<meta http-equiv="refresh" content="3">{{end}}{{end}}</head><body><main>
+<header><div><p class="brand">NGA REMINDER</p><h1>TID {{.Data.Watch.TID}}</h1><p>{{.Data.Watch.Title}}</p></div><a class="button secondary" href="/admin">返回概览</a></header>
+<section class="card">
+  <h2>监控配置</h2>
+  <p>{{if .Data.Watch.Paused}}已暂停 · {{end}}{{status .Data.Watch.State}} · {{if .Data.Watch.BaselineComplete}}基线已完成{{else}}基线未完成{{end}} · 水位 {{.Data.Watch.CursorFloor}} 楼</p>
+  <form method="post" action="/admin/watches/{{.Data.Watch.ID}}">
+    <div class="grid"><label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label><label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
+    <label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>
+    <p class="small muted">修改 TID 或初始化模式会重置基线，已保存内容保留。修改备注不影响水位。</p><button>保存配置</button>
+  </form>
+  <div class="actions">
+    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button>手动运行一次</button></form>
+    {{if .Data.Watch.Paused}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/resume"><button class="secondary">恢复监控</button></form>{{else}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/pause"><button class="secondary">暂停监控</button></form>{{end}}
+    <a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>
+  </div>
+  <p class="small muted">暂停控制后续自动调度，仍可主动手动运行；本阶段尚未启用自动调度。运行中页面每 3 秒刷新。</p>
+  <details><summary>重置基线或删除监控</summary>
+    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/reset"><label>重建模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label><button class="secondary">重置基线（保留帖子）</button></form>
+    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/delete" class="actions"><button class="danger">删除监控（保留帖子）</button></form>
+  </details>
+</section>
+<section class="card">{{template "runs" .Data.Runs}}</section>
+<footer>页面关联 ID：<code>{{.TraceID}}</code></footer>
+</main></body></html>{{end}}
+
+{{define "posts"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head"}}</head><body><main>
+<header><div><p class="brand">NGA REMINDER</p><h1>TID {{.Data.TID}} · 已保存帖子</h1><p>共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div><a class="button secondary" href="/admin">返回概览</a></header>
+<section class="card">
+  <p class="muted small">正文按纯文本显示，保留原始 BBCode；富文本和资源导出在阶段 07 提供。</p>
+  {{range .Data.Posts}}<article>
+    <p><strong>{{if eq .Kind "main"}}主楼{{else if eq .Kind "comment"}}{{.ParentFloor}} 楼下的评论{{else}}{{.Floor}} 楼{{end}} · {{.Author}}</strong> <span class="muted small">UID {{.AuthorUID}} · PID {{.PID}} · {{when .PublishedAt}}</span></p>
+    {{if .Subject}}<p>{{.Subject}}</p>{{end}}<pre>{{.Body}}</pre>
+    <p class="small"><a href="{{.SourceURL}}" target="_blank" rel="noreferrer">NGA 原帖</a>{{if .ParentKey}} · 父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}{{end}}</p>
+    {{if .Resources}}<details><summary>资源地址（{{len .Resources}}）</summary>{{range .Resources}}<p class="small"><a href="{{.}}" target="_blank" rel="noreferrer">{{.}}</a></p>{{end}}</details>{{end}}
+  </article>{{else}}<p>尚无保存内容；从现在开始的基线不会导入旧楼层。</p>{{end}}
+  <nav class="actions">{{if .Previous}}<a class="button secondary" href="?page={{.Previous}}">上一页</a>{{end}}{{if .Next}}<a class="button secondary" href="?page={{.Next}}">下一页</a>{{end}}</nav>
+</section>
+<section class="card">{{template "runs" .Data.Runs}}</section>
+<footer>关联 ID：<code>{{.TraceID}}</code></footer>
+</main></body></html>{{end}}
+
+{{define "problem"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head"}}</head><body><main><section class="card">
+<h1>操作未完成</h1><p class="notice">{{.Message}}</p><p>关联 ID：<code>{{.TraceID}}</code></p><a class="button secondary" href="/admin">返回管理页</a>
+</section></main></body></html>{{end}}

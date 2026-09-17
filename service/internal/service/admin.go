@@ -64,3 +64,19 @@ func (a *Admin) Ready(ctx context.Context) (err error) {
 	defer span.End(&err)
 	return a.store.Check(ctx)
 }
+
+func (a *Admin) FormatTime(value any) string {
+	var timestamp time.Time
+	switch v := value.(type) {
+	case time.Time:
+		timestamp = v
+	case *time.Time:
+		if v != nil {
+			timestamp = *v
+		}
+	}
+	if timestamp.IsZero() {
+		return "—"
+	}
+	return timestamp.In(a.location).Format("2006-01-02 15:04:05 MST")
+}

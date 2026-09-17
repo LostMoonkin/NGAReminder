@@ -24,6 +24,7 @@ type Config struct {
 	APIToken          string `json:"api_token"`
 	EncryptionKey     string `json:"encryption_key"`
 	Timezone          string `json:"timezone"`
+	NGAUserAgent      string `json:"nga_user_agent"`
 	BackgroundEnabled bool   `json:"background_enabled"`
 }
 
@@ -45,7 +46,7 @@ func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey
 func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	_, span := logging.Start(ctx, "config.load")
 	defer span.End(&err)
-	cfg = Config{ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", Timezone: "Asia/Shanghai", BackgroundEnabled: true}
+	cfg = Config{ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
 	base := "."
 	if filename != "" {
 		var file *os.File
@@ -68,6 +69,7 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 		"LISTEN_ADDRESS": &cfg.ListenAddress, "DATABASE_PATH": &cfg.DatabasePath, "ASSETS_PATH": &cfg.AssetsPath,
 		"API_TOKEN":      &cfg.APIToken,
 		"ENCRYPTION_KEY": &cfg.EncryptionKey, "TIMEZONE": &cfg.Timezone,
+		"NGA_USER_AGENT": &cfg.NGAUserAgent,
 	} {
 		if value, ok := os.LookupEnv("NGA_REMINDER_" + name); ok {
 			*target = value

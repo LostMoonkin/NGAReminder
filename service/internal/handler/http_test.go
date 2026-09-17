@@ -31,6 +31,11 @@ func testConfig(t *testing.T) config.Config {
 }
 
 func openApp(t *testing.T, cfg config.Config, logs io.Writer) (*gin.Engine, *repository.Store) {
+	router, store, _ := openAppWithTransport(t, cfg, logs, nil)
+	return router, store
+}
+
+func openAppWithTransport(t *testing.T, cfg config.Config, logs io.Writer, transport http.RoundTripper) (*gin.Engine, *repository.Store, *service.Monitoring) {
 	t.Helper()
 	log := logging.New(logs)
 	log.SetSecrets(cfg.Secrets()...)
@@ -51,11 +56,16 @@ func openApp(t *testing.T, cfg config.Config, logs io.Writer) (*gin.Engine, *rep
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := New(admin, log)
+	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, transport), log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return router, store
+	t.Cleanup(monitor.Close)
+	router, err := New(admin, monitor, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return router, store, monitor
 }
 
 func request(t *testing.T, router http.Handler, method, path, bearer string) *httptest.ResponseRecorder {
@@ -93,11 +103,14 @@ func TestPasswordlessAdminAndRequestChain(t *testing.T) {
 	expectStatus(t, request(t, router, "POST", "/admin/logout", ""), 404)
 	expectStatus(t, request(t, router, "POST", "/api/v1/settings", cfg.APIToken), 405)
 	dashboard := request(t, router, "GET", "/admin", "")
+	if dashboard.Code != 200 {
+		t.Log(logs.String())
+	}
 	expectStatus(t, dashboard, 200)
 	if !strings.Contains(dashboard.Body.String(), "后台任务已关闭") {
 		t.Fatal("管理页缺少迁移核验模式提示")
 	}
-	if len(dashboard.Result().Cookies()) != 0 || strings.Contains(dashboard.Body.String(), "登录") {
+	if len(dashboard.Result().Cookies()) != 0 || strings.Contains(dashboard.Body.String(), "/admin/login") {
 		t.Fatal("内网管理页不应建立会话或出现登录入口")
 	}
 	assertChain(t, logs.Bytes(), dashboard.Header().Get("X-Request-ID"))

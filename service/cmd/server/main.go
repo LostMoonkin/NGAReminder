@@ -82,7 +82,12 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 	if err != nil {
 		return err
 	}
-	router, err := handler.New(admin, log)
+	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, nil), log)
+	if err != nil {
+		return err
+	}
+	defer monitor.Close()
+	router, err := handler.New(admin, monitor, log)
 	if err != nil {
 		return err
 	}
@@ -103,7 +108,7 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 		}
 		result <- logging.Wrap(serveErr, "HTTP 服务退出")
 	}()
-	// 本阶段尚无后台业务；后续调度和 Bot 只能在此开关开启时启动。
+	// 当前仅接受手动采集；后续调度和 Bot 也统一服从后台开关。
 	zerolog.Ctx(ctx).Info().Str("event", "server_started").Str("listen_address", listener.Addr().String()).
 		Bool("background_enabled", cfg.BackgroundEnabled).Msg("HTTP 服务已启动")
 	select {

@@ -19,16 +19,17 @@ import (
 var pages string
 
 type Handler struct {
-	admin *service.Admin
-	pages *template.Template
+	admin   *service.Admin
+	monitor *service.Monitoring
+	pages   *template.Template
 }
 
-func New(admin *service.Admin, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Parse(pages)
+func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText}).Parse(pages)
 	if err != nil {
 		return nil, logging.Wrap(err, "加载管理页")
 	}
-	h := &Handler{admin, templates}
+	h := &Handler{admin, monitor, templates}
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	// Gin 的自动尾斜杠重定向会跳过中间件；让所有路由结果都经过调用链日志。
@@ -52,6 +53,7 @@ func New(admin *service.Admin, log *logging.Logger) (*gin.Engine, error) {
 	router.GET("/readyz", h.ready)
 	router.GET("/admin", h.dashboard)
 	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
+	h.monitoringRoutes(router)
 	router.NoRoute(func(c *gin.Context) {
 		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("路由不存在")))
 	})
@@ -137,7 +139,12 @@ func (h *Handler) dashboard(c *gin.Context) {
 		fail(c, http.StatusServiceUnavailable, "读取运行设置失败，请凭关联 ID 查看日志", err)
 		return
 	}
-	h.render(c, http.StatusOK, "admin", gin.H{"Settings": settings, "TraceID": logging.TraceID(c.Request.Context())})
+	data, err := h.monitor.Overview(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	h.render(c, http.StatusOK, "admin", gin.H{"Settings": settings, "Data": data, "TraceID": logging.TraceID(c.Request.Context())})
 }
 
 func (h *Handler) render(c *gin.Context, status int, name string, data any) {

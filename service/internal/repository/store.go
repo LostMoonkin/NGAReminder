@@ -66,6 +66,9 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	if err = os.Chmod(path, 0600); err != nil {
 		return nil, logging.Wrap(err, "设置数据库文件权限")
 	}
+	if err = db.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}); err != nil {
+		return nil, logging.Wrap(err, "初始化 NGA 账号和监控表")
+	}
 	return &Store{db: db, pool: pool}, nil
 }
 
