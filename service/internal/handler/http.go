@@ -56,6 +56,7 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
 	h.monitoringRoutes(router)
 	h.notificationRoutes(router)
+	h.botRoutes(router)
 	router.NoRoute(func(c *gin.Context) {
 		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("route not found")))
 	})

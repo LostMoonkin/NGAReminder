@@ -38,6 +38,7 @@ type Monitoring struct {
 	scheduler     sync.WaitGroup
 	schedulerOnce sync.Once
 	notifications *Notifications
+	bot           *Bot
 	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
 	work sync.Mutex
 }
@@ -58,7 +59,9 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	}
 	lifeCtx, cancel := context.WithCancel(ctx)
 	notices := &Notifications{store: store, cipher: cipher, sender: sender, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx}
-	return &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}, nil
+	monitor = &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
+	monitor.bot = &Bot{monitor: monitor}
+	return monitor, nil
 }
 
 func (m *Monitoring) Close() {
@@ -66,6 +69,7 @@ func (m *Monitoring) Close() {
 	defer span.End(nil)
 	m.cancel()
 	m.scheduler.Wait()
+	m.bot.Close()
 	m.notifications.Close()
 	m.work.Lock()
 	defer m.work.Unlock()
@@ -427,4 +431,10 @@ func FailureMessage(err error) string {
 		return "请求超时，请稍后重试"
 	}
 	return "操作失败，请凭关联 ID 查看日志"
+}
+
+func (m *Monitoring) TaskContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(m.log.WithContext(context.Background()))
+	stop := context.AfterFunc(m.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
 }

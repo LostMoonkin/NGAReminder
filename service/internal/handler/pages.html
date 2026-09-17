@@ -50,7 +50,7 @@ document.addEventListener('click', event => {
 <main>
   <header>
     <div><p class="brand">NGA REMINDER</p><h1>运行概览</h1><span class="badge">服务运行中 · SQLite 可用</span></div>
-    <div class="actions"><a class="button secondary" href="/admin/notifications">通知与收件箱</a><a class="button secondary" href="/admin">刷新</a></div>
+    <div class="actions"><a class="button secondary" href="/admin/notifications">通知与收件箱</a><a class="button secondary" href="/admin/bot">飞书 Bot</a><a class="button secondary" href="/admin">刷新</a></div>
   </header>
   {{if not .Settings.BackgroundEnabled}}<div class="notice">后台任务已关闭。当前可检查配置和数据；凭据校验、手动采集及自动任务均已停用，不会访问 NGA。</div>{{end}}
   <section class="card" id="account">

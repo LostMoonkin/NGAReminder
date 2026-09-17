@@ -145,6 +145,7 @@ func (m *Monitoring) nextRun(watch repository.Watch, now time.Time) *time.Time {
 // 启动时显式接入；测试可调用 Tick 指定时间，不需要等真实的采集间隔。
 func (m *Monitoring) StartScheduler() {
 	m.notifications.Start()
+	m.bot.Start()
 	if !m.enabled {
 		return
 	}

@@ -1,0 +1,16 @@
+{{define "bot"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
+<header><div><p class="brand">NGA REMINDER</p><h1>飞书 Bot</h1></div><a href="/admin">返回概览</a></header>
+<section class="card"><h2>{{if .Data.Settings.Enabled}}已启用{{else}}已关闭{{end}} · {{status .Data.Settings.Status}}</h2>{{if .Data.Settings.LastError}}<p class="notice">{{.Data.Settings.LastError}}</p>{{end}}
+<p class="muted">与飞书通知共用<a href="/admin/notifications">应用凭据</a>，Bot 开关和通知渠道开关独立。应用需开启机器人、订阅 im.message.receive_v1 长连接事件，并授予私聊消息、群内 @ 消息及回复消息权限。</p>
+<form method="post" action="/admin/bot"><label>Bot 开关<select name="enabled"><option value="true" {{if .Data.Settings.Enabled}}selected{{end}}>启用</option><option value="false" {{if not .Data.Settings.Enabled}}selected{{end}}>关闭</option></select></label>
+<p>已授权 {{.Data.Settings.GroupCount}} 个群，群 ID 不回显。群中仍需校验管理员绑定，仅允许查询和监控运行。</p>
+<label><input style="width:auto" type="checkbox" name="replace_groups" value="true"> 替换授权群列表（留空表示清空）</label><label>授权 chat_id，每行一个<textarea name="groups" spellcheck="false"></textarea></label><button>保存设置</button></form></section>
+<section class="card"><h2>管理员绑定</h2><p>仅私聊绑定，绑定码十分钟过期、仅可用一次。新生成的码替换旧码。</p>
+{{if .Code}}<p class="notice">私聊机器人发送：<code>/bind {{.Code}}</code><br>过期时间：{{when .Expires}}</p>{{end}}
+<form method="post" action="/admin/bot/bind-code"><button>生成一次性绑定码</button></form>
+{{range .Data.Bindings}}<article><p>管理员 #{{.ID}} · 绑定于 {{when .CreatedAt}}</p><form method="post" action="/admin/bot/bindings/{{.ID}}/revoke"><button class="danger">撤销绑定</button></form></article>{{else}}<p>暂无已绑定管理员。</p>{{end}}</section>
+<section class="card"><h2>可用命令</h2><pre>/help
+/status
+/watch list
+/watch run &lt;watch_id&gt;</pre><p class="muted">手动运行回复“已接受”后可在管理页查看最终结果。同一飞书消息重放不会再次执行；中断时请重新发送一条命令。</p></section><footer>关联 ID：{{.TraceID}}</footer>
+</main></body></html>{{end}}
