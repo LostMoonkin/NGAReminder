@@ -171,6 +171,9 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 			if e != nil {
 				return e
 			}
+			if e = m.notifications.Record(ctx, tx, *watch, posts, run.Silent); e != nil {
+				return e
+			}
 			next.Pages, next.Saved = next.Pages+1, next.Saved+saved
 			return tx.SaveRun(ctx, &next)
 		})
@@ -193,6 +196,9 @@ func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.
 	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		saved, err := tx.InsertPosts(ctx, posts)
 		if err != nil {
+			return err
+		}
+		if err = m.notifications.Record(ctx, tx, *watch, posts, run.Silent); err != nil {
 			return err
 		}
 		next.Saved += saved

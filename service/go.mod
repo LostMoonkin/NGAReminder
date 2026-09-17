@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
 	github.com/libtnb/sqlite v1.2.2
 	github.com/rs/zerolog v1.35.1
 	gorm.io/gorm v1.31.2

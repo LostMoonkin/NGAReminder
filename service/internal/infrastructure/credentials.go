@@ -106,3 +106,25 @@ func (c *CredentialCipher) Decrypt(ctx context.Context, encrypted []byte) (crede
 	}
 	return ParseCredentials(string(plain), "", "")
 }
+
+// 不同敏感字段使用独立 AAD，不能把渠道密文误当作应用或登录凭据。
+func (c *CredentialCipher) Seal(ctx context.Context, purpose string, plain []byte) (encrypted []byte, err error) {
+	_, span := logging.Start(ctx, "infrastructure.encrypt_secret")
+	defer span.End(&err)
+	nonce := make([]byte, c.aead.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return nil, logging.Wrap(err, "generate secret nonce")
+	}
+	return c.aead.Seal(nonce, nonce, plain, []byte(purpose)), nil
+}
+
+func (c *CredentialCipher) Open(ctx context.Context, purpose string, encrypted []byte) (plain []byte, err error) {
+	_, span := logging.Start(ctx, "infrastructure.decrypt_secret")
+	defer span.End(&err)
+	n := c.aead.NonceSize()
+	if len(encrypted) < n {
+		return nil, logging.WithStack(errors.New("stored secret ciphertext is incomplete"))
+	}
+	plain, err = c.aead.Open(nil, encrypted[:n], encrypted[n:], []byte(purpose))
+	return plain, logging.Wrap(err, "decrypt stored secret")
+}

@@ -37,11 +37,12 @@ type Monitoring struct {
 	location      *time.Location
 	scheduler     sync.WaitGroup
 	schedulerOnce sync.Once
+	notifications *Notifications
 	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
 	work sync.Mutex
 }
 
-func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Store, nga *infrastructure.NGA, log *logging.Logger) (monitor *Monitoring, err error) {
+func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Store, nga *infrastructure.NGA, log *logging.Logger, sender *infrastructure.Notifier) (monitor *Monitoring, err error) {
 	initCtx, span := logging.Start(ctx, "service.initialize_monitoring")
 	defer span.End(&err)
 	cipher, err := infrastructure.NewCredentialCipher(cfg.EncryptionKey)
@@ -56,7 +57,8 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 		return nil, logging.Wrap(err, "load monitoring timezone")
 	}
 	lifeCtx, cancel := context.WithCancel(ctx)
-	return &Monitoring{store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}, nil
+	notices := &Notifications{store: store, cipher: cipher, sender: sender, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx}
+	return &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}, nil
 }
 
 func (m *Monitoring) Close() {
@@ -64,6 +66,7 @@ func (m *Monitoring) Close() {
 	defer span.End(nil)
 	m.cancel()
 	m.scheduler.Wait()
+	m.notifications.Close()
 	m.work.Lock()
 	defer m.work.Unlock()
 	m.nga.Close()
@@ -202,6 +205,8 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 }
 
 type WatchInput struct {
+	ChannelIDs      []int64                   `json:"channel_ids" form:"channel_ids"`
+	AuthorUIDs      []int64                   `json:"author_uids" form:"-"`
 	Kind            string                    `json:"kind" form:"kind"`
 	TID             int64                     `json:"tid" form:"tid"`
 	UID             int64                     `json:"uid" form:"uid"`
@@ -236,6 +241,12 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 		if err != nil {
 			return watch, err
 		}
+	}
+	if input.ChannelIDs != nil {
+		watch.ChannelIDs = input.ChannelIDs
+	}
+	if input.AuthorUIDs != nil {
+		watch.AuthorUIDs = input.AuthorUIDs
 	}
 	interval := watch.IntervalSeconds
 	if id == 0 {
@@ -284,7 +295,12 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Int64("uid", input.UID).
 		Str("kind", input.Kind).Str("init_mode", input.InitMode).Int("interval_seconds", interval).
 		Int("interval_rules", len(input.IntervalRules)).Int("no_fetch_periods", len(input.NoFetchPeriods)).Msg("Saving watch")
-	err = m.store.SaveWatch(ctx, &watch)
+	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if e := validateNotificationWatch(ctx, tx, watch); e != nil {
+			return e
+		}
+		return tx.SaveWatch(ctx, &watch)
+	})
 	m.describeWatch(&watch, now)
 	return watch, err
 }
@@ -339,10 +355,11 @@ func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode str
 }
 
 type WatchDetail struct {
-	Timezone          string           `json:"timezone"`
-	BackgroundEnabled bool             `json:"background_enabled"`
-	Watch             repository.Watch `json:"watch"`
-	Runs              []repository.Run `json:"runs"`
+	Channels          []repository.Channel `json:"channels"`
+	Timezone          string               `json:"timezone"`
+	BackgroundEnabled bool                 `json:"background_enabled"`
+	Watch             repository.Watch     `json:"watch"`
+	Runs              []repository.Run     `json:"runs"`
 }
 
 func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, err error) {
@@ -354,6 +371,10 @@ func (m *Monitoring) Watch(ctx context.Context, id int64) (detail WatchDetail, e
 		return detail, err
 	}
 	m.describeWatch(&detail.Watch, time.Now())
+	detail.Channels, err = m.store.Channels(ctx)
+	if err != nil {
+		return detail, err
+	}
 	detail.Runs, err = m.store.WatchRuns(ctx, id)
 	return detail, err
 }

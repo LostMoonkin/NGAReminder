@@ -44,6 +44,8 @@ type Watch struct {
 	IntervalRules   []IntervalRule `json:"interval_rules" gorm:"serializer:json"`
 	NoFetchPeriods  []TimeWindow   `json:"no_fetch_periods" gorm:"serializer:json"`
 	NextRunAt       *time.Time     `json:"next_run_at"`
+	ChannelIDs      []int64        `json:"channel_ids" gorm:"serializer:json"`
+	AuthorUIDs      []int64        `json:"author_uids" gorm:"serializer:json"`
 	LastRun         *Run           `json:"last_run,omitempty" gorm:"-"`
 	NoFetch         bool           `json:"no_fetch" gorm:"-"`
 	NoFetchUntil    *time.Time     `json:"no_fetch_until" gorm:"-"`

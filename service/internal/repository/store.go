@@ -68,8 +68,14 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	}
 	// 阶段 02 的 TID 唯一索引会把所有 UID 监控的 tid=0 视为重复；原子升级为按类型的部分索引。
 	if err = db.Transaction(func(tx *gorm.DB) error {
-		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}); e != nil {
+		seedObservations := !tx.Migrator().HasTable(&WatchPost{})
+		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}, &FeishuApp{}, &Channel{}, &InboxEvent{}, &EventWatch{}, &WatchPost{}, &Delivery{}); e != nil {
 			return e
+		}
+		if seedObservations {
+			if e := tx.Exec("INSERT INTO watch_posts (watch_id, post_id) SELECT w.id, p.id FROM watches w JOIN posts p ON p.tid = w.tid WHERE w.kind = 'tid'").Error; e != nil {
+				return e
+			}
 		}
 		for _, statement := range []string{
 			"DROP INDEX IF EXISTS idx_watches_tid",

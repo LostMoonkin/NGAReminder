@@ -56,7 +56,7 @@ func openAppWithTransport(t *testing.T, cfg config.Config, logs io.Writer, trans
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, transport), log)
+	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, transport), log, infrastructure.NewNotifier(transport))
 	if err != nil {
 		t.Fatal(err)
 	}

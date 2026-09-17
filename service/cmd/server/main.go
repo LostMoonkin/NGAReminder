@@ -82,7 +82,7 @@ func run(ctx context.Context, log *logging.Logger, cfg config.Config) (err error
 	if err != nil {
 		return err
 	}
-	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, nil), log)
+	monitor, err := service.NewMonitoring(ctx, cfg, store, infrastructure.NewNGA(cfg.NGAUserAgent, nil), log, infrastructure.NewNotifier(nil))
 	if err != nil {
 		return err
 	}

@@ -50,7 +50,7 @@ document.addEventListener('click', event => {
 <main>
   <header>
     <div><p class="brand">NGA REMINDER</p><h1>运行概览</h1><span class="badge">服务运行中 · SQLite 可用</span></div>
-    <a class="button secondary" href="/admin">刷新</a>
+    <div class="actions"><a class="button secondary" href="/admin/notifications">通知与收件箱</a><a class="button secondary" href="/admin">刷新</a></div>
   </header>
   {{if not .Settings.BackgroundEnabled}}<div class="notice">后台任务已关闭。当前可检查配置和数据；凭据校验、手动采集及自动任务均已停用，不会访问 NGA。</div>{{end}}
   <section class="card" id="account">
@@ -132,6 +132,10 @@ document.addEventListener('click', event => {
     <div class="grid">{{if eq .Data.Watch.Kind "uid"}}<label>UID<input name="uid" type="number" min="1" value="{{.Data.Watch.UID}}" required></label>{{else}}<label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label>{{end}}<label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
     {{if eq .Data.Watch.Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>{{else}}<p>UID 首次运行与重置后只建立水位，不导入历史。</p>{{end}}
     {{template "schedule" .Data.Watch}}
+    <input type="hidden" name="notifications_present" value="1">
+    <label>通知渠道<select name="channel_ids" multiple>{{range .Data.Channels}}<option value="{{.ID}}" {{if containsID $.Data.Watch.ChannelIDs .ID}}selected{{end}}>{{.Name}} · {{if .Enabled}}启用{{else}}关闭{{end}}</option>{{end}}</select></label>
+    {{if eq .Data.Watch.Kind "tid"}}<label>作者 UID 白名单（逗号分隔，留空表示全部作者）<input name="author_uids" value="{{intlist .Data.Watch.AuthorUIDs}}"></label>{{end}}
+    <p class="small muted">未选渠道时仍将匹配的新内容放入收件箱；初始化和历史内容保持静默。</p>
     <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改备注、频率或免拉取时段不影响水位。</p><button>保存配置</button>
   </form>
   <div class="actions">

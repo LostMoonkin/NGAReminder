@@ -2,7 +2,7 @@ package handler
 
 import (
 	"bytes"
-	_ "embed"
+	"embed"
 	"errors"
 	"html/template"
 	"net/http"
@@ -11,12 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 
+	"ngareminder/service/internal/content"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/service"
 )
 
-//go:embed pages.html
-var pages string
+//go:embed *.html
+var pageFiles embed.FS
 
 type Handler struct {
 	admin   *service.Admin
@@ -25,7 +26,7 @@ type Handler struct {
 }
 
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList}).Parse(pages)
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary}).ParseFS(pageFiles, "*.html")
 	if err != nil {
 		return nil, logging.Wrap(err, "load admin templates")
 	}
@@ -54,6 +55,7 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	router.GET("/admin", h.dashboard)
 	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
 	h.monitoringRoutes(router)
+	h.notificationRoutes(router)
 	router.NoRoute(func(c *gin.Context) {
 		fail(c, http.StatusNotFound, "页面或接口不存在", logging.WithStack(errors.New("route not found")))
 	})
