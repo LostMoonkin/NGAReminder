@@ -2,16 +2,17 @@
 
 [中文](README.md)
 
-NGA Reminder monitors NGA threads and users, saves content, and sends notifications. The server is being prepared for a Go rewrite. The Rust implementation has been archived; detailed Go design is still pending.
+NGA Reminder monitors NGA threads and users, saves content, and sends notifications. The server is being prepared for a Go rewrite. Development guidelines and phased specs are ready; Go implementation has not started.
 
 ## Repository
 
 | Directory | Status | Purpose |
 | --- | --- | --- |
+| [`service/`](service/docs/README.md) | Guidelines and specs ready | Single-process Go server using Gin, GORM, SQLite, and zerolog |
 | [`extension-standalone/`](extension-standalone/) | Maintained independently | Browser-only Chromium extension using browser cookies |
 | [`archive/rust-service/`](archive/rust-service/ARCHIVE.md) | Historical archive | Rust v0.1.4 source, tests, migrations, deployment files, project plan, and design documents |
 
-The Go server's structure, technical design, and implementation plan will be decided separately.
+Start with the [server guidelines](service/AGENTS.md) and [rewrite plan and phased specs](service/docs/plan/README.md), maintained in Chinese. Server documentation lives under `service/docs/`, divided into `plan/`, `spec/`, and `ticket/`. The rewrite retains the features in use and removes runtime PostgreSQL and multi-instance support. Existing deployments stop Rust, migrate PostgreSQL data to SQLite, validate the result, then bring Go online; see the [data migration spec](service/docs/spec/09-data-migration.md). Implementation details remain with each phase; tickets have not been created.
 
 ## Rust archive
 
