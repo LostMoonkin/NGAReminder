@@ -16,6 +16,7 @@ func (n *Notifier) ConnectBot(ctx context.Context, app AppCredentials, receive F
 	ctx, span := logging.Start(ctx, "infrastructure.feishu.connect_bot")
 	defer span.End(&err)
 	events := dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(receive)
+	events.Config.Logger = sdkQuiet{}
 	client := larkws.NewClient(app.AppID, app.AppSecret, larkws.WithEventHandler(events), larkws.WithHttpClient(n), larkws.WithLogger(sdkQuiet{}), larkws.WithOnReady(ready), larkws.WithOnError(func(err error) { failed(logging.Wrap(err, "Feishu connection interrupted")) }))
 	return logging.Wrap(client.Start(ctx), "run Feishu bot connection")
 }

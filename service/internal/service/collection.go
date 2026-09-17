@@ -228,12 +228,14 @@ func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, w
 	case errors.Is(cause, infrastructure.ErrNGAMissing):
 		run.Status = "missing"
 	}
-	return m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+	triggerRenewal := false
+	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		if run.Status == "auth_paused" {
 			account, err := tx.Account(ctx)
 			if err != nil {
 				return err
 			}
+			triggerRenewal = account.Status != "auth_paused"
 			account.Status, account.LastError, account.CheckedAt = "auth_paused", run.Error, &now
 			if err = tx.SaveAccount(ctx, &account); err != nil {
 				return err
@@ -256,4 +258,8 @@ func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, w
 		}
 		return tx.SaveRun(ctx, run)
 	})
+	if err == nil && triggerRenewal {
+		m.authRenewal(ctx)
+	}
+	return err
 }

@@ -12,5 +12,9 @@
 <section class="card"><h2>可用命令</h2><pre>/help
 /status
 /watch list
-/watch run &lt;watch_id&gt;</pre><p class="muted">手动运行回复“已接受”后可在管理页查看最终结果。同一飞书消息重放不会再次执行；中断时请重新发送一条命令。</p></section><footer>关联 ID：{{.TraceID}}</footer>
+/watch run &lt;watch_id&gt;
+/login status
+/login confirm &lt;request_id&gt;
+/login captcha &lt;request_id&gt; &lt;code&gt;
+/login cancel &lt;request_id&gt;</pre><p class="muted">手动运行回复“已接受”后可在管理页查看最终结果。同一飞书消息重放不会再次执行；中断时请重新发送一条命令。</p></section><footer>关联 ID：{{.TraceID}}</footer>
 </main></body></html>{{end}}

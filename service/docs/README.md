@@ -246,3 +246,22 @@ watch 创建/更新额外接受 `channel_ids` 与 `author_uids` 数组；省略�
 | `POST /api/v1/bot` | `enabled`，可选 `groups`（空白分隔 chat ID 字符串）；省略保留，空串清空 |
 | `POST /api/v1/bot/bind-code` | 返回一次性 `code`、`expires_at`，新码使旧码失效 |
 | `POST /api/v1/bot/bindings/:id/revoke` | 撤销管理员身份 |
+
+
+## Cookie 续期（阶段 06）
+
+在 `/admin/renewal` 启用续期，填写 NGA 登录名/密码，选择已绑定管理员；敏感字段留空保留，不回显。需先保存一份 NGA Cookie 确定预期 UID。配置变更取消活动交互，重新选择管理员后再发起。
+
+采集或校验已保存 Cookie 时，只有从可用转为明确认证失败才发送一次确认；网络错误、繁忙不触发登录。也可在页面手动发起，有活动交互时复用，不提前停用有效 Cookie。
+
+指定管理员在原绑定私聊中使用 `/login status`、`/login confirm <request_id>`、`/login captcha <request_id> <code>`、`/login cancel <request_id>`。确认后建立独立 NGA 登录会话，上传并实际发送图形验证码后才等待六位答案；提交时按 NGA 页面公钥进行 RSA 加密。候选 Cookie 通过认证接口校验且 UID 与原账号一致后，在同一事务中替换并解除认证暂停，保留手动暂停。
+
+交互有效期十分钟；密码/验证码/图片失败、取消、过期、配置或账号变更都需重新发起。短信、手机或腾讯挑战提示手动更新 Cookie。登录上下文仅在内存中，结束立即丢弃；启动时将未完成记录标记中断，不恢复密码或验证码提交。应用凭据改变也使原交互无法继续。不自动重试密码。
+
+| API（Bearer token） | 参数 / 行为 |
+| --- | --- |
+| `GET /api/v1/renewal` | 脱敏配置、管理员绑定列表与最近交互 |
+| `POST /api/v1/renewal` | `enabled`、`binding_id`、`name`、`password`；敏感字段留空保留 |
+| `POST /api/v1/renewal/start` | 向指定私聊发送确认，返回活动交互；核验模式禁用 |
+
+页面和普通 API 不返回密码、验证码或 Cookie；结果带可理解的阶段与错误，内部日志保留调用链及错误栈。

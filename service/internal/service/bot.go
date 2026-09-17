@@ -227,8 +227,10 @@ func (b *Bot) execute(ctx context.Context, settings repository.BotSettings, cmd 
 		}
 	}
 	switch cmd.Name {
+	case "/login":
+		return b.monitor.renewal.Command(ctx, cmd)
 	case "/help":
-		return "/help\n/status\n/watch list\n/watch run <watch_id>", nil
+		return "/help\n/status\n/watch list\n/watch run <watch_id>\n/login status\n/login confirm <request_id>\n/login captcha <request_id> <code>\n/login cancel <request_id>", nil
 	case "/status":
 		data, e := b.monitor.Overview(ctx)
 		if e != nil {

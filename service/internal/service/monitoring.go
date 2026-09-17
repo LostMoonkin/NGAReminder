@@ -39,6 +39,7 @@ type Monitoring struct {
 	schedulerOnce sync.Once
 	notifications *Notifications
 	bot           *Bot
+	renewal       *Renewal
 	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
 	work sync.Mutex
 }
@@ -61,6 +62,11 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	notices := &Notifications{store: store, cipher: cipher, sender: sender, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx}
 	monitor = &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
 	monitor.bot = &Bot{monitor: monitor}
+	monitor.renewal = &Renewal{monitor: monitor}
+	if err = store.InterruptRenewals(initCtx); err != nil {
+		cancel()
+		return nil, err
+	}
 	return monitor, nil
 }
 
@@ -70,6 +76,7 @@ func (m *Monitoring) Close() {
 	m.cancel()
 	m.scheduler.Wait()
 	m.bot.Close()
+	m.renewal.Close()
 	m.notifications.Close()
 	m.work.Lock()
 	defer m.work.Unlock()
@@ -170,6 +177,7 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 		if !checkOnly {
 			account.LastError = "新凭据未保存：" + account.LastError
 		}
+		triggerRenewal := checkOnly && account.Status != "auth_paused" && errors.Is(checkErr, infrastructure.ErrNGAAuth)
 		if checkOnly && errors.Is(checkErr, infrastructure.ErrNGAAuth) {
 			account.Status = "auth_paused"
 		}
@@ -185,6 +193,9 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 			}
 			return nil
 		})
+		if err == nil && triggerRenewal {
+			m.authRenewal(writeCtx)
+		}
 		return account, errors.Join(checkErr, err)
 	}
 	if !checkOnly {
@@ -411,6 +422,13 @@ func (m *Monitoring) Run(ctx context.Context, id int64) (run repository.Run, err
 
 // 对页面和持久化摘要只提供已知安全的错误语义；内部原因和栈由结束边界统一记录。
 func FailureMessage(err error) string {
+	var login *infrastructure.LoginError
+	if errors.As(err, &login) {
+		labels := map[string]string{"protocol_changed": "NGA 登录协议已变化，请手动更新 Cookie", "invalid_captcha_image": "验证码图片无效，请重新发起", "invalid_captcha": "验证码错误，请重新发起", "invalid_credentials": "NGA 登录名或密码错误，请修改配置后重试", "unsupported_challenge": "NGA 要求手机、短信或腾讯验证，请手动更新 Cookie", "busy": "NGA 服务器忙，请稍后重新发起", "candidate_cookie_missing": "登录响应未提供可校验 Cookie，请手动更新", "login_rejected": "NGA 拒绝登录，请检查账号后重新发起", "response_too_large": "NGA 登录响应异常，请手动更新 Cookie"}
+		if text, ok := labels[login.Code]; ok {
+			return text
+		}
+	}
 	var input *InputError
 	if errors.As(err, &input) {
 		return input.Message

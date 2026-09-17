@@ -134,7 +134,7 @@ func (h *Handler) receiveBot(_ context.Context, event *larkim.P2MessageReceiveV1
 	}
 	name := strings.ToLower(words[0])
 	switch name {
-	case "/help", "/status", "/watch", "/bind":
+	case "/help", "/status", "/watch", "/bind", "/login":
 	default:
 		name = "unknown"
 	}

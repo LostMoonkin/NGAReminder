@@ -165,7 +165,10 @@ func (m *Monitoring) StartScheduler() {
 					return
 				case now := <-ticker.C:
 					ctx, span := logging.Start(background, "service.scheduler_tick")
-					err := m.Tick(ctx, now)
+					err := m.renewal.Expire(ctx, now)
+					if err == nil {
+						err = m.Tick(ctx, now)
+					}
 					if err != nil {
 						logging.Error(ctx, err, "Scheduler tick failed", zerolog.ErrorLevel)
 					}

@@ -2,13 +2,13 @@
 
 [English](README.en.md)
 
-NGA Reminder 用于 NGA 主题与用户监控、内容保存和通知。服务端正在使用 Go 重构，已完成运行基础、NGA 账号配置、TID/UID 监控、自动调度与免拉取、Bark/飞书通知与收件箱、飞书 Bot、手动采集和帖子浏览；其余业务功能按阶段继续实现。
+NGA Reminder 用于 NGA 主题与用户监控、内容保存和通知。服务端正在使用 Go 重构，已完成运行基础、NGA 账号配置、TID/UID 监控、自动调度与免拉取、Bark/飞书通知与收件箱、飞书 Bot、Cookie 续期、手动采集和帖子浏览；其余业务功能按阶段继续实现。
 
 ## 仓库组成
 
 | 目录 | 状态 | 说明 |
 | --- | --- | --- |
-| [`service/`](service/docs/README.md) | 阶段 01～05 已完成 | Go 服务端，使用 Gin、GORM、纯 Go SQLite 和 zerolog，单机运行、禁用 CGO |
+| [`service/`](service/docs/README.md) | 阶段 01～06 已完成 | Go 服务端，使用 Gin、GORM、纯 Go SQLite 和 zerolog，单机运行、禁用 CGO |
 | [`extension-standalone/`](extension-standalone/) | 独立维护 | 无需服务端的 Chromium 扩展，使用浏览器 Cookie |
 | [`archive/rust-service/`](archive/rust-service/ARCHIVE.md) | 历史归档 | Rust v0.1.4 的代码、测试、迁移、部署配置、项目计划和设计文档 |
 
