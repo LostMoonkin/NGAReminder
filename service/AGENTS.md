@@ -24,6 +24,7 @@
 | 位置 | 职责 |
 | --- | --- |
 | `cmd/` | 启动、配置加载和显式组装依赖 |
+| `web/` | 管理页 HTML、CSS、JavaScript 与资源嵌入；模板统一放在 `web/templates/` |
 | `internal/handler/` | Gin 路由、参数校验、HTTP 响应；Bot 消息入口的解析和回复映射 |
 | `internal/service/` | 业务流程、业务规则、事务边界和后台任务编排 |
 | `internal/repository/` | GORM 模型与数据库读写；SQL 只出现在这一层 |
@@ -39,6 +40,7 @@
 ## 调用链与日志
 
 - 统一使用 zerolog 结构化日志，默认 `info`。HTTP 请求、Bot 事件、定时任务和启动流程各有 `trace_id`。
+- 后台轮询的只读检查保持静默（含 repository/SQL 日志）；实际开始业务或变更状态时再建立调用链并记录关键参数。检查失败仍在任务边界记录完整错误和 stack trace。
 - 每个实际经过的 handler、service、repository、infrastructure 操作记录开始与结束，包含 `trace_id`、`span_id`、`parent_span_id`、`operation`；结束日志补充结果及耗时，根操作的父 ID 为空。
 - 完整调用链指从入口经过业务层、数据库和外部请求，再到最终结果的实际调用关系。成功和失败都可串联；无需给每个 getter 或纯计算函数打日志。
 - HTTP 响应携带关联 ID。异步任务建立自身的 trace 并记录来源 trace 和业务 ID，使用自己的任务 context；不要沿用已经取消的 HTTP context。

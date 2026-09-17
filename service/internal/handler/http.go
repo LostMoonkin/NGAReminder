@@ -2,7 +2,6 @@ package handler
 
 import (
 	"bytes"
-	"embed"
 	"errors"
 	"html/template"
 	"net/http"
@@ -14,10 +13,8 @@ import (
 	"ngareminder/service/internal/content"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/service"
+	"ngareminder/service/web"
 )
-
-//go:embed *.html
-var pageFiles embed.FS
 
 type Handler struct {
 	admin   *service.Admin
@@ -26,7 +23,7 @@ type Handler struct {
 }
 
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(pageFiles, "*.html")
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(web.Templates, "templates/*.html")
 	if err != nil {
 		return nil, logging.Wrap(err, "load admin templates")
 	}

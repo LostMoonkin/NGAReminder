@@ -63,15 +63,39 @@ func (r *Renewal) latest(ctx context.Context, now time.Time) (v repository.Renew
 	}
 	return
 }
+
+// Expire 只处理已过期的交互，错误在此入口记录，循环不重复打印。
 func (r *Renewal) Expire(ctx context.Context, now time.Time) (err error) {
-	ctx, span := logging.Start(ctx, "service.expire_renewal")
-	defer span.End(&err)
+	var span *logging.Span
+	defer func() {
+		panicValue := recover()
+		if panicValue != nil {
+			err = logging.FromPanic(panicValue)
+		}
+		if err != nil {
+			if span == nil {
+				ctx, span = logging.Start(ctx, "service.expire_renewal")
+			}
+			logging.Error(ctx, err, "Expire renewal failed", zerolog.ErrorLevel)
+		}
+		if span != nil {
+			span.End(&err)
+		}
+		if panicValue != nil {
+			panic(err)
+		}
+	}()
 	if !r.work.TryLock() {
 		return nil
 	}
 	defer r.work.Unlock()
-	_, err = r.latest(ctx, now)
-	return err
+	v, err := r.monitor.store.LatestRenewal(logging.Quiet(ctx))
+	if err != nil || !renewalActive(v.Status) || now.Before(v.ExpiresAt) {
+		return err
+	}
+	ctx, span = logging.Start(ctx, "service.expire_renewal")
+	zerolog.Ctx(ctx).Info().Str("request_id", v.ID).Time("expires_at", v.ExpiresAt).Msg("Expiring renewal")
+	return r.finish(ctx, &v, "expired", "续期交互已过期，请重新发起")
 }
 func (r *Renewal) Overview(ctx context.Context) (v RenewalOverview, err error) {
 	ctx, span := logging.Start(ctx, "service.renewal_overview")

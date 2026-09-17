@@ -164,15 +164,10 @@ func (m *Monitoring) StartScheduler() {
 				case <-m.ctx.Done():
 					return
 				case now := <-ticker.C:
-					ctx, span := logging.Start(background, "service.scheduler_tick")
-					err := m.renewal.Expire(ctx, now)
+					err := m.renewal.Expire(background, now)
 					if err == nil {
-						err = m.Tick(ctx, now)
+						_ = m.Tick(background, now)
 					}
-					if err != nil {
-						logging.Error(ctx, err, "Scheduler tick failed", zerolog.ErrorLevel)
-					}
-					span.End(&err)
 				}
 			}
 		}()
@@ -180,9 +175,27 @@ func (m *Monitoring) StartScheduler() {
 }
 
 // 每次选取最早到期的监控。离线多久都只运行一次，后续从当前时间重新计时。
+// 调度错误在此入口记录，循环不重复打印。
 func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
-	ctx, span := logging.Start(ctx, "service.schedule_due_watch")
-	defer span.End(&err)
+	var span *logging.Span
+	defer func() {
+		panicValue := recover()
+		if panicValue != nil {
+			err = logging.FromPanic(panicValue)
+		}
+		if err != nil {
+			if span == nil {
+				ctx, span = logging.Start(ctx, "service.schedule_due_watch")
+			}
+			logging.Error(ctx, err, "Schedule watch failed", zerolog.ErrorLevel)
+		}
+		if span != nil {
+			span.End(&err)
+		}
+		if panicValue != nil {
+			panic(err)
+		}
+	}()
 	if !m.enabled {
 		return nil
 	}
@@ -199,15 +212,26 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 			m.work.Unlock()
 		}
 	}()
-	watches, err := m.store.Watches(ctx)
+	probe := logging.Quiet(ctx)
+	watches, err := m.store.Watches(probe)
 	if err != nil {
 		return err
 	}
-	dueGaps, err := m.dueGapWatches(ctx, now)
+	dueGaps, expiredGaps, err := m.scheduledGaps(probe, now)
 	if err != nil {
 		return err
 	}
-	account, err := m.store.Account(ctx)
+	if len(expiredGaps) > 0 {
+		ctx, span = logging.Start(ctx, "service.schedule_due_watch")
+		for _, gap := range expiredGaps {
+			zerolog.Ctx(ctx).Info().Int64("watch_id", gap.WatchID).Int64("floor", gap.Floor).Time("deadline", gap.Deadline).Msg("Expiring floor gap")
+			gap.Status = "expired"
+			if err = m.store.SaveFloorGap(ctx, &gap); err != nil {
+				return err
+			}
+		}
+	}
+	account, err := m.store.Account(probe)
 	if err != nil {
 		return err
 	}
@@ -239,6 +263,10 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 		if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active && until == nil && watch.NextRunAt == nil {
 			continue
 		}
+		if span == nil {
+			ctx, span = logging.Start(ctx, "service.schedule_due_watch")
+		}
+		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Str("source", source).Msg("Starting scheduled watch")
 		_, started, err = m.startRunLocked(ctx, watch, source, now)
 		return err
 	}

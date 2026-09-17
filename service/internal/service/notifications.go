@@ -316,9 +316,28 @@ func (n *Notifications) Retry(ctx context.Context, id int64) (err error) {
 	d.Status, d.Attempts, d.Error, d.NextAttempt = "pending", 0, "", time.Now().UTC()
 	return n.store.SaveDelivery(ctx, &d)
 }
+
+// Deliver 每轮只发送一条可投递通知，错误在此入口记录，循环不重复打印。
 func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) {
-	ctx, span := logging.Start(ctx, "service.deliver_notifications")
-	defer span.End(&err)
+	var span *logging.Span
+	defer func() {
+		panicValue := recover()
+		if panicValue != nil {
+			err = logging.FromPanic(panicValue)
+		}
+		if err != nil {
+			if span == nil {
+				ctx, span = logging.Start(ctx, "service.deliver_notifications")
+			}
+			logging.Error(ctx, err, "Notification worker failed", zerolog.ErrorLevel)
+		}
+		if span != nil {
+			span.End(&err)
+		}
+		if panicValue != nil {
+			panic(err)
+		}
+	}()
 	if !n.enabled {
 		return nil
 	}
@@ -326,7 +345,8 @@ func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) 
 		return nil
 	}
 	defer n.work.Unlock()
-	pending, err := n.store.PendingDeliveries(ctx)
+	probe := logging.Quiet(ctx)
+	pending, err := n.store.PendingDeliveries(probe)
 	if err != nil {
 		return err
 	}
@@ -334,7 +354,7 @@ func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) 
 		if d.NextAttempt.After(now) {
 			continue
 		}
-		c, e := n.store.Channel(ctx, d.ChannelID)
+		c, e := n.store.Channel(probe, d.ChannelID)
 		if errors.Is(e, repository.ErrNotFound) {
 			continue
 		}
@@ -344,6 +364,8 @@ func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) 
 		if !c.Enabled {
 			continue
 		}
+		ctx, span = logging.Start(ctx, "service.deliver_notifications")
+		zerolog.Ctx(ctx).Info().Int64("channel_id", c.ID).Int64("delivery_id", d.ID).Int("attempt", d.Attempts+1).Msg("Starting notification delivery")
 		event, e := n.store.Event(ctx, d.EventID)
 		if e != nil {
 			return e
@@ -396,12 +418,7 @@ func (n *Notifications) Start() {
 				case now := <-ticker.C:
 					ctx, cancel := context.WithCancel(n.log.WithContext(context.Background()))
 					stop := context.AfterFunc(n.ctx, cancel)
-					ctx, span := logging.Start(ctx, "service.notification_tick")
-					err := n.Deliver(ctx, now)
-					if err != nil {
-						logging.Error(ctx, err, "Notification worker failed", zerolog.ErrorLevel)
-					}
-					span.End(&err)
+					_ = n.Deliver(ctx, now)
 					stop()
 					cancel()
 				}

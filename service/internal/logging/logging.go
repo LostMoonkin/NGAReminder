@@ -81,6 +81,13 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 
 type spanKey struct{}
 
+// Quiet 仅用于后台轮询的只读检查；返回的错误仍由任务边界记录。
+// 保留 warning/error，业务开始后使用原 context 建立调用链。
+func Quiet(ctx context.Context) context.Context {
+	l := zerolog.Ctx(ctx).Level(zerolog.WarnLevel)
+	return l.WithContext(ctx)
+}
+
 type Span struct {
 	TraceID string
 	ID      string

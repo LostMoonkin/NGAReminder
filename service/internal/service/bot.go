@@ -301,9 +301,12 @@ func (b *Bot) connections() {
 	var retryAt time.Time
 	stop := func() {
 		if cancel != nil {
+			ctx, span := logging.Start(b.monitor.log.WithContext(context.Background()), "service.stop_bot_connection")
+			zerolog.Ctx(ctx).Info().Msg("Stopping Feishu bot connection")
 			cancel()
 			<-done
 			cancel = nil
+			span.End(nil)
 		}
 	}
 	defer stop()
@@ -312,13 +315,15 @@ func (b *Bot) connections() {
 		case <-b.monitor.ctx.Done():
 			return
 		case now := <-ticker.C:
-			ctx, span := logging.Start(b.monitor.log.WithContext(context.Background()), "service.bot_connection_check")
-			settings, err := b.monitor.store.BotSettings(ctx)
+			ctx := b.monitor.log.WithContext(context.Background())
+			probe := logging.Quiet(ctx)
+			settings, err := b.monitor.store.BotSettings(probe)
 			var app repository.FeishuApp
 			if err == nil {
-				app, err = b.monitor.store.FeishuApp(ctx)
+				app, err = b.monitor.store.FeishuApp(probe)
 			}
 			if err != nil {
+				ctx, span := logging.Start(ctx, "service.bot_connection_check")
 				logging.Error(ctx, err, "Read bot configuration failed", zerolog.ErrorLevel)
 				span.End(&err)
 				continue
@@ -327,7 +332,6 @@ func (b *Bot) connections() {
 			if !settings.Enabled || len(app.Secret) == 0 {
 				stop()
 				active = ""
-				span.End(nil)
 				continue
 			}
 			if cancel != nil {
@@ -343,19 +347,20 @@ func (b *Bot) connections() {
 				retryAt = time.Time{}
 			}
 			if cancel == nil && !now.Before(retryAt) {
-				credentials, e := b.monitor.notifications.AppCredentials(ctx)
+				taskCtx, root := logging.Start(ctx, "service.bot_connection")
+				zerolog.Ctx(taskCtx).Info().Msg("Starting Feishu bot connection")
+				credentials, e := b.monitor.notifications.AppCredentials(taskCtx)
 				if e != nil {
-					logging.Error(ctx, e, "Read bot app failed", zerolog.ErrorLevel)
-					span.End(&e)
+					logging.Error(taskCtx, e, "Read bot app failed", zerolog.ErrorLevel)
+					root.End(&e)
 					continue
 				}
 				active = key
-				taskCtx, taskCancel := context.WithCancel(b.monitor.log.WithContext(context.Background()))
+				taskCtx, taskCancel := context.WithCancel(taskCtx)
 				cancel = taskCancel
 				done = make(chan struct{})
 				go func(done chan struct{}) {
 					defer close(done)
-					taskCtx, root := logging.Start(taskCtx, "service.bot_connection")
 					var err error
 					defer root.End(&err)
 					update := func(state string, cause error) {
@@ -379,7 +384,6 @@ func (b *Bot) connections() {
 					}
 				}(done)
 			}
-			span.End(nil)
 		}
 	}
 }

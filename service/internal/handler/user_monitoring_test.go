@@ -233,7 +233,15 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 	if run = runWatch(t, router, cfg.APIToken, 1); !run.Silent || run.Saved != 0 || run.Status != "success" {
 		t.Fatalf("reset did not silently rebaseline: %+v", run)
 	}
-	expectStatus(t, send(t, router, "DELETE", "/api/v1/watches/1", cfg.APIToken, nil), 200)
+	// 运行结果先提交，goroutine 收尾后才释放采集锁；与启动采集一样等待忙碌结束。
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		response = send(t, router, "DELETE", "/api/v1/watches/1", cfg.APIToken, nil)
+		if response.Code != 409 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	expectStatus(t, response, 200)
 	_, total, _ = store.Posts(context.Background(), 1003, 1)
 	if total != 2 {
 		t.Fatal("reset or deletion removed UID content")

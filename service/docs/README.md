@@ -190,16 +190,18 @@ SQLite 使用 WAL、5 秒 busy timeout 和单连接。数据库通过 `applicati
 
 日志默认以 info 级别逐行输出 JSON 到 stdout。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
 
-异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求或调度 tick（每个 tick 独立 trace）；请求日志也记录 `run_id` 和 `run_trace_id`。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 watch ID、TID/UID、PID、页码、触发来源、初始化模式、水位和数量，Cookie 不写入日志。
+异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求或实际开始业务的调度操作；请求日志也记录 `run_id` 和 `run_trace_id`。后台空 tick 的只读检查不打印日志（含 repository/SQL）；采集、投递、续期过期处理、楼层缺口过期和 Bot 连接变更开始时再记录业务调用链，检查失败仍记录错误详情和 stack trace。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 watch ID、TID/UID、PID、页码、触发来源、初始化模式、水位和数量，Cookie 不写入日志。
 
 错误由终止操作的入口记录一次，带 `error`、`causes`、`stack`；栈在错误创建或第三方边界捕获，包含函数、文件和行号。panic 恢复为通用 500 响应，原始栈留在日志中。`message`、`error`、`causes` 中的已知凭据会脱敏，关联 ID、数字及 JSON 结构保持完整；业务代码仍需按 [规范](../AGENTS.md#调用链与日志) 显式选择安全字段。
 
 ## 开发检查
 
+管理页前端代码位于 [`web/templates/`](../web/templates/)，包括模板内的样式和脚本；[`web/embed.go`](../web/embed.go) 将其嵌入服务端二进制。修改后重新编译即可生效，无需独立的前端构建步骤。`internal/handler/` 负责路由、数据组装及响应渲染。
+
 在 `service/` 下执行：
 
 ```bash
-gofmt -w cmd internal
+gofmt -w cmd internal web
 CGO_ENABLED=0 go build ./...
 CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test ./...

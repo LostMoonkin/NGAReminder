@@ -103,10 +103,10 @@ func expireCompletedGaps(ctx context.Context, tx *repository.Store, watchID int6
 	}
 	return nil
 }
-func (m *Monitoring) dueGapWatches(ctx context.Context, now time.Time) (due map[int64]bool, err error) {
+func (m *Monitoring) scheduledGaps(ctx context.Context, now time.Time) (due map[int64]bool, expired []repository.FloorGap, err error) {
 	gaps, err := m.store.FloorGaps(ctx, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	due = map[int64]bool{}
 	for _, gap := range gaps {
@@ -114,17 +114,14 @@ func (m *Monitoring) dueGapWatches(ctx context.Context, now time.Time) (due map[
 			continue
 		}
 		if now.After(gap.Deadline) || gap.NextAttempt >= len(gapMinutes) {
-			gap.Status = "expired"
-			if err = m.store.SaveFloorGap(ctx, &gap); err != nil {
-				return nil, err
-			}
+			expired = append(expired, gap)
 			continue
 		}
 		if gapDue(gap, now) >= 0 {
 			due[gap.WatchID] = true
 		}
 	}
-	return due, nil
+	return due, expired, nil
 }
 func (m *Monitoring) collectGaps(ctx context.Context, credentials infrastructure.Credentials, watch *repository.Watch, run *repository.Run) error {
 	gaps, err := loadGapMap(ctx, m.store, watch.ID)
