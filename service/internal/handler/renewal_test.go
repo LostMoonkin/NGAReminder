@@ -223,7 +223,12 @@ func TestRenewalFailuresKeepOldCookie(t *testing.T) {
 				}
 				return
 			}
-			v, err := m.Renewal().Start(ctx)
+			response := request(t, router, "POST", "/admin/renewal/start", "")
+			expectStatus(t, response, http.StatusSeeOther)
+			if response.Header().Get("Location") != "/admin/renewal" {
+				t.Fatal("manual renewal did not redirect to its status page")
+			}
+			v, err := store.LatestRenewal(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}

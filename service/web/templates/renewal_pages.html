@@ -5,7 +5,7 @@
 <label><input type="checkbox" name="enabled" value="true" {{if .Data.Settings.Enabled}}checked{{end}}>启用续期</label>
 <label>管理员 <select name="binding_id"><option value="0">请选择</option>{{range .Data.Bindings}}<option value="{{.ID}}" {{if eq .ID $.Data.Settings.BindingID}}selected{{end}}>绑定 #{{.ID}}</option>{{end}}</select></label>
 <label>NGA 登录名 <input name="name" autocomplete="off"></label><label>密码 <input name="password" type="password" autocomplete="new-password"></label><button>保存配置</button></form>
-<form method="post" action="/admin/renewal/start"><button>发起续期确认</button></form><p>有效 Cookie 在续期完成前继续使用。已有交互时复用；修改配置会取消旧交互。十分钟过期或重启后需重新发起。</p>
+<form method="post" action="/admin/renewal/start"><button type="submit">手动续期（发送飞书确认）</button></form><p>有效 Cookie 在续期完成前继续使用。已有交互时复用；修改配置会取消旧交互。十分钟过期或重启后需重新发起。</p>
 {{with .Data.Request}}{{if .ID}}<h2>最近交互</h2><dl><dt>编号</dt><dd>{{.ID}}</dd><dt>状态</dt><dd>{{status .Status}}</dd><dt>过期时间</dt><dd>{{when .ExpiresAt}}</dd><dt>结果</dt><dd>{{.Error}}</dd></dl>{{else}}<p>尚无续期记录</p>{{end}}{{end}}
 <p><code>/login status</code><br><code>/login confirm &lt;request_id&gt;</code><br><code>/login captcha &lt;request_id&gt; &lt;code&gt;</code><br><code>/login cancel &lt;request_id&gt;</code></p>
 <footer>关联 ID：{{.TraceID}}</footer></main></body></html>{{end}}

@@ -33,17 +33,34 @@ type Notifications struct {
 func (m *Monitoring) Notifications() *Notifications { return m.notifications }
 
 type NotificationOverview struct {
-	App      repository.FeishuApp    `json:"app"`
+	App      FeishuAppInfo           `json:"app"`
 	Channels []repository.Channel    `json:"channels"`
 	Events   []repository.InboxEvent `json:"events"`
+}
+
+// 管理页可回显应用标识，Secret 和密文不进入展示数据。
+type FeishuAppInfo struct {
+	Configured bool   `json:"configured"`
+	AppID      string `json:"app_id"`
 }
 
 func (n *Notifications) Overview(ctx context.Context, page int) (data NotificationOverview, err error) {
 	ctx, span := logging.Start(ctx, "service.notification_overview")
 	defer span.End(&err)
-	if data.App, err = n.store.FeishuApp(ctx); err != nil {
+	app, err := n.store.FeishuApp(ctx)
+	if err != nil {
 		return data, err
 	}
+	if app.Configured {
+		raw, e := n.cipher.Open(ctx, "feishu-app-v1", app.Secret)
+		if e != nil {
+			return data, e
+		}
+		if err = json.Unmarshal(raw, &data.App); err != nil {
+			return data, logging.Wrap(err, "decode Feishu application info")
+		}
+	}
+	data.App.Configured = app.Configured
 	if data.Channels, err = n.store.Channels(ctx); err != nil {
 		return data, err
 	}

@@ -1,0 +1,11 @@
+# 构建只需要源码和依赖清单，配置、数据库和资源不进入构建上下文。
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/**
+**/*_test.go

@@ -8,6 +8,7 @@ import (
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/service"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,7 +25,7 @@ func (h *Handler) contentRoutes(router *gin.Engine) {
 		group.POST("/resources", h.saveResourceSettings)
 		group.POST("/resources/redownload", h.redownloadResources)
 		group.POST("/resources/cleanup", h.cleanupResources)
-		group.GET("/assets/:name", h.asset)
+		group.GET("/assets/*name", h.asset)
 	}
 }
 func (h *Handler) userContent(c *gin.Context) {
@@ -149,7 +150,7 @@ func (h *Handler) cleanupResources(c *gin.Context) {
 	h.respond(c, 200, gin.H{"removed": count}, "/admin/resources")
 }
 func (h *Handler) asset(c *gin.Context) {
-	file, err := h.monitor.Resources().Open(c.Request.Context(), c.Param("name"))
+	file, err := h.monitor.Resources().Open(c.Request.Context(), strings.TrimPrefix(c.Param("name"), "/"))
 	if err != nil {
 		h.problem(c, err)
 		return

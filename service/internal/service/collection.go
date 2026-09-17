@@ -173,10 +173,12 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 				maxFloor = post.Floor
 			}
 			if watch.HistoryBefore != nil {
-				if post.Kind != "comment" && post.Floor <= watch.HistoryFloor {
+				_, missingFloor := gaps[post.Floor]
+				_, missingParent := gaps[post.ParentFloor]
+				if post.Kind != "comment" && post.Floor <= watch.HistoryFloor && !missingFloor {
 					continue
 				}
-				if post.Kind == "comment" && post.ParentFloor <= watch.HistoryFloor && (post.PublishedAt == nil || !post.PublishedAt.After(*watch.HistoryBefore)) {
+				if post.Kind == "comment" && !missingParent && post.ParentFloor <= watch.HistoryFloor && (post.PublishedAt == nil || !post.PublishedAt.After(*watch.HistoryBefore)) {
 					continue
 				}
 			}

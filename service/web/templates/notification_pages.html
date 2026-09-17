@@ -1,8 +1,19 @@
 {{define "notifications"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
 <header><div><p class="brand">NGA REMINDER</p><h1>通知与收件箱</h1></div><a href="/admin">返回概览</a></header>
-<section class="card"><h2>飞书应用 {{if .Data.App.Configured}}· 已配置{{else}}· 未配置{{end}}</h2>
-<p class="muted">所有飞书通知目标共用同一个自建应用；需开启机器人能力并授予发送消息、上传图片权限。已保存凭据不回显，留空保留。</p>
-<form method="post" action="/admin/feishu-app" autocomplete="off"><label>App ID<input name="app_id"></label><label>App Secret<input type="password" name="app_secret" autocomplete="new-password"></label><button>保存应用</button></form></section>
+<section class="card"><h2>飞书应用 {{if .Data.App.Configured}}<span class="badge">已配置</span>{{else}}<span class="muted">· 未配置</span>{{end}}</h2>
+<p class="muted">所有飞书通知目标共用同一个自建应用；需开启机器人能力并授予发送消息、上传图片权限。App Secret 不回显，修改时留空保留。</p>
+<form method="post" action="/admin/feishu-app" autocomplete="off" data-feishu-app>
+  {{if .Data.App.Configured}}<p class="small muted" data-feishu-hint>应用已保存，点击“修改”后才能编辑。</p>{{end}}
+  <fieldset {{if .Data.App.Configured}}disabled{{end}}>
+    <label>App ID<input name="app_id" value="{{.Data.App.AppID}}" spellcheck="false"></label>
+    <label>App Secret<input type="password" name="app_secret" autocomplete="new-password" {{if .Data.App.Configured}}placeholder="已配置，留空保留原 Secret"{{end}}></label>
+  </fieldset>
+  <div class="actions">
+    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-edit>修改</button>{{end}}
+    <button type="submit" data-feishu-save {{if .Data.App.Configured}}hidden disabled{{end}}>保存应用</button>
+    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-cancel hidden>取消</button>{{end}}
+  </div>
+</form></section>
 <section class="card"><h2>通知渠道</h2><p class="muted">设备 key、服务地址及接收 ID 加密保存，不回显。关闭渠道同时暂停新增投递和已有记录的重试。</p>
 {{range .Data.Channels}}<article><p><strong>#{{.ID}} {{.Name}}</strong> · {{.Kind}} · {{if .Enabled}}已启用{{else}}已关闭{{end}}</p>
 <div class="actions"><form method="post" action="/admin/channels/{{.ID}}/test"><button>测试通知</button></form><form method="post" action="/admin/channels/{{.ID}}/{{if .Enabled}}disable{{else}}enable{{end}}"><button class="secondary">{{if .Enabled}}关闭{{else}}启用{{end}}</button></form><form method="post" action="/admin/channels/{{.ID}}/delete"><button class="danger">删除（须先解除监控引用）</button></form></div>

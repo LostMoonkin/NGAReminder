@@ -189,18 +189,33 @@ func TestNotificationsMatchingDeliveryAndRestart(t *testing.T) {
 		t.Fatal("disabled channel received a new delivery")
 	}
 	expectStatus(t, send(t, router, "POST", fmt.Sprintf("/api/v1/inbox/%d/read", events[0].ID), cfg.APIToken, nil), 200)
-	expectStatus(t, request(t, router, "GET", "/admin/notifications", ""), 200)
+	expectStatus(t, send(t, router, "POST", "/api/v1/feishu-app", cfg.APIToken, infrastructure.AppCredentials{AppID: "cli_fixture_updated"}), 200)
+	appCredentials, err := m.Notifications().AppCredentials(ctx)
+	if err != nil || appCredentials.AppID != "cli_fixture_updated" || appCredentials.AppSecret != "fixture-app-secret" {
+		t.Fatal("application update did not preserve the existing secret", err)
+	}
+	page := request(t, router, "GET", "/admin/notifications", "")
+	expectStatus(t, page, 200)
 	response = request(t, router, "GET", "/api/v1/notifications", cfg.APIToken)
+	expectStatus(t, response, 200)
+	if app := payload[service.NotificationOverview](t, response).App; !app.Configured || app.AppID != "cli_fixture_updated" {
+		t.Fatal("configured application ID is missing from the overview")
+	}
 	m.Close()
 	for _, secret := range []string{"fixture-device-secret", "fixture-app-secret", "fixture-recipient-secret", "fixture-tenant-secret"} {
-		if bytes.Contains(logs.Bytes(), []byte(secret)) || strings.Contains(response.Body.String(), secret) {
+		if bytes.Contains(logs.Bytes(), []byte(secret)) || strings.Contains(response.Body.String(), secret) || strings.Contains(page.Body.String(), secret) {
 			t.Fatal("notification secret leaked", secret)
 		}
 	}
 	if err = store.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_, reopened, _ := openAppWithTransport(t, cfg, io.Discard, f)
+	reopenedRouter, reopened, _ := openAppWithTransport(t, cfg, io.Discard, f)
+	response = request(t, reopenedRouter, "GET", "/api/v1/notifications", cfg.APIToken)
+	expectStatus(t, response, 200)
+	if app := payload[service.NotificationOverview](t, response).App; !app.Configured || app.AppID != "cli_fixture_updated" {
+		t.Fatal("application ID lost on restart")
+	}
 	restored, err := reopened.Event(ctx, events[0].ID)
 	if err != nil || !restored.Read {
 		t.Fatal("read state lost on restart", err)

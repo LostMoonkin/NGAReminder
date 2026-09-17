@@ -49,7 +49,50 @@ CGO_ENABLED=0 go build -o bin/nga-reminder ./cmd/server
 
 使用 Ctrl-C 或向服务进程发送 SIGTERM 停止。启动脚本通过 `exec` 运行二进制，脚本 PID 即服务 PID。服务取消正在执行的采集，最多等待 10 秒处理已有 HTTP 请求，保存中断结果后关闭网络和数据库连接；运行日志直接输出到当前终端。异常退出留下的 `running` 记录在下次启动时标为 `interrupted`，保留已提交水位；未暂停的监控到期后重新运行，也可手动重跑，不补造离线期间的每次任务。
 
+## Docker Compose 部署
+
+需要 Docker Engine 和 Docker Compose（`docker compose`）。[Compose 模板](../compose.example.yaml) 使用 [Dockerfile](../Dockerfile) 从源码构建，固定 Go 1.27.0、`CGO_ENABLED=0`，运行镜像包含 HTTPS CA，管理页与时区数据随二进制提供。
+
+从仓库根目录准备本地部署文件：
+
+```bash
+cd service
+umask 077
+cp -n compose.example.yaml compose.yaml
+```
+
+所有启动配置直接填写在 `compose.yaml` 的 `environment` 中，无需准备或挂载 `config.json`。替换 `NGA_REMINDER_API_TOKEN` 和 `NGA_REMINDER_ENCRYPTION_KEY`；后者可用 `openssl rand -base64 32` 生成。字段含义与下方[配置表](#配置)一致，布尔值写成字符串 `"true"` / `"false"`。本地 `compose.yaml` 已被 Git 忽略，配置和运行数据也不进入镜像构建上下文。
+
+```bash
+docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:8989/readyz
+docker compose logs --tail=100 -f server
+```
+
+管理页为 `http://<宿主机局域网 IP>:8989/admin`。服务监听 `0.0.0.0:8989`；修改宿主机端口时，只改 `ports` 冒号左侧，例如 `"8990:8989"`，容器监听端口保持 8989。
+
+模板默认只挂载数据目录：宿主机 `service/data/` 对应容器 `/app/data/`，SQLite 为 `nga-reminder.db`，资源为 `assets/`。容器重建后数据仍保留；改数据目录时调整 `volumes` 左侧即可。旧 Rust 的 assets 在其他位置时，按[迁移说明](plan/migration-runbook.md#核验与上线)额外挂载原资源目录，不必复制文件。与源码启动共享同一数据目录时，先停止原进程，保持单进程运行并沿用原部署密钥。
+
+核验模式将 `NGA_REMINDER_BACKGROUND_ENABLED` 改成 `"false"` 后执行 `docker compose up -d`，核验完成再改回 `"true"` 并执行同一命令。修改环境变量需要重新创建容器，单独 `restart` 不会加载新配置。已有 Rust 数据仍按[阶段 09](spec/09-data-migration.md)迁移验收，不能直接挂载旧库或用空库代替迁移。
+
+```bash
+# 停止；再次启动保持配置与数据
+docker compose stop
+docker compose up -d
+
+# 删除容器，保留宿主机上的数据目录
+docker compose down
+
+# 更新源码后重新构建并替换容器
+docker compose up -d --build
+```
+
+升级前先停止服务，备份整个 `data/` 和本地 Compose 配置，另行保管部署密钥。日志写入标准输出，由 Docker 按每个文件 10 MiB、最多 3 个文件轮转；上面的 `logs -f` 只跟随输出，Ctrl-C 不会停止服务。Compose 字段语义见 [Docker 官方说明](https://docs.docker.com/reference/compose-file/services/)。
+
 ## 配置
+
+已有 Rust PG 数据先使用 [migrate-pg.sh](../migrate-pg.sh) 完整导出并转换为 SQLite，见[迁移操作说明](plan/migration-runbook.md)。脚本输出可独立使用的 SQLite、完整 PG 表数据快照和核验报告，支持离线重放；assets 保留原挂载，不参与迁移。确认目标库和密钥后再按以下配置启动 Go。
 
 优先级为 **环境变量 > JSON 文件 > 默认值**。环境变量名称是 `NGA_REMINDER_` 加字段的大写形式，例如 `NGA_REMINDER_DATABASE_PATH`。直接运行二进制并省略 `-config` 时仅使用默认值与环境变量；启动脚本无参数时会自动选择 `service/config.json`。沿用旧服务的行为，忽略尚未使用的配置字段，不额外限制配置文件大小。
 
@@ -211,7 +254,7 @@ CGO_ENABLED=0 go test ./...
 
 ## 通知与收件箱（阶段 04）
 
-从概览进入 `/admin/notifications`。先配置飞书自建应用（所有通知目标共用），再添加 Bark 或飞书接收者；Bark 默认服务地址 `https://api.day.app`，支持自定义 HTTP/HTTPS 地址、设备 key 和分组。飞书需开启机器人并授予消息发送与图片上传权限，SDK 使用 [官方 Go SDK](https://github.com/larksuite/oapi-sdk-go)。凭据与完整接收地址加密保存，不在页面或 API 回显；修改时敏感字段留空保留，分组按本次输入更新。
+从概览进入 `/admin/notifications`。先配置飞书自建应用（所有通知目标共用），再添加 Bark 或飞书接收者；Bark 默认服务地址 `https://api.day.app`，支持自定义 HTTP/HTTPS 地址、设备 key 和分组。飞书需开启机器人并授予消息发送与图片上传权限，SDK 使用 [官方 Go SDK](https://github.com/larksuite/oapi-sdk-go)。应用保存后显示“已配置”并回显 App ID，表单默认锁定；点击“修改”后才能编辑，保存或取消后恢复锁定。App Secret 与完整接收地址加密保存，不在页面或 API 回显；修改时敏感字段留空保留，分组按本次输入更新。
 
 在 watch 详情中选择多个通知渠道；TID 可配置作者 UID 白名单，留空表示所有作者，UID 仅匹配目标用户。初始化、重置后的基线、白名单外内容保持静默。匹配的新内容进入收件箱，未选渠道也可查看及标记已读。一个帖子只有一条事件，每个渠道只有一条投递，多个监控命中时追加来源。
 
@@ -221,7 +264,7 @@ API 均使用 Bearer token，写入 JSON：
 
 | 请求 | 参数 / 行为 |
 | --- | --- |
-| `GET /api/v1/notifications?page=1` | 脱敏应用状态、渠道和每页 50 条收件箱事件，包含来源与投递结果 |
+| `GET /api/v1/notifications?page=1` | 应用 `configured` 状态与 `app_id`（不含 Secret）、脱敏渠道和每页 50 条收件箱事件，包含来源与投递结果 |
 | `POST /api/v1/feishu-app` | `app_id`、`app_secret`，留空保留原值 |
 | `POST /api/v1/channels`、`POST /api/v1/channels/:id` | `name`、`kind`（`bark`/`feishu`）、`enabled`；Bark 使用 `server_url`、`device_key`、`group`；飞书使用 `receive_id`、`receive_id_type`（默认 `chat_id`，也支持 `open_id`/`user_id`/`union_id`/`email`） |
 | `POST /api/v1/channels/:id/test` | 对已启用渠道发送测试通知，核验模式禁用 |
@@ -252,7 +295,7 @@ watch 创建/更新额外接受 `channel_ids` 与 `author_uids` 数组；省略�
 
 ## Cookie 续期（阶段 06）
 
-在 `/admin/renewal` 启用续期，填写 NGA 登录名/密码，选择已绑定管理员；敏感字段留空保留，不回显。需先保存一份 NGA Cookie 确定预期 UID。配置变更取消活动交互，重新选择管理员后再发起。
+管理概览的“NGA 账号”区域提供“手动续期”按钮和“续期设置与记录”入口。在 `/admin/renewal` 启用续期，填写 NGA 登录名/密码，选择已绑定管理员；敏感字段留空保留，不回显。需先保存一份 NGA Cookie 确定预期 UID。配置变更取消活动交互，重新选择管理员后再发起。
 
 采集或校验已保存 Cookie 时，只有从可用转为明确认证失败才发送一次确认；网络错误、繁忙不触发登录。也可在页面手动发起，有活动交互时复用，不提前停用有效 Cookie。
 

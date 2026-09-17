@@ -1,0 +1,25 @@
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "8989:8989"
+    # 直接在 environment 中配置，不需要 config.json。
+    environment:
+      NGA_REMINDER_LISTEN_ADDRESS: "0.0.0.0:8989"
+      NGA_REMINDER_DATABASE_PATH: "/app/data/nga-reminder.db"
+      NGA_REMINDER_ASSETS_PATH: "/app/data/assets"
+      NGA_REMINDER_API_TOKEN: "replace-with-your-api-token"
+      # 用 openssl rand -base64 32 生成；已有数据必须沿用原部署密钥。
+      NGA_REMINDER_ENCRYPTION_KEY: "replace-with-32-random-bytes-in-base64"
+      NGA_REMINDER_TIMEZONE: "Asia/Shanghai"
+      NGA_REMINDER_NGA_USER_AGENT: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)"
+      NGA_REMINDER_BACKGROUND_ENABLED: "true"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

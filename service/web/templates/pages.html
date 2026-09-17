@@ -28,6 +28,9 @@
   a { color: #245a83; } input, textarea, select { width: 100%; padding: 9px 11px; border: 1px solid #bdc9d5; border-radius: 6px; font: inherit; background: white; color: inherit; }
   label { display: block; margin: 10px 0; } textarea { min-height: 80px; } .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 14px; } .actions form { margin: 0; } .danger { background: #983d3d; }
+  [data-feishu-app] fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+  [data-feishu-app] fieldset:disabled input { background: #f4f6f8; color: #33475c; }
+  [data-feishu-app] [hidden] { display: none; }
   .scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 12px 9px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 12px 0; background: #f4f6f8; padding: 16px; border-radius: 6px; }
   article + article { border-top: 1px solid #dde3ea; padding-top: 20px; } .small { font-size: 13px; } details { margin-top: 14px; } summary { cursor: pointer; }
@@ -35,6 +38,21 @@
 .post-body img{max-width:100%;height:auto}.post-body blockquote{border-left:3px solid #a1b2c4;padding-left:1em;margin-left:0}.post-body pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
 <script>
 document.addEventListener('click', event => {
+  const appAction = event.target.closest('[data-feishu-edit], [data-feishu-cancel]');
+  if (appAction) {
+    const form = appAction.closest('[data-feishu-app]');
+    const editing = appAction.hasAttribute('data-feishu-edit');
+    if (!editing) form.reset();
+    form.querySelector('fieldset').disabled = !editing;
+    form.querySelector('[data-feishu-edit]').hidden = editing;
+    form.querySelector('[data-feishu-save]').hidden = !editing;
+    form.querySelector('[data-feishu-save]').disabled = !editing;
+    form.querySelector('[data-feishu-cancel]').hidden = !editing;
+    form.querySelector('[data-feishu-hint]').textContent = editing
+      ? '正在修改应用配置，保存后生效。'
+      : '应用已保存，点击“修改”后才能编辑。';
+    (editing ? form.elements.app_id : form.querySelector('[data-feishu-edit]')).focus();
+  }
   const add = event.target.closest('[data-add-rule]');
   if (add) {
     const group = add.closest('[data-rule-group]');
@@ -63,7 +81,12 @@ document.addEventListener('click', event => {
       <div class="grid"><label>passport UID<input name="passport_uid" inputmode="numeric"></label><label>passport CID<input name="passport_cid" type="password" autocomplete="new-password"></label></div>
       <button type="submit">校验并保存凭据</button>
     </form>
-    <form method="post" action="/admin/nga-account/check" class="actions"><button class="secondary">校验已保存凭据</button></form>
+    <div class="actions">
+      <form method="post" action="/admin/nga-account/check"><button class="secondary">校验已保存凭据</button></form>
+      <form method="post" action="/admin/renewal/start"><button type="submit">手动续期</button></form>
+      <a class="button secondary" href="/admin/renewal">续期设置与记录</a>
+    </div>
+    <p class="muted small">手动续期会向指定管理员发送飞书私聊确认。首次使用请先配置续期登录凭据和管理员。</p>
   </section>
   <section class="card">
     <h2>TID / UID 监控</h2>
