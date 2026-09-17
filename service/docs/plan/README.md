@@ -28,6 +28,8 @@
 | 09 | [数据迁移](../spec/09-data-migration.md) | 完整导出 PG 并转换为 Go SQLite 文件，保留原 assets 挂载；见[操作说明](migration-runbook.md) | 01～08 | 工具与自测已完成 |
 | 10 | [单机交付与上线](../spec/10-single-host-delivery.md) | 使用迁入数据启用 Go，并按中文说明部署、备份和恢复 | 01～09 | 部分完成：容器部署模板 |
 
+补充功能：[Spec11：帖子页面并发抓取](../spec/11-thread-page-concurrency.md)，已完成实现与自测。恢复单帖子全量页面并发，所有 NGA 请求共用 120 QPM，不限制不同 watch 的并发数量；覆盖原全局串行约定，无需拆分 Ticket。
+
 实际切换顺序：**Rust server 停机 → PG 迁移 SQLite → 核验 → Go 服务上线**。Go 制品、迁移工具、部署配置和副本演练在正式停机前准备完成；阶段编号不是停机期间的开发顺序。
 
 ## 本轮的简化边界

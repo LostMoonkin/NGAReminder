@@ -18,13 +18,13 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 	if !m.enabled {
 		return run, logging.WithStack(ErrBackgroundDisabled)
 	}
-	if err = m.lock(); err != nil {
+	if err = m.lockWatch(id); err != nil {
 		return run, err
 	}
 	started := false
 	defer func() {
 		if !started {
-			m.work.Unlock()
+			m.unlockWatch(id)
 		}
 	}()
 	watch, err := m.store.Watch(ctx, id)
@@ -35,7 +35,7 @@ func (m *Monitoring) StartRun(ctx context.Context, id int64) (run repository.Run
 	return run, err
 }
 
-// 调度和手动入口共用状态判断，启动成功后由采集 goroutine 持有串行锁直到收尾。
+// 调度和手动入口共用状态判断，启动成功后由采集 goroutine 持有该 watch 的锁直到收尾。
 func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch, source string, now time.Time) (run repository.Run, started bool, err error) {
 	if watch.Paused {
 		return run, false, logging.WithStack(ErrPaused)
@@ -68,6 +68,14 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 		watch.NextRunAt = until
 	}
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		// 其他监控可能刚发现认证失效，事务内再次核对，不能用旧快照清除暂停。
+		current, e := tx.Account(ctx)
+		if e != nil {
+			return e
+		}
+		if current.Status != "valid" {
+			return logging.WithStack(infrastructure.ErrNGAAuth)
+		}
 		if watch.Kind == "tid" && run.Status == "running" {
 			if e := advanceGapAttempts(ctx, tx, watch.ID, now); e != nil {
 				return e
@@ -88,7 +96,7 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 	}
 	zerolog.Ctx(ctx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Str("source", source).Str("run_trace_id", run.TraceID).Msg("Collection started")
 	go func(run repository.Run) {
-		defer m.work.Unlock()
+		defer m.unlockWatch(watch.ID)
 		defer cancel()
 		defer stop()
 		var runErr error
@@ -106,7 +114,7 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 			zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Str("status", run.Status).Int("pages", run.Pages).Int64("saved", run.Saved).Msg("Collection finished")
 		}()
 		zerolog.Ctx(taskCtx).Info().Int64("run_id", run.ID).Int64("watch_id", watch.ID).Int64("tid", watch.TID).Int64("uid", watch.UID).Str("source", source).
-			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Bool("silent", run.Silent).Msg("Starting collection")
+			Str("source_trace_id", run.SourceTraceID).Str("init_mode", watch.InitMode).Int("history_concurrency", watch.HistoryConcurrency).Bool("silent", run.Silent).Msg("Starting collection")
 		credentials, decryptErr := m.cipher.Decrypt(taskCtx, account.Cookie)
 		if decryptErr != nil {
 			runErr = decryptErr
@@ -154,15 +162,25 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		watch.HistoryFloor, watch.HistoryBefore = maxFloor, &now
 		return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil, nil)
 	}
-	// 采集逐页读、按自然键增量写，也能发现旧楼层下新增的楼中楼。
+	// 全量初始化按配置分批并发读，仍按页序提交；增量逐页读取以发现旧楼层的新评论。
 	// 页数固定为首个响应的快照；采集期间继续增长的尾页留到下一轮，避免追赶不停。
+	concurrency := 1
+	if !watch.BaselineComplete && watch.InitMode == "full" {
+		concurrency = max(1, min(watch.HistoryConcurrency, 16))
+	}
+	zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("total_pages", first.TotalPages).
+		Int("page_concurrency", concurrency).Int("qpm", 120).Msg("Collecting thread pages")
+	var batch []infrastructure.ThreadPage
 	for page := 1; page <= first.TotalPages; page++ {
 		result := first
 		if page > 1 {
-			result, err = m.nga.ThreadPage(ctx, credentials, watch.TID, page)
-			if err != nil {
-				return err
+			if (page-2)%concurrency == 0 {
+				batch, err = m.nga.ThreadPages(ctx, credentials, watch.TID, page, min(page+concurrency-1, first.TotalPages))
+				if err != nil {
+					return err
+				}
 			}
+			result = batch[(page-2)%concurrency]
 		}
 		posts := []repository.Post{}
 		for _, post := range result.Posts {
@@ -219,6 +237,13 @@ func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.
 	next := *run
 	next.Status, next.FinishedAt = "success", &now
 	err := m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		account, err := tx.Account(ctx)
+		if err != nil {
+			return err
+		}
+		if account.Status == "auth_paused" {
+			watch.State = "auth_paused"
+		}
 		if len(newGaps) > 0 {
 			zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("gap_count", len(newGaps)).Time("deadline", newGaps[0].Deadline).Msg("Recording newly crossed floor gaps")
 		}

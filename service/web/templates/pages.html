@@ -101,6 +101,7 @@ document.addEventListener('click', event => {
       <input type="hidden" name="kind" value="tid">
       <div class="grid"><label>TID<input name="tid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
       <label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>
+      {{template "history-concurrency"}}
       <p class="small muted">首次运行建立静默基线。从现在开始以首次运行成功时的水位为界，不导入旧楼层。</p>
       {{template "schedule"}}
       <button>创建 TID 监控</button>
@@ -154,12 +155,13 @@ document.addEventListener('click', event => {
     <input type="hidden" name="kind" value="{{.Data.Watch.Kind}}">
     <div class="grid">{{if eq .Data.Watch.Kind "uid"}}<label>UID<input name="uid" type="number" min="1" value="{{.Data.Watch.UID}}" required></label>{{else}}<label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label>{{end}}<label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
     {{if eq .Data.Watch.Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>{{else}}<p>UID 首次运行与重置后只建立水位，不导入历史。</p>{{end}}
+    {{if eq .Data.Watch.Kind "tid"}}{{template "history-concurrency" .Data.Watch}}{{end}}
     {{template "schedule" .Data.Watch}}
     <input type="hidden" name="notifications_present" value="1">
     <label>通知渠道<select name="channel_ids" multiple>{{range .Data.Channels}}<option value="{{.ID}}" {{if containsID $.Data.Watch.ChannelIDs .ID}}selected{{end}}>{{.Name}} · {{if .Enabled}}启用{{else}}关闭{{end}}</option>{{end}}</select></label>
     {{if eq .Data.Watch.Kind "tid"}}<label>作者 UID 白名单（逗号分隔，留空表示全部作者）<input name="author_uids" value="{{intlist .Data.Watch.AuthorUIDs}}"></label>{{end}}
     <p class="small muted">未选渠道时仍将匹配的新内容放入收件箱；初始化和历史内容保持静默。</p>
-    <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改备注、频率或免拉取时段不影响水位。</p><button>保存配置</button>
+    <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改并发数、备注、频率或免拉取时段不影响水位。</p><button>保存配置</button>
   </form>
   <div class="actions">
     <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button>手动运行一次</button></form>
@@ -226,4 +228,9 @@ document.addEventListener('click', event => {
 <div data-rule-list>{{if .}}{{range .NoFetchPeriods}}{{template "period-row" .}}{{end}}{{end}}</div>
 <template>{{template "period-row"}}</template><button type="button" class="secondary" data-add-rule>添加免拉取时段</button>
 </details>
+{{end}}
+
+{{define "history-concurrency"}}
+<label>历史页面并发数<input name="history_concurrency" type="number" min="1" max="16" value="{{if .}}{{.HistoryConcurrency}}{{else}}1{{end}}" required></label>
+<p class="small muted">1 表示串行，最多 16；仅全量初始化时生效。不同监控可同时运行，所有 NGA 请求共用 120 QPM 限流。</p>
 {{end}}

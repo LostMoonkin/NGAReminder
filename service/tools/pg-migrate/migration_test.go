@@ -127,6 +127,8 @@ func TestPostgreSQLMigration(t *testing.T) {
 		"SELECT COUNT(*) FROM bot_settings WHERE code_hash='' AND code_expires IS NULL":                                         1,
 		"SELECT COUNT(*) FROM floor_gaps WHERE status='expired'":                                                                1,
 		"SELECT COUNT(*) FROM sqlite_master WHERE name='migration_source'":                                                      0,
+		"SELECT COUNT(*) FROM watches WHERE history_concurrency=4":                                                              1,
+		"SELECT COUNT(*) FROM watches WHERE history_concurrency=1":                                                              3,
 	} {
 		if n := queryCount(t, db, query); n != want {
 			t.Fatalf("verification %s: got %d want %d", query, n, want)

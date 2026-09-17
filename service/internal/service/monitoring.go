@@ -41,8 +41,11 @@ type Monitoring struct {
 	bot           *Bot
 	renewal       *Renewal
 	resources     *Resources
-	// 一个进程只执行一次采集/凭据变更。运行时仍可浏览数据，不维护任务队列或租约。
-	work sync.Mutex
+	// 账号替换和资源清理独占；不同 watch 共享，只对同一 watch 的运行/修改互斥。
+	work          sync.RWMutex
+	watchWork     sync.Mutex
+	activeWatches map[int64]bool
+	backfillWork  sync.Mutex
 }
 
 func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Store, nga *infrastructure.NGA, log *logging.Logger, sender *infrastructure.Notifier) (monitor *Monitoring, err error) {
@@ -99,6 +102,34 @@ func (m *Monitoring) lock() error {
 		return logging.WithStack(err)
 	}
 	return nil
+}
+
+func (m *Monitoring) lockWatch(id int64) error {
+	if !m.work.TryRLock() {
+		return logging.WithStack(ErrBusy)
+	}
+	if err := m.ctx.Err(); err != nil {
+		m.work.RUnlock()
+		return logging.WithStack(err)
+	}
+	m.watchWork.Lock()
+	defer m.watchWork.Unlock()
+	if m.activeWatches[id] {
+		m.work.RUnlock()
+		return logging.WithStack(ErrBusy)
+	}
+	if m.activeWatches == nil {
+		m.activeWatches = make(map[int64]bool)
+	}
+	m.activeWatches[id] = true
+	return nil
+}
+
+func (m *Monitoring) unlockWatch(id int64) {
+	m.watchWork.Lock()
+	delete(m.activeWatches, id)
+	m.watchWork.Unlock()
+	m.work.RUnlock()
 }
 
 type Overview struct {
@@ -227,16 +258,17 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 }
 
 type WatchInput struct {
-	ChannelIDs      []int64                   `json:"channel_ids" form:"channel_ids"`
-	AuthorUIDs      []int64                   `json:"author_uids" form:"-"`
-	Kind            string                    `json:"kind" form:"kind"`
-	TID             int64                     `json:"tid" form:"tid"`
-	UID             int64                     `json:"uid" form:"uid"`
-	Label           string                    `json:"label" form:"label"`
-	InitMode        string                    `json:"init_mode" form:"init_mode"`
-	IntervalSeconds *int                      `json:"interval_seconds" form:"interval_seconds"`
-	IntervalRules   []repository.IntervalRule `json:"interval_rules" form:"-"`
-	NoFetchPeriods  []repository.TimeWindow   `json:"no_fetch_periods" form:"-"`
+	ChannelIDs         []int64                   `json:"channel_ids" form:"channel_ids"`
+	AuthorUIDs         []int64                   `json:"author_uids" form:"-"`
+	Kind               string                    `json:"kind" form:"kind"`
+	TID                int64                     `json:"tid" form:"tid"`
+	UID                int64                     `json:"uid" form:"uid"`
+	Label              string                    `json:"label" form:"label"`
+	InitMode           string                    `json:"init_mode" form:"init_mode"`
+	HistoryConcurrency *int                      `json:"history_concurrency" form:"history_concurrency"`
+	IntervalSeconds    *int                      `json:"interval_seconds" form:"interval_seconds"`
+	IntervalRules      []repository.IntervalRule `json:"interval_rules" form:"-"`
+	NoFetchPeriods     []repository.TimeWindow   `json:"no_fetch_periods" form:"-"`
 }
 
 func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) (watch repository.Watch, err error) {
@@ -254,10 +286,10 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 	if input.InitMode != "full" && input.InitMode != "from_now" {
 		return watch, InvalidInput("初始化模式为 full 或 from_now")
 	}
-	if err = m.lock(); err != nil {
+	if err = m.lockWatch(id); err != nil {
 		return watch, err
 	}
-	defer m.work.Unlock()
+	defer m.unlockWatch(id)
 	if id != 0 {
 		watch, err = m.store.Watch(ctx, id)
 		if err != nil {
@@ -270,6 +302,17 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 	if input.AuthorUIDs != nil {
 		watch.AuthorUIDs = input.AuthorUIDs
 	}
+	concurrency := watch.HistoryConcurrency
+	if id == 0 || input.Kind == "uid" {
+		concurrency = 1
+	}
+	if input.HistoryConcurrency != nil {
+		concurrency = *input.HistoryConcurrency
+	}
+	if concurrency < 1 || concurrency > 16 || input.Kind == "uid" && concurrency != 1 {
+		return watch, InvalidInput("历史页面并发数必须为 1～16，仅 TID 全量初始化支持大于 1")
+	}
+	watch.HistoryConcurrency = concurrency
 	interval := watch.IntervalSeconds
 	if id == 0 {
 		interval = 60
@@ -308,15 +351,8 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 	watch.IntervalSeconds, watch.IntervalRules, watch.NoFetchPeriods = interval, input.IntervalRules, input.NoFetchPeriods
 	now := time.Now().UTC()
 	watch.NextRunAt = &now
-	account, err := m.store.Account(ctx)
-	if err != nil {
-		return watch, err
-	}
-	if account.Status == "auth_paused" && watch.State == "ready" {
-		watch.State = "auth_paused"
-	}
 	zerolog.Ctx(ctx).Info().Int64("watch_id", id).Int64("tid", input.TID).Int64("uid", input.UID).
-		Str("kind", input.Kind).Str("init_mode", input.InitMode).Int("interval_seconds", interval).
+		Str("kind", input.Kind).Str("init_mode", input.InitMode).Int("history_concurrency", concurrency).Int("interval_seconds", interval).
 		Int("interval_rules", len(input.IntervalRules)).Int("no_fetch_periods", len(input.NoFetchPeriods)).Msg("Saving watch")
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		if resetGaps && id > 0 {
@@ -326,6 +362,13 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 		}
 		if e := validateNotificationWatch(ctx, tx, watch); e != nil {
 			return e
+		}
+		account, e := tx.Account(ctx)
+		if e != nil {
+			return e
+		}
+		if account.Status == "auth_paused" && watch.State == "ready" {
+			watch.State = "auth_paused"
 		}
 		return tx.SaveWatch(ctx, &watch)
 	})
@@ -341,10 +384,10 @@ func resetBaseline(watch *repository.Watch) {
 func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode string) (watch repository.Watch, err error) {
 	ctx, span := logging.Start(ctx, "service.change_watch")
 	defer span.End(&err)
-	if err = m.lock(); err != nil {
+	if err = m.lockWatch(id); err != nil {
 		return watch, err
 	}
-	defer m.work.Unlock()
+	defer m.unlockWatch(id)
 	watch, err = m.store.Watch(ctx, id)
 	if err != nil {
 		return watch, err
@@ -387,6 +430,13 @@ func (m *Monitoring) ChangeWatch(ctx context.Context, id int64, action, mode str
 			if e := tx.ClearFloorGaps(ctx, id); e != nil {
 				return e
 			}
+		}
+		account, e := tx.Account(ctx)
+		if e != nil {
+			return e
+		}
+		if account.Status == "auth_paused" && watch.State == "ready" {
+			watch.State = "auth_paused"
 		}
 		return tx.SaveWatch(ctx, &watch)
 	})

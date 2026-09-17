@@ -83,6 +83,15 @@ func (s *Store) SaveFloorGap(ctx context.Context, v *FloorGap) (err error) {
 	defer span.End(&err)
 	return logging.Wrap(s.db.WithContext(ctx).Save(v).Error, "save floor gap state")
 }
+
+// 调度读到的快照可能已被采集解决或重置删除，只过期仍未改变的记录。
+func (s *Store) ExpireFloorGap(ctx context.Context, v FloorGap) (err error) {
+	ctx, span := logging.Start(ctx, "repository.expire_floor_gap")
+	defer span.End(&err)
+	return logging.Wrap(s.db.WithContext(ctx).Model(&FloorGap{}).
+		Where("watch_id = ? AND floor = ? AND status = ? AND deadline = ? AND next_attempt = ?", v.WatchID, v.Floor, "pending", v.Deadline, v.NextAttempt).
+		Update("status", "expired").Error, "expire unchanged floor gap")
+}
 func (s *Store) ClearFloorGaps(ctx context.Context, watchID int64) (err error) {
 	ctx, span := logging.Start(ctx, "repository.clear_floor_gaps")
 	defer span.End(&err)

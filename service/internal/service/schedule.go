@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/rs/zerolog"
 
+	"ngareminder/service/internal/infrastructure"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/repository"
 )
@@ -174,7 +176,7 @@ func (m *Monitoring) StartScheduler() {
 	})
 }
 
-// 每次选取最早到期的监控。离线多久都只运行一次，后续从当前时间重新计时。
+// 启动所有到期且空闲的监控。离线多久都只运行一次，后续从当前时间重新计时。
 // 调度错误在此入口记录，循环不重复打印。
 func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 	var span *logging.Span
@@ -199,19 +201,9 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 	if !m.enabled {
 		return nil
 	}
-	if !m.work.TryLock() {
-		return nil
-	}
 	if m.ctx.Err() != nil {
-		m.work.Unlock()
 		return nil
 	}
-	started := false
-	defer func() {
-		if !started {
-			m.work.Unlock()
-		}
-	}()
 	probe := logging.Quiet(ctx)
 	watches, err := m.store.Watches(probe)
 	if err != nil {
@@ -225,8 +217,7 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 		ctx, span = logging.Start(ctx, "service.schedule_due_watch")
 		for _, gap := range expiredGaps {
 			zerolog.Ctx(ctx).Info().Int64("watch_id", gap.WatchID).Int64("floor", gap.Floor).Time("deadline", gap.Deadline).Msg("Expiring floor gap")
-			gap.Status = "expired"
-			if err = m.store.SaveFloorGap(ctx, &gap); err != nil {
+			if err = m.store.ExpireFloorGap(ctx, gap); err != nil {
 				return err
 			}
 		}
@@ -245,30 +236,59 @@ func (m *Monitoring) Tick(ctx context.Context, now time.Time) (err error) {
 		}
 		return a == nil || b != nil && a.Before(*b)
 	})
-	for _, watch := range watches {
-		if watch.Paused || watch.State != "ready" {
-			continue
-		}
-		source := "automatic"
-		if watch.NextRunAt != nil && watch.NextRunAt.After(now) {
-			if !dueGaps[watch.ID] {
+	for _, candidate := range watches {
+		if err = m.lockWatch(candidate.ID); err != nil {
+			if errors.Is(err, ErrBusy) || errors.Is(err, context.Canceled) {
+				err = nil
 				continue
 			}
-			if active, _ := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active {
-				continue
+			return err
+		}
+		err = func() error {
+			started := false
+			defer func() {
+				if !started {
+					m.unlockWatch(candidate.ID)
+				}
+			}()
+			// 获得目标锁后重读，避免使用并行运行或配置修改前的旧调度/水位。
+			watch, e := m.store.Watch(probe, candidate.ID)
+			if errors.Is(e, repository.ErrNotFound) {
+				return nil
 			}
-			source = "gap_recovery"
+			if e != nil {
+				return e
+			}
+			if watch.Paused || watch.State != "ready" {
+				return nil
+			}
+			source := "automatic"
+			if watch.NextRunAt != nil && watch.NextRunAt.After(now) {
+				if !dueGaps[watch.ID] {
+					return nil
+				}
+				if active, _ := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active {
+					return nil
+				}
+				source = "gap_recovery"
+			}
+			// 全天免拉取且已记录过跳过时，不每秒制造一条相同记录；修改配置会重新设置 next_run_at。
+			if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active && until == nil && watch.NextRunAt == nil {
+				return nil
+			}
+			if span == nil {
+				ctx, span = logging.Start(ctx, "service.schedule_due_watch")
+			}
+			zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Str("source", source).Msg("Starting scheduled watch")
+			_, started, e = m.startRunLocked(ctx, watch, source, now)
+			return e
+		}()
+		if errors.Is(err, infrastructure.ErrNGAAuth) {
+			return nil
 		}
-		// 全天免拉取且已记录过跳过时，不每秒制造一条相同记录；修改配置会重新设置 next_run_at。
-		if active, until := noFetchAt(watch.NoFetchPeriods, now.In(m.location)); active && until == nil && watch.NextRunAt == nil {
-			continue
+		if err != nil {
+			return err
 		}
-		if span == nil {
-			ctx, span = logging.Start(ctx, "service.schedule_due_watch")
-		}
-		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Str("source", source).Msg("Starting scheduled watch")
-		_, started, err = m.startRunLocked(ctx, watch, source, now)
-		return err
 	}
 	return nil
 }

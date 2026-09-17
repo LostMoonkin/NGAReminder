@@ -491,7 +491,7 @@ nga_accounts id passport_uid_encrypted passport_cid_encrypted cookie_encrypted s
 threads tid title author_uid
 posts id tid pid floor_number post_kind parent_post_id author_uid author_name subject content_raw published_at_unix raw_payload first_seen_at
 watch_targets id target_type target_id target_name enabled pause_reason status baseline_completed interval_seconds schedule_json no_fetch_periods_json next_run_at deleted_at created_at updated_at
-thread_watch_options watch_id history_mode
+thread_watch_options watch_id history_mode history_parallel_enabled history_parallelism
 watch_cursors watch_id last_floor
 user_watch_cursors watch_id newest_topic_at_unix newest_reply_at_unix newest_topic_tid newest_reply_pid
 crawl_runs id watch_id status baseline sync_mode trigger_kind pages_requested posts_inserted started_at completed_at error_kind

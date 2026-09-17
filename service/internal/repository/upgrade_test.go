@@ -32,7 +32,7 @@ func TestUpgradeSpec02Database(t *testing.T) {
 		t.Fatal(err)
 	}
 	watch, err := store.Watch(context.Background(), 1)
-	if err != nil || watch.Kind != "tid" || watch.TID != 1001 || watch.IntervalSeconds != 60 || !watch.Paused || !watch.BaselineComplete || watch.CursorFloor != 17 || watch.HistoryFloor != 7 {
+	if err != nil || watch.Kind != "tid" || watch.TID != 1001 || watch.IntervalSeconds != 60 || watch.HistoryConcurrency != 1 || !watch.Paused || !watch.BaselineComplete || watch.CursorFloor != 17 || watch.HistoryFloor != 7 {
 		t.Fatalf("upgrade changed existing TID progress: %+v %v", watch, err)
 	}
 	for _, uid := range []int64{2001, 2002} {

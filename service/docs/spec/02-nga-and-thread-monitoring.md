@@ -26,7 +26,7 @@
 - 依赖 [阶段 01](01-runtime-and-logging.md)，按 [服务端规范](../../AGENTS.md) 实现。
 - 协议字段、业务码、楼中楼关系和自然键参考 [NGA 契约](../../../archive/rust-service/service/docs/NGA_API_CONTRACT.md)；协议接入放在 infrastructure。
 - 账号、watch、帖子均持久化到 SQLite；网络失败不能留下已前移但内容未保存的水位。
-- 抓取默认串行，不搬迁历史并行抓取参数和 worker 租约。
+- 抓取默认串行；历史页面并发按后续 [Spec11](11-thread-page-concurrency.md) 补充，不搬迁 worker 租约。
 
 ## 非目标
 

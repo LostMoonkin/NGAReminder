@@ -120,6 +120,7 @@ func preparePG(t *testing.T) (*pgx.Conn, string, time.Time) {
 			exec("INSERT INTO user_watch_cursors(watch_id,newest_topic_at_unix,newest_topic_tid,newest_reply_at_unix,newest_reply_pid) VALUES($1,1767225600,1001,1767225660,4001)", id)
 		}
 	}
+	exec("UPDATE thread_watch_options SET history_parallel_enabled=1, history_parallelism=4 WHERE watch_id='tid'")
 	exec(`INSERT INTO platform_integrations(id,platform,label,enabled,delivery_enabled,bot_enabled,credentials_encrypted) VALUES('bark','bark','Bark',1,1,0,$1),('feishu','feishu','Feishu',1,1,1,$2)`, encryptedFixture(t, `{"platform":"bark","credentials":{"server_url":"https://api.day.app","group":"fixture-group"}}`, ""), encryptedFixture(t, `{"platform":"feishu","credentials":{"app_id":"fake-app-id","app_secret":"fake-app-secret"}}`, ""))
 	exec(`INSERT INTO notification_channels(id,integration_id,label,target_encrypted) VALUES('bark','bark','Bark target',$1),('feishu','feishu','Feishu target',$2)`, encryptedFixture(t, `{"platform":"bark","target":{"device_key":"fake-device-key"}}`, ""), encryptedFixture(t, `{"platform":"feishu","target":{"receive_id":"fake-recipient","receive_id_type":"chat_id"}}`, ""))
 	exec(`INSERT INTO bot_bindings(id,integration_id,actor_id,conversation_id,conversation_type,role,label,created_at) VALUES('owner','feishu','fake-owner','fake-private-chat','private','owner','owner',$1),('group','feishu','fake-owner','fake-group-chat','group','owner','group',$1)`, earlier)

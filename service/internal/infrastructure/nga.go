@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -30,7 +29,7 @@ const ngaBaseURL = "https://bbs.nga.cn"
 type NGA struct {
 	http        *http.Client
 	userAgent   string
-	gate        sync.Mutex
+	gate        chan struct{}
 	lastRequest time.Time
 	interval    time.Duration
 }
@@ -45,7 +44,7 @@ func NewNGA(userAgent string, transport http.RoundTripper) *NGA {
 	}
 	return &NGA{http: &http.Client{Transport: transport, Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		userAgent: userAgent, interval: 500 * time.Millisecond}
+		userAgent: userAgent, interval: 500 * time.Millisecond, gate: make(chan struct{}, 1)}
 }
 
 func (n *NGA) Close() { n.http.CloseIdleConnections() }
@@ -72,12 +71,9 @@ func (n *NGA) ThreadPage(ctx context.Context, credentials Credentials, tid int64
 func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (body []byte, err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.nga.http")
 	defer span.End(&err)
-	n.gate.Lock()
-	defer n.gate.Unlock()
-	if err = wait(ctx, time.Until(n.lastRequest.Add(n.interval))); err != nil {
+	if err = n.waitTurn(ctx); err != nil {
 		return nil, err
 	}
-	n.lastRequest = time.Now()
 	req, err := http.NewRequestWithContext(ctx, method, ngaBaseURL+path, strings.NewReader(form))
 	if err != nil {
 		return nil, logging.Wrap(err, "create NGA request")
@@ -149,6 +145,21 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	}
 	// 上游 msg 可能含用户输入，不把完整响应或消息放入错误/日志。
 	return nil, logging.WithStack(err)
+}
+
+// 同一账号合计 120 QPM，只串行分配启动时刻，网络响应可以重叠。
+func (n *NGA) waitTurn(ctx context.Context) error {
+	select {
+	case n.gate <- struct{}{}:
+	case <-ctx.Done():
+		return logging.WithStack(ctx.Err())
+	}
+	defer func() { <-n.gate }()
+	if err := wait(ctx, time.Until(n.lastRequest.Add(n.interval))); err != nil {
+		return err
+	}
+	n.lastRequest = time.Now()
+	return nil
 }
 
 func wait(ctx context.Context, delay time.Duration) error {

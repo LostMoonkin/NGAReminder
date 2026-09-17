@@ -24,13 +24,18 @@ func (m *Monitoring) StartBackfill(ctx context.Context, watchID int64, date stri
 	if start.After(end) {
 		return job, InvalidInput("起始日期不能晚于今天")
 	}
-	if err = m.lock(); err != nil {
+	if !m.backfillWork.TryLock() {
+		return job, logging.WithStack(ErrBusy)
+	}
+	if err = m.lockWatch(watchID); err != nil {
+		m.backfillWork.Unlock()
 		return job, err
 	}
 	started := false
 	defer func() {
 		if !started {
-			m.work.Unlock()
+			m.unlockWatch(watchID)
+			m.backfillWork.Unlock()
 		}
 	}()
 	watch, err := m.store.Watch(ctx, watchID)
@@ -57,7 +62,8 @@ func (m *Monitoring) StartBackfill(ctx context.Context, watchID int64, date stri
 	}
 	started = true
 	go func(job repository.Backfill) {
-		defer m.work.Unlock()
+		defer m.backfillWork.Unlock()
+		defer m.unlockWatch(watchID)
 		defer cancel()
 		var runErr error
 		defer root.End(&runErr)

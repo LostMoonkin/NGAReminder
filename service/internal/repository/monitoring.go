@@ -24,17 +24,18 @@ type Account struct {
 }
 
 type Watch struct {
-	ID               int64  `json:"id"`
-	TID              int64  `json:"tid" gorm:"column:tid"`
-	UID              int64  `json:"uid" gorm:"column:uid"`
-	Kind             string `json:"kind" gorm:"default:tid"`
-	Label            string `json:"label"`
-	Title            string `json:"title"`
-	InitMode         string `json:"init_mode"`
-	Paused           bool   `json:"paused"`
-	State            string `json:"state"`
-	BaselineComplete bool   `json:"baseline_complete"`
-	CursorFloor      int64  `json:"cursor_floor"`
+	ID                 int64  `json:"id"`
+	TID                int64  `json:"tid" gorm:"column:tid"`
+	UID                int64  `json:"uid" gorm:"column:uid"`
+	Kind               string `json:"kind" gorm:"default:tid"`
+	Label              string `json:"label"`
+	Title              string `json:"title"`
+	InitMode           string `json:"init_mode"`
+	HistoryConcurrency int    `json:"history_concurrency" gorm:"default:1"`
+	Paused             bool   `json:"paused"`
+	State              string `json:"state"`
+	BaselineComplete   bool   `json:"baseline_complete"`
+	CursorFloor        int64  `json:"cursor_floor"`
 	// From-now 的原始边界独立于持续前移的游标；重跑不能把未保存内容误当成历史。
 	HistoryFloor    int64          `json:"history_floor"`
 	HistoryBefore   *time.Time     `json:"history_before"`

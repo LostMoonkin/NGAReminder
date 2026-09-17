@@ -89,6 +89,13 @@ func (m *importer) watches() error {
 		case "thread":
 			v.Kind, v.TID = "tid", r.number("target_id")
 			opt := m.one("thread_watch_options", "watch_id", r.text("id"))
+			v.HistoryConcurrency = 1
+			if opt.yes("history_parallel_enabled") {
+				v.HistoryConcurrency = int(opt.number("history_parallelism"))
+				if v.HistoryConcurrency < 1 || v.HistoryConcurrency > 16 {
+					return sourceError(opt.table, "history_parallelism", "invalid history concurrency")
+				}
+			}
 			switch opt.text("history_mode") {
 			case "full":
 			case "incremental":
