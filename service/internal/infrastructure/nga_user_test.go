@@ -5,9 +5,38 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestUserListHeadersMatchRust(t *testing.T) {
+	credentials := Credentials{UID: "2009", Cookie: "C3VK=browser; ngaPassportCid=fixture; ngaPassportUid=2009; ngaPassportUrlencodedUname=fixture-user; lastvisit=stale"}
+	for _, replies := range []bool{false, true} {
+		for _, page := range []int{1, 2} {
+			n := NewNGA("fixture-agent", roundTrip(func(r *http.Request) (*http.Response, error) {
+				want := http.Header{
+					"User-Agent":     {"fixture-agent"},
+					"Sec-Fetch-User": {"?1"},
+					"Cookie":         {"ngaPassportUid=2009; ngaPassportUrlencodedUname=fixture-user; ngaPassportCid=fixture"},
+				}
+				if !reflect.DeepEqual(r.Header, want) {
+					t.Errorf("user list headers differ from Rust (replies=%t, page=%d)", replies, page)
+				}
+				body := fixture(t, "user_topics_page_1")
+				if replies {
+					body = fixture(t, "user_replies_success")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+			}))
+			_, err := n.UserPage(context.Background(), credentials, 2001, replies, page)
+			n.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
 
 func TestUserProtocolFixtures(t *testing.T) {
 	first, err := parseUserPage(fixture(t, "user_topics_page_1"), 2001, false, 1)

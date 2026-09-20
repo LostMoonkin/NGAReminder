@@ -39,10 +39,13 @@ func (n *NGA) userRequest(ctx context.Context, credentials Credentials, uid stri
 	}
 	// 跨用户搜索同样只发送协议要求的三个 Cookie 字段。
 	parts := []string{}
-	for _, part := range strings.Split(credentials.Cookie, ";") {
-		name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-		if name == "ngaPassportUid" || name == "ngaPassportCid" || name == "ngaPassportUrlencodedUname" {
-			parts = append(parts, strings.TrimSpace(part))
+	for _, wanted := range []string{"ngaPassportUid", "ngaPassportUrlencodedUname", "ngaPassportCid"} {
+		for _, part := range strings.Split(credentials.Cookie, ";") {
+			name, _, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if ok && name == wanted {
+				parts = append(parts, strings.TrimSpace(part))
+				break
+			}
 		}
 	}
 	for attempt := 1; attempt <= 10; attempt++ {

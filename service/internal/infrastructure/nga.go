@@ -68,7 +68,7 @@ func (n *NGA) ThreadPage(ctx context.Context, credentials Credentials, tid int64
 	return parseThreadPage(body, tid, page)
 }
 
-func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (body []byte, err error) {
+func (n *NGA) requestBytes(ctx context.Context, method, path, form, cookie string) (body []byte, err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.nga.http")
 	defer span.End(&err)
 	if err = n.waitTurn(ctx); err != nil {
@@ -78,13 +78,22 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	if err != nil {
 		return nil, logging.Wrap(err, "create NGA request")
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", n.userAgent)
-	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
 	req.Header.Set("Cookie", cookie)
-	req.Header.Set("Origin", ngaBaseURL)
-	req.Header.Set("Referer", ngaBaseURL+"/")
+	if req.URL.Path == "/thread.php" {
+		// 用户列表沿用 Rust 的最小请求头，不附加通用 API 的 Origin、Referer 等头。
+		req.Header.Set("Sec-Fetch-User", "?1")
+	} else {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+		req.Header.Set("Origin", ngaBaseURL)
+		req.Header.Set("Referer", ngaBaseURL+"/")
+		if req.URL.Path == "/nuke.php" && req.URL.Query().Get("func") == "ucp" {
+			// 资料页要求 Referer 指向当前 UID 的完整资料页 URL。
+			req.Header.Set("Referer", req.URL.String())
+		}
+	}
 	started := time.Now()
 	status := 0
 	defer func() {
@@ -110,6 +119,14 @@ func (n *NGA) request(ctx context.Context, method, path, form, cookie string) (b
 	}
 	if status != http.StatusOK {
 		return nil, logging.WithStack(fmt.Errorf("NGA returned HTTP %d", status))
+	}
+	return body, nil
+}
+
+func (n *NGA) request(ctx context.Context, method, path, form, cookie string) ([]byte, error) {
+	body, err := n.requestBytes(ctx, method, path, form, cookie)
+	if err != nil {
+		return nil, err
 	}
 	var envelope struct {
 		Code    *number `json:"code"`

@@ -8,6 +8,7 @@
 ## 行为
 
 - 管理页可创建、修改、暂停、恢复、重置和删除 UID 监控，并手动运行。
+- UID 每轮先读取用户资料页，校验返回 UID 并解析 GBK HTML 中的 `__UCPUSER.username`。本轮成功后将用户名写入监控 `title`，在概览与详情展示；用户填写的备注保持独立。空名或 `UID<目标 UID>` 占位名沿用数字 UID 展示。
 - UID 首次初始化读取主题/回帖列表建立各自水位，不导入历史内容或生成新内容通知。
 - 后续保存目标 UID 的新主题与新回帖。主题只保存主楼及必要上下文，回复只保存目标内容，不扩展抓取整条讨论。
 - 详情返回后再次核对作者；按 PID 请求的回帖即使返回 `lou=0`，仍按回复身份及其 PID 保存。
@@ -26,6 +27,7 @@
 
 - 依赖 [阶段 02](02-nga-and-thread-monitoring.md)，复用账号、内容保存与错误日志能力。
 - UID 协议参考 [NGA 契约](../../../archive/rust-service/service/docs/NGA_API_CONTRACT.md)；免拉取的业务边界参考 [历史 ADR](../../../archive/rust-service/docs/adr/0001-separate-no-fetch-periods-from-fetch-schedules.md)。
+- 用户请求头以 [Rust 实现及其回归测试](../../../archive/rust-service/service/src/nga/mod.rs) 为准：主题/回帖列表仅显式设置配置的 `User-Agent`、`Sec-Fetch-User: ?1` 与最小 Cookie（`ngaPassportUid`、可选 `ngaPassportUrlencodedUname`、`ngaPassportCid`），不附加通用 API 的 `Content-Type`、`Accept`、`Accept-Language`、`Origin` 或 `Referer`。资料页保留通用头及完整 Cookie，但 `Referer` 必须为 `https://bbs.nga.cn/nuke.php?func=ucp&uid=<目标 UID>`，且只发送一次。历史契约中“所有数据请求使用通用头”的描述不适用于用户列表。
 - 无数据、网络错误和登录失效必须能区分，不能用失败响应建立空基线或推进水位。
 - 只需进程内调度和互斥，不需要跨进程租约和运行审计平台。
 
@@ -37,6 +39,7 @@
 ## 验收标准
 
 - [x] UID 初始化静默完成，后续只保存目标 UID 的新主题/回帖，且不抓取整条讨论。
+- [x] 用户列表与资料页请求头对齐 Rust；中文用户名可解析、保存并展示，资料页缺失或 UID 不符时不建立基线或推进水位。
 - [x] 同一 TID 下两个不同 PID 的回帖即使详情均为 `lou=0`，仍各保存一条回复。
 - [x] 本地固定时间样例覆盖间隔覆盖、跨午夜和区间边界；运行时间与页面配置一致。
 - [x] 免拉取期间自动运行没有 NGA 请求且水位不动；同一未暂停 watch 可手动运行。

@@ -19,6 +19,7 @@ import (
 
 type userRequest struct{ path, page, tid, pid, uid string }
 type userFixture struct {
+	profile                                  string
 	mu                                       sync.Mutex
 	topics1, topics2, replies, thread, reply map[string]any
 	live                                     bool
@@ -29,7 +30,7 @@ type userFixture struct {
 }
 
 func userNGA(t *testing.T) *userFixture {
-	return &userFixture{topics1: readFixture(t, "user_topics_page_1"), topics2: readFixture(t, "user_topics_page_2"), replies: readFixture(t, "user_replies_success"), thread: readFixture(t, "thread_comments_hot_post"), reply: readFixture(t, "post_by_pid_success")}
+	return &userFixture{topics1: readFixture(t, "user_topics_page_1"), topics2: readFixture(t, "user_topics_page_2"), replies: readFixture(t, "user_replies_success"), thread: readFixture(t, "thread_comments_hot_post"), reply: readFixture(t, "post_by_pid_success"), profile: `<script>var __UCPUSER = {"uid":2001,"username":"Fixture username"};</script>`}
 }
 
 func (f *userFixture) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -46,6 +47,12 @@ func (f *userFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		var copy map[string]any
 		_ = json.Unmarshal(b, &copy)
 		return copy
+	}
+	if r.URL.Path == "/nuke.php" {
+		if r.URL.Query().Get("func") != "ucp" || r.URL.Query().Get("uid") != "2001" || r.Header.Get("Referer") != r.URL.String() {
+			return nil, fmt.Errorf("user profile request differs from Rust")
+		}
+		return fixtureResponse(f.profile), nil
 	}
 	if r.URL.Path == "/thread.php" {
 		if strings.Contains(r.Header.Get("Cookie"), "unrelated=") {
@@ -161,6 +168,9 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 	if err != nil || run.Status != "success" || !run.Silent || run.Saved != 0 || !watch.BaselineComplete || watch.TopicCursor.ID != 1001 || watch.ReplyCursor.ID != 4002 {
 		t.Fatalf("invalid UID baseline: %+v %+v %v", run, watch, err)
 	}
+	if watch.Title != "Fixture username" || watch.Label != "User fixture" {
+		t.Fatalf("UID baseline did not save the profile username separately from the label: title=%q label=%q", watch.Title, watch.Label)
+	}
 	f.mu.Lock()
 	for _, call := range f.calls {
 		if call.path == "/app_api.php" {
@@ -169,11 +179,12 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 	}
 	f.live = true
 	f.failPID = "4004"
+	f.profile = `<script>var __UCPUSER = {"uid":2001,"username":"Updated username"};</script>`
 	f.mu.Unlock()
 	run = runWatch(t, router, cfg.APIToken, 1)
 	after, _ := store.Watch(context.Background(), 1)
 	threads, _ := store.Threads(context.Background())
-	if run.Status != "skipped_pending" || after.TopicCursor != watch.TopicCursor || after.ReplyCursor != watch.ReplyCursor || len(threads) != 0 {
+	if run.Status != "skipped_pending" || after.Title != watch.Title || after.TopicCursor != watch.TopicCursor || after.ReplyCursor != watch.ReplyCursor || len(threads) != 0 {
 		t.Fatalf("detail failure committed a partial UID run: %+v %+v", run, after)
 	}
 	f.mu.Lock()
@@ -210,7 +221,7 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 		t.Fatal("detail author check did not reject a topic")
 	}
 	after, _ = store.Watch(context.Background(), 1)
-	if after.TopicCursor.ID != 1005 || after.ReplyCursor.ID != 4004 {
+	if after.Title != "Updated username" || after.TopicCursor.ID != 1005 || after.ReplyCursor.ID != 4004 {
 		t.Fatalf("separate watermarks not committed: %+v", after)
 	}
 	if run = runWatch(t, router, cfg.APIToken, 1); run.Status != "success" || run.Saved != 0 {
@@ -218,8 +229,8 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 	}
 	response = request(t, router, "GET", "/admin/watches/1", "")
 	expectStatus(t, response, 200)
-	if !strings.Contains(response.Body.String(), "UID 2001") || !strings.Contains(response.Body.String(), "回帖水位") || !strings.Contains(response.Body.String(), run.TraceID) {
-		t.Fatal("UID page omitted identity, watermarks, or run result")
+	if !strings.Contains(response.Body.String(), "UID 2001") || !strings.Contains(response.Body.String(), "Updated username") || !strings.Contains(response.Body.String(), "回帖水位") || !strings.Contains(response.Body.String(), run.TraceID) {
+		t.Fatal("UID page omitted identity, username, watermarks, or run result")
 	}
 	// 第二个 UID 与 TID 的配置和运行记录相互独立，tid=0 不再导致唯一索引冲突。
 	response = send(t, router, "POST", "/api/v1/watches", cfg.APIToken, service.WatchInput{Kind: "uid", UID: 2002})
@@ -265,7 +276,7 @@ func assertUserTrace(t *testing.T, raw []byte, trace string) {
 			t.Fatal("UID error lacks causes or stack")
 		}
 	}
-	for _, operation := range []string{"service.collect_user", "infrastructure.nga.user_page", "infrastructure.nga.http", "repository.save_watch"} {
+	for _, operation := range []string{"service.collect_user", "infrastructure.nga.user_profile", "infrastructure.nga.user_page", "infrastructure.nga.http", "repository.save_watch"} {
 		if !seen[operation] {
 			t.Errorf("UID trace missing %s", operation)
 		}
@@ -283,6 +294,18 @@ func TestUserBaselineFailureAndAuthRecovery(t *testing.T) {
 	expectStatus(t, response, 201)
 	createWatch(t, router, cfg.APIToken, 1001, "full")
 	expectStatus(t, send(t, router, "POST", "/api/v1/watches/2/pause", cfg.APIToken, nil), 200)
+	f.mu.Lock()
+	profile := f.profile
+	f.profile = `<html>User not found</html>`
+	f.mu.Unlock()
+	profileRun := runWatch(t, router, cfg.APIToken, 1)
+	profileWatch, _ := store.Watch(context.Background(), 1)
+	if profileRun.Status != "failed" || profileWatch.BaselineComplete || profileWatch.TopicCursor.ID != 0 || profileWatch.ReplyCursor.ID != 0 || profileWatch.Title != "" {
+		t.Fatalf("missing profile established a UID baseline: %+v %+v", profileRun, profileWatch)
+	}
+	f.mu.Lock()
+	f.profile = profile
+	f.mu.Unlock()
 	for _, failure := range []string{"json", "503", "auth"} {
 		f.mu.Lock()
 		f.failReplies = failure

@@ -528,6 +528,9 @@ func (f incrementalTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	response := func(raw string) *http.Response {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(raw))}
 	}
+	if req.URL.Path == "/nuke.php" && req.URL.Query().Get("func") == "ucp" {
+		return response(`<script>var __UCPUSER = {"uid":2002,"username":"author"};</script>`), nil
+	}
 	if req.URL.Path == "/thread.php" {
 		if req.URL.Query().Get("searchpost") == "1" {
 			return response(`{"code":0,"result":{"__ROWS":2,"__R__ROWS_PAGE":20,"__T":[{"__P":{"tid":1001,"pid":4005,"authorid":2002,"postdate":1767225660}},{"__P":{"tid":1001,"pid":4001,"authorid":2002,"postdate":1767225660}}]}}`), nil

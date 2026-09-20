@@ -33,6 +33,9 @@ func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
 	if target == "" {
 		target = "uid:" + r.Form.Get("authorid")
 	}
+	if r.URL.Path == "/nuke.php" {
+		target = "uid:" + r.Form.Get("uid")
+	}
 	page, _ := strconv.Atoi(r.Form.Get("page"))
 	f.mu.Lock()
 	if f.active == nil {
@@ -52,6 +55,9 @@ func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
 		case <-r.Context().Done():
 			return nil, r.Context().Err()
 		}
+	}
+	if r.URL.Path == "/nuke.php" {
+		return fixtureResponse(fmt.Sprintf(`<script>var __UCPUSER = {"uid":%s,"username":"Fixture"};</script>`, r.Form.Get("uid"))), nil
 	}
 	if r.URL.Path == "/thread.php" {
 		return fixtureResponse(`{"code":0,"result":{"__T":[],"__ROWS":0,"__R__ROWS_PAGE":20,"__T__ROWS_PAGE":20}}`), nil

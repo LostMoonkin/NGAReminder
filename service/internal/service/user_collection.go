@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/rs/zerolog"
 	"ngareminder/service/internal/infrastructure"
@@ -67,6 +69,11 @@ func (m *Monitoring) userCandidates(ctx context.Context, credentials infrastruct
 }
 
 func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure.Credentials, watch *repository.Watch, run *repository.Run) error {
+	profile, err := m.nga.UserProfile(ctx, credentials, watch.UID)
+	if err != nil {
+		return err
+	}
+	run.Pages++
 	topics, topicCursor, err := m.userCandidates(ctx, credentials, *watch, run, false)
 	if err != nil {
 		return err
@@ -113,6 +120,10 @@ func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure
 		posts = append(posts, storedPost(post))
 	}
 	// 两份列表和所有详情成功后才一次提交；任何失败都保留原水位和基线。
+	watch.Title = strings.TrimSpace(profile.Username)
+	if strings.EqualFold(watch.Title, fmt.Sprintf("UID%d", watch.UID)) || strings.EqualFold(watch.Title, fmt.Sprintf("UID %d", watch.UID)) {
+		watch.Title = ""
+	}
 	watch.TopicCursor, watch.ReplyCursor = topicCursor, replyCursor
 	return m.finishSuccessfulRun(ctx, watch, run, 0, posts, nil)
 }
