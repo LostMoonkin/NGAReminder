@@ -19,11 +19,13 @@ import (
 )
 
 type noticeFixture struct {
-	nga                    *ngaFixture
-	mu                     sync.Mutex
-	barkFail               bool
-	barkCalls, feishuCalls int
-	message                string
+	nga                          *ngaFixture
+	mu                           sync.Mutex
+	barkFail                     bool
+	barkCalls, feishuCalls       int
+	message                      string
+	imageUploadOK                bool
+	imageDownloads, imageUploads int
 }
 
 func noticeResponse(body string) *http.Response {
@@ -50,6 +52,10 @@ func (f *noticeFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	case strings.Contains(r.URL.Path, "tenant_access_token"):
 		return noticeResponse(`{"code":0,"tenant_access_token":"fixture-tenant-secret","expire":7200}`), nil
 	case strings.HasSuffix(r.URL.Path, "/images"):
+		f.imageUploads++
+		if f.imageUploadOK {
+			return noticeResponse(`{"code":0,"data":{"image_key":"fixture-image-key"}}`), nil
+		}
 		return noticeResponse(`{"code":123}`), nil
 	case strings.HasSuffix(r.URL.Path, "/messages"):
 		f.feishuCalls++
@@ -57,10 +63,13 @@ func (f *noticeFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		f.message = string(body)
 		return noticeResponse(`{"code":0,"data":{"message_id":"fixture"}}`), nil
 	case r.URL.Host == "img.nga.cn":
+		f.imageDownloads++
 		if r.URL.Path == "/image.png" {
 			var data bytes.Buffer
 			_ = png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1)))
-			return noticeResponse(data.String()), nil
+			response := noticeResponse(data.String())
+			response.Header.Set("Content-Type", "image/png")
+			return response, nil
 		}
 		response := noticeResponse("not found")
 		response.StatusCode = http.StatusNotFound
@@ -233,11 +242,15 @@ func TestFeishuImageFailureKeepsText(t *testing.T) {
 	f := &noticeFixture{}
 	n := infrastructure.NewNotifier(f)
 	defer n.Close()
-	err := n.Send(context.Background(), "feishu", infrastructure.ChannelTarget{ReceiveID: "fixture", ReceiveIDType: "chat_id"}, infrastructure.AppCredentials{AppID: "cli_image_fixture", AppSecret: "fixture"}, infrastructure.Notice{Title: "Fixture", Text: "Readable text", URL: "https://bbs.nga.cn/read.php?tid=1&pid=2", Images: []string{"https://img.nga.cn/image.png", "https://img.nga.cn/invalid.png"}}, "image-test")
+	err := n.Send(context.Background(), "feishu", infrastructure.ChannelTarget{ReceiveID: "fixture", ReceiveIDType: "chat_id"}, infrastructure.AppCredentials{AppID: "cli_image_fixture", AppSecret: "fixture"}, infrastructure.Notice{Title: "Fixture", Text: "Readable text[img]https://img.nga.cn/image.png[/img][img]https://img.nga.cn/invalid.png[/img]", URL: "https://bbs.nga.cn/read.php?tid=1&pid=2"}, "image-test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f.feishuCalls != 1 || !strings.Contains(f.message, "Readable text") || !strings.Contains(f.message, "pid=2") {
 		t.Fatal("image failure prevented text or reply link delivery", f.message)
+	}
+	card := decodeFeishuCard(t, f.message)
+	if len(card.Elements) != 3 || card.Elements[0].Text.Content != "Readable text\n" || card.Elements[1].Text.Content != "[图片 1](https://img.nga.cn/image.png) · [图片 2](https://img.nga.cn/invalid.png)" || f.imageUploads != 1 {
+		t.Fatalf("image fallback diverged from Rust: card=%+v uploads=%d", card, f.imageUploads)
 	}
 }

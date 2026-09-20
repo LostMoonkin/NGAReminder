@@ -16,7 +16,7 @@ type node struct {
 var tagPattern = regexp.MustCompile(`\[(/?)([a-zA-Z]+)(?:=([^\]]*))?\]`)
 var breakPattern = regexp.MustCompile(`(?i)<br\s*/?>`)
 
-// Web 和通知保留现有解析规则；Markdown 的 NGA 混合标记由独立入口转换。
+// Web 和纯文本摘要使用此解析器；Markdown 导出与飞书卡片各有独立入口。
 func parse(body string) *node {
 	body = breakPattern.ReplaceAllString(body, "\n")
 	root := &node{}

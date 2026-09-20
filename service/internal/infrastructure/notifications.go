@@ -16,6 +16,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/rs/zerolog"
+	"ngareminder/service/internal/content"
 	"ngareminder/service/internal/logging"
 )
 
@@ -32,20 +33,30 @@ type ChannelTarget struct {
 }
 type Notice struct {
 	Title, Text, URL string
-	Images           []string
 }
 type Notifier struct {
-	http   *http.Client
-	mu     sync.Mutex
-	app    AppCredentials
-	client *lark.Client
+	http      *http.Client
+	imageHTTP *http.Client
+	mu        sync.Mutex
+	app       AppCredentials
+	client    *lark.Client
+	imageKeys map[string]string
 }
 
 func NewNotifier(transport http.RoundTripper) *Notifier {
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	return &Notifier{http: &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Notifier{
+		http: &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		imageHTTP: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) < 5 && validResourceURL(req.URL.String(), true) {
+				return nil
+			}
+			return http.ErrUseLastResponse
+		}},
+		imageKeys: make(map[string]string),
+	}
 }
 func (n *Notifier) Close() { n.http.CloseIdleConnections() }
 
@@ -67,11 +78,15 @@ func (n *Notifier) Client(app AppCredentials) *lark.Client {
 	return n.client
 }
 
-func (n *Notifier) Do(req *http.Request) (response *http.Response, err error) {
+func (n *Notifier) Do(req *http.Request) (*http.Response, error) {
+	return n.do(n.http, req)
+}
+
+func (n *Notifier) do(client *http.Client, req *http.Request) (response *http.Response, err error) {
 	ctx, span := logging.Start(req.Context(), "infrastructure.notification_http")
 	defer span.End(&err)
 	start := time.Now()
-	response, err = n.http.Do(req.WithContext(ctx))
+	response, err = client.Do(req.WithContext(ctx))
 	code := 0
 	if response != nil {
 		code = response.StatusCode
@@ -113,28 +128,57 @@ func (n *Notifier) Send(ctx context.Context, kind string, target ChannelTarget, 
 		}
 		return nil
 	}
-	elements := []any{map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": notice.Text}}}
-	for index, source := range notice.Images {
+	text, images := content.Feishu(notice.Text)
+	elements := []any{map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": text}}}
+	var fallback []string
+	for index, source := range images {
 		if index >= 3 {
-			break
+			fallback = append(fallback, source)
+			continue
 		}
-		data, _, e := n.DownloadResource(ctx, source, 10<<20, true)
-		if e == nil {
-			var key string
-			key, e = n.UploadImage(ctx, app, data)
-			if e == nil {
-				elements = append(elements, map[string]any{"tag": "img", "img_key": key, "alt": map[string]string{"tag": "plain_text", "content": "图片"}})
-			}
-		}
+		key, e := n.uploadNGAImage(ctx, app, source)
 		if e != nil {
-			notice.Text += "\n图片：" + source
+			fallback = append(fallback, source)
 			logging.Error(ctx, e, "Notification image unavailable; sending text and source links", zerolog.WarnLevel)
+		} else {
+			elements = append(elements, map[string]any{"tag": "img", "img_key": key, "alt": map[string]string{"tag": "plain_text", "content": "NGA 帖子图片"}})
 		}
 	}
-	elements[0] = map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": notice.Text}}
+	if len(fallback) > 0 {
+		links := make([]string, len(fallback))
+		for index, source := range fallback {
+			links[index] = fmt.Sprintf("[图片 %d](%s)", index+1, source)
+		}
+		elements = append(elements, map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": strings.Join(links, " · ")}})
+	}
 	elements = append(elements, map[string]any{"tag": "action", "actions": []any{map[string]any{"tag": "button", "text": map[string]string{"tag": "plain_text", "content": "查看帖子"}, "type": "primary", "url": notice.URL}}})
+	if title := []rune(notice.Title); len(title) > 80 {
+		notice.Title = string(title[:80]) + "…"
+	}
 	card := map[string]any{"header": map[string]any{"template": "blue", "title": map[string]string{"tag": "plain_text", "content": notice.Title}}, "elements": elements}
 	return n.SendMessage(ctx, app, target.ReceiveIDType, target.ReceiveID, "interactive", card, uuid)
+}
+
+func (n *Notifier) uploadNGAImage(ctx context.Context, app AppCredentials, source string) (string, error) {
+	cacheKey := app.AppID + "\x00" + source
+	n.mu.Lock()
+	key := n.imageKeys[cacheKey]
+	n.mu.Unlock()
+	if key != "" {
+		return key, nil
+	}
+	data, _, err := n.DownloadResource(ctx, source, 10<<20, true)
+	if err != nil {
+		return "", err
+	}
+	key, err = n.UploadImage(ctx, app, data)
+	if err != nil {
+		return "", err
+	}
+	n.mu.Lock()
+	n.imageKeys[cacheKey] = key
+	n.mu.Unlock()
+	return key, nil
 }
 
 func (n *Notifier) SendMessage(ctx context.Context, app AppCredentials, idType, id, kind string, body any, uuid string) (err error) {
@@ -193,7 +237,11 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 	if err != nil {
 		return nil, "", logging.WithStack(errors.New("invalid NGA resource URL"))
 	}
-	response, err := n.Do(req)
+	client := n.http
+	if imageOnly {
+		client = n.imageHTTP
+	}
+	response, err := n.do(client, req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -204,6 +252,13 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 	if limit <= 0 || limit == int64(^uint64(0)>>1) || response.ContentLength > limit {
 		return nil, "", logging.WithStack(errors.New("NGA resource exceeds the size limit"))
 	}
+	mime = response.Header.Get("Content-Type")
+	if imageOnly {
+		mime, _, _ = strings.Cut(mime, ";")
+		if !strings.HasPrefix(mime, "image/") {
+			return nil, "", logging.WithStack(errors.New("NGA resource is not a supported image"))
+		}
+	}
 	data, err = io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, "", logging.Wrap(err, "read NGA resource")
@@ -211,12 +266,8 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 	if int64(len(data)) > limit || imageOnly && len(data) == 0 {
 		return nil, "", logging.WithStack(errors.New("NGA resource is empty or exceeds the size limit"))
 	}
-	mime = response.Header.Get("Content-Type")
-	if imageOnly || mime == "" {
+	if mime == "" {
 		mime = http.DetectContentType(data)
-	}
-	if imageOnly && !strings.HasPrefix(mime, "image/") {
-		return nil, "", logging.WithStack(errors.New("NGA resource is not a supported image"))
 	}
 	return data, mime, nil
 }

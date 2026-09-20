@@ -494,14 +494,16 @@ func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Deliver
 		return infrastructure.Notice{}, err
 	}
 	p := event.Post
-	title := ""
 	thread, err := n.store.Thread(ctx, p.TID)
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return infrastructure.Notice{}, err
 	}
-	title = content.Summary(thread.Title, 80)
-	if title == "" {
-		title = fmt.Sprintf("NGA TID %d", p.TID)
+	title := thread.Title
+	if kind != "feishu" {
+		title = content.Summary(title, 80)
+		if title == "" {
+			title = fmt.Sprintf("NGA TID %d", p.TID)
+		}
 	}
 	heading := fmt.Sprintf("%s · #%d", p.Author, p.Floor)
 	for _, source := range event.Sources {
@@ -515,11 +517,15 @@ func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Deliver
 		title = "用户监控：" + name
 		break
 	}
+	if kind == "feishu" {
+		// 飞书接收原始 NGA 正文，由独立 compact Markdown 渲染器统一处理格式、图片与长度。
+		link := fmt.Sprintf("https://bbs.nga.cn/read.php?tid=%d", p.TID)
+		if p.PID > 0 {
+			link += fmt.Sprintf("&pid=%d", p.PID)
+		}
+		return infrastructure.Notice{Title: title, Text: heading + "\n\n" + p.Body, URL: link}, nil
+	}
 	body := content.Summary(p.Body, 1500)
 	text := heading + "\n" + body + "\n" + p.SourceURL
-	if kind == "feishu" {
-		// 飞书沿用原卡片间距，原帖地址仅作为按钮目标，不重复追加到正文。
-		text = heading + "\n\n" + body
-	}
-	return infrastructure.Notice{Title: title, Text: text, URL: p.SourceURL, Images: p.Resources}, nil
+	return infrastructure.Notice{Title: title, Text: text, URL: p.SourceURL}, nil
 }

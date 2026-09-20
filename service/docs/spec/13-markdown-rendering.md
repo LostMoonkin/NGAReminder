@@ -37,7 +37,7 @@
 - 以该提交的 [nga.go](https://github.com/ludoux/ngapost2md/blob/e3b94346c805ac851ce2584e5ab4e3735846a3c9/nga/nga.go) 中 `fixMost`、`fixContent`、`processMedia` 的渲染部分，以及 [utils.go](https://github.com/ludoux/ngapost2md/blob/e3b94346c805ac851ce2584e5ab4e3735846a3c9/nga/utils.go) 中表情映射、匿名名转换为依据；`genMarkdown` 仅参考引用锚点语义。网络、文件下载及配置副作用不在复刻范围。
 - 在本项目内实现或移植必要的渲染代码；不通过 `go.mod`、嵌套模块、submodule、CLI 或外部服务依赖整个 ngapost2md。复制或改写其代码、映射表时记录来源提交并保留 [MIT 许可证及版权声明](https://github.com/ludoux/ngapost2md/blob/e3b94346c805ac851ce2584e5ab4e3735846a3c9/LICENSE)。
 - 本 Spec 的兼容和资源规则优先于上游行为；不复刻会导致内容丢失、无效跳转或不安全输出的缺陷，也不减少现有基础格式支持。
-- 本 Spec 更新 [阶段 07](07-content-and-export.md) 的 Markdown 转换要求；共享规则约束不要求 Web 和通知同步采用上游渲染，二者现有可观察行为保持不变。[Spec12](12-rust-parity-fixes.md) 的资源规则继续有效。
+- 本 Spec 更新 [阶段 07](07-content-and-export.md) 的 Markdown 转换要求；Web 与纯文本摘要保持现有规则，飞书卡片独立遵循 [阶段 04](04-notifications.md) 的 Rust compact Markdown 规则，不采用 ngapost2md。[Spec12](12-rust-parity-fixes.md) 的资源规则继续有效。
 - 遵守 [服务端规范](../../AGENTS.md)。不改写已保存正文、作者或资源记录，不新增数据迁移；导出保持分批读取，不将完整主题及资源二进制全部载入内存。
 
 ## 非目标
