@@ -10,6 +10,8 @@
 
 计划引用 Spec，Ticket 引用对应 Spec；各处只维护自身内容，避免重复记录需求和状态。
 
+行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
+
 ## 本地运行
 
 需要 Go 1.27.0 或更新版本。所有构建和检查设置 `CGO_ENABLED=0`。SQLite 使用 [libtnb/sqlite](https://github.com/libtnb/sqlite) 的 GORM 驱动，底层为纯 Go 的 modernc SQLite，无需安装 SQLite、C 编译器或数据库服务。
