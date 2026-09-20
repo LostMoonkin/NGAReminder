@@ -35,21 +35,27 @@ type Notice struct {
 	Title, Text, URL string
 }
 type Notifier struct {
-	http      *http.Client
-	imageHTTP *http.Client
-	mu        sync.Mutex
-	app       AppCredentials
-	client    *lark.Client
-	imageKeys map[string]string
+	http         *http.Client
+	resourceHTTP *http.Client
+	imageHTTP    *http.Client
+	mu           sync.Mutex
+	app          AppCredentials
+	client       *lark.Client
+	imageKeys    map[string]string
 }
 
 func NewNotifier(transport http.RoundTripper) *Notifier {
+	resourceTransport := transport
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
+		resourceTransport = browserResourceTransport(transport.(*http.Transport))
+	} else if base, ok := transport.(*http.Transport); ok {
+		resourceTransport = browserResourceTransport(base)
 	}
 	return &Notifier{
-		http: &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		imageHTTP: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		http:         &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		resourceHTTP: &http.Client{Transport: resourceTransport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		imageHTTP: &http.Client{Transport: resourceTransport, Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) < 5 && validResourceURL(req.URL.String(), true) {
 				return nil
 			}
@@ -58,7 +64,10 @@ func NewNotifier(transport http.RoundTripper) *Notifier {
 		imageKeys: make(map[string]string),
 	}
 }
-func (n *Notifier) Close() { n.http.CloseIdleConnections() }
+func (n *Notifier) Close() {
+	n.http.CloseIdleConnections()
+	n.resourceHTTP.CloseIdleConnections()
+}
 
 // SDK 原生日志会包含消息正文、token 响应等；实际 HTTP 和业务结果由下面的接入边界统一记录。
 type sdkQuiet struct{}
@@ -237,7 +246,7 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 	if err != nil {
 		return nil, "", logging.WithStack(errors.New("invalid NGA resource URL"))
 	}
-	client := n.http
+	client := n.resourceHTTP
 	if imageOnly {
 		client = n.imageHTTP
 	}
