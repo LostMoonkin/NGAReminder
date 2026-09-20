@@ -1,0 +1,144 @@
+name: Publish Service Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+      - '!v*-standalone'
+    paths:
+      - 'service/**'
+      - '.github/workflows/service-image.yml'
+  pull_request:
+    paths:
+      - 'service/**'
+      - '.github/workflows/service-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  verify:
+    name: Verify Go service
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: service
+        shell: bash
+    env:
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate service release tag
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ || "$GITHUB_REF_NAME" == *-standalone ]]; then
+            echo "Service tags must use vX.Y.Z or vX.Y.Z-prerelease, without the standalone suffix." >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: service/go.mod
+          cache-dependency-path: service/go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Build Go service
+        run: go build ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Set up Docker Buildx for pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: docker/setup-buildx-action@v4
+
+      - name: Verify Docker image for pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ./service
+          file: ./service/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=service-image
+          cache-to: type=gha,mode=max,scope=service-image
+
+  publish:
+    name: Build and publish service image
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # metadata-action 会把镜像仓库名转为小写。
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./service
+          file: ./service/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=service-image
+          cache-to: type=gha,mode=max,scope=service-image
+          provenance: true
+          sbom: true

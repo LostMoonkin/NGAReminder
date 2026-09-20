@@ -102,6 +102,38 @@ docker compose up -d --build
 
 升级前先停止服务，备份整个 `data/` 和本地 Compose 配置，另行保管部署密钥。服务自行将日志写入 `/app/data/logs`（宿主机默认 `service/data/logs`），按天切分并保留 30 天，不依赖 Docker 日志驱动。Compose 中的 `json-file` 仅额外保留终端输出，`docker compose logs -f` 看不到非 error SQL；完整 SQL 见 `sql-YYYY-MM-DD.log`。Ctrl-C 只结束日志跟随，不会停止服务。Compose 字段语义见 [Docker 官方说明](https://docs.docker.com/reference/compose-file/services/)。
 
+## GHCR 镜像发布
+
+[服务端镜像工作流](../../.github/workflows/service-image.yml) 使用 `service/Dockerfile` 构建 Go 服务端的 `linux/amd64` 镜像，推送到 `ghcr.io/<owner>/<repo>`；镜像仓库名自动转为小写。例如 GitHub 仓库 `Example/NGAReminder` 对应 `ghcr.io/example/ngareminder`。
+
+| 触发方式 | 行为与镜像标签 |
+| --- | --- |
+| 推送到 `main`，且修改 `service/**` 或该 workflow | 检查后发布 `main` 和 `sha-<完整提交 SHA>` |
+| 推送服务端正式标签，如 `v0.2.0` | 检查后发布 `v0.2.0`、`0.2.0`、`latest` 和提交 SHA 标签 |
+| 推送预发布标签，如 `v0.2.0-rc.1` | 发布带预发布版本的标签和提交 SHA 标签，不更新 `latest` |
+| Actions 页面手动运行 | 对所选分支或标签执行相同检查并发布；分支使用分支名标签 |
+| PR 修改服务端或 workflow | 运行 Go 检查及 Docker 构建，不登录或推送 GHCR |
+
+发布前执行 `gofmt` 检查、`go build ./...`、`go vet ./...` 和 `go test ./...`；Go 版本读取 `service/go.mod`，设置 `CGO_ENABLED=0`。镜像包含来源与提交信息，使用 BuildKit 缓存，并生成 provenance 与 SBOM。`latest` 仅由正式版本标签更新；扩展的 `vX.Y.Z-standalone` 标签不会触发服务端发布。
+
+认证使用 GitHub 自动提供的 `GITHUB_TOKEN`，发布 job 具有 `packages: write` 权限，无需另配 GHCR 密码。已有同名 package 需允许当前仓库通过 Actions 写入；首次发布的 package 默认私有，如需匿名拉取，在 GitHub Packages 中将其可见性改为 Public。权限和可见性详见 [GitHub Container registry 文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+
+工作流合并到默认分支后，可在 Actions 的 **Publish Service Docker Image → Run workflow** 中选择包含该文件的分支运行。正式发布示例（版本号按实际发布替换）：
+
+```bash
+git tag -a v0.2.0 -m "Release Go service v0.2.0"
+git push origin v0.2.0
+```
+
+使用预构建镜像部署时，将本地 `compose.yaml` 的 `build: .` 替换为 `image: ghcr.io/<owner>/<repo>:0.2.0`，保留原有 `environment`、端口和数据挂载。私有镜像先在部署机器上登录 GHCR。完成升级前备份后，拉取并重新创建容器：
+
+```bash
+docker compose pull server
+docker compose up -d --no-build server
+```
+
+`scripts/release.sh` 仍只负责扩展版本；Go 镜像使用上述 Git 标签或手动工作流发布。
+
 ## 配置
 
 已有 Rust PG 数据先使用 [migrate-pg.sh](../migrate-pg.sh) 完整导出并转换为 SQLite，见[迁移操作说明](plan/migration-runbook.md)。脚本输出可独立使用的 SQLite、完整 PG 表数据快照和核验报告，支持离线重放；assets 保留原挂载，不参与迁移。确认目标库和密钥后再按以下配置启动 Go。

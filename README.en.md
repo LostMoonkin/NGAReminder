@@ -20,6 +20,8 @@ See the [local startup instructions](service/docs/README.md#本地运行). Go 1.
 
 For containers, follow the [Docker Compose instructions](service/docs/README.md#docker-compose-部署): copy the [template](service/compose.example.yaml), configure its `environment` section, and mount only the data directory.
 
+The [service image workflow](.github/workflows/service-image.yml) publishes Go images to `ghcr.io/<owner>/<repo>` for service changes on `main`, service version tags, or manual runs. See the [GHCR publishing instructions](service/docs/README.md#ghcr-镜像发布) for tags and permissions.
+
 ## Rust archive
 
 The archive is based on commit `7a9c9dd3c7fa0d33cdadcf6829f2c8f7d0ca0d63` and includes the subsequent service review.
@@ -29,7 +31,7 @@ The archive is based on commit `7a9c9dd3c7fa0d33cdadcf6829f2c8f7d0ca0d63` and in
 - [Original server documentation](archive/rust-service/service/README.en.md)
 - [Service complexity review](archive/rust-service/service/docs/SERVICE_SIMPLIFICATION_REVIEW.md)
 
-Archived designs, milestones, and Rust conventions describe the historical implementation. They are reference material for the Go design. The Rust image workflow has been moved out of the active workflows directory, and server releases are paused.
+Archived designs, milestones, and Rust conventions describe the historical implementation. They are reference material for the Go design. The Rust image workflow remains archived; the active service workflow builds Go only.
 
 ## Standalone extension
 

@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/release.sh extension <x.y.z> [--push] [--skip-checks]
 
 Updates the extension when needed, creates a release commit and an annotated tag.
-Extension tags are vX.Y.Z-standalone. Server releases are paused for the Go rewrite.
+Extension tags are vX.Y.Z-standalone. Go service images use .github/workflows/service-image.yml.
 The tag is pushed only when --push is supplied.
 EOF
 }
@@ -44,8 +44,8 @@ fi
 
 case "$artifact" in
   service)
-    echo "Server releases are paused for the Go rewrite." >&2
-    echo "Rust v0.1.4 is archived at archive/rust-service/; see ARCHIVE.md there." >&2
+    echo "This script manages extension releases only." >&2
+    echo "Publish Go service images with .github/workflows/service-image.yml; see service/docs/README.md." >&2
     exit 2
     ;;
   extension)

@@ -20,6 +20,8 @@ PG 迁移使用 [migrate-pg.sh](service/migrate-pg.sh)，输出完整表数据�
 
 容器部署见 [Docker Compose 说明](service/docs/README.md#docker-compose-部署)：复制 [Compose 模板](service/compose.example.yaml)，直接填写 `environment`，只挂载数据目录。
 
+[服务端镜像工作流](.github/workflows/service-image.yml) 将 Go 镜像发布到 `ghcr.io/<owner>/<repo>`，支持 `main` 服务端变更、服务端版本标签和手动运行；标签及权限说明见 [GHCR 镜像发布](service/docs/README.md#ghcr-镜像发布)。
+
 ## Rust 服务端归档
 
 归档基于提交 `7a9c9dd3c7fa0d33cdadcf6829f2c8f7d0ca0d63`，并包含重构前的服务端评审报告。
@@ -29,7 +31,7 @@ PG 迁移使用 [migrate-pg.sh](service/migrate-pg.sh)，输出完整表数据�
 - [原服务端说明](archive/rust-service/service/README.md)
 - [服务端复杂度评审](archive/rust-service/service/docs/SERVICE_SIMPLIFICATION_REVIEW.md)
 
-归档中的设计、里程碑和 Rust 工程约束描述历史实现，供 Go 设计参考。旧 Rust 镜像工作流已移出活动工作流目录，服务端发布入口暂停。
+归档中的设计、里程碑和 Rust 工程约束描述历史实现，供 Go 设计参考。旧 Rust 镜像工作流保留在归档中，活动服务端工作流只构建 Go。
 
 ## Standalone 扩展
 
