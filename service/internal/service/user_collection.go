@@ -50,16 +50,16 @@ func (m *Monitoring) userCandidates(ctx context.Context, credentials infrastruct
 			if newer(point, cursor) {
 				cursor = point
 			}
-			if candidate.Timestamp < original.Timestamp {
+			if !newer(point, original) {
 				reachedOld = true
 			}
 			if watch.BaselineComplete && newer(point, original) {
 				candidates = append(candidates, candidate)
 			}
 		}
-		// 主题可能因旧帖的新回复重新排序，按服务端计数翻完；回复按发布时间倒序，只读到旧水位。
-		// 初次回复基线只需第一个含有效内容的页面，无需遍历历史。
-		if !result.HasMore || replies && (reachedOld || !watch.BaselineComplete && len(result.Candidates) > 0) {
+		// 沿用 Rust 的水位边界：整页候选处理完后，遇到旧内容即停止主题/回帖翻页。
+		// 初次基线只需第一个含有效内容的页面；无有效候选的页不能作为水位边界。
+		if !result.HasMore || reachedOld || !watch.BaselineComplete && len(result.Candidates) > 0 {
 			break
 		}
 	}
