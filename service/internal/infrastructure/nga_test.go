@@ -70,6 +70,16 @@ func TestThreadFixtures(t *testing.T) {
 
 type roundTrip func(*http.Request) (*http.Response, error)
 
+func TestThreadAnonymousAuthor(t *testing.T) {
+	page, err := parseThreadPage([]byte(`{"currentPage":1,"totalPage":1,"perPage":20,"vrows":1,"result":[{"tid":1001,"pid":4001,"lou":1,"content":"anonymous fixture","author":{"uid":-1,"username":"乙杨卓子罗麻","annoy":"#anony_105bdda13fb29b421690bf0cdc262b0b"}}]}`), 1001, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Posts) != 1 || page.Posts[0].AuthorUID != -1 || page.Posts[0].Author != "乙杨卓子罗麻" {
+		t.Fatal("anonymous API author was not preserved", page.Posts)
+	}
+}
+
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestCredentialCheckUsesAuthenticatedReplies(t *testing.T) {

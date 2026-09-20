@@ -1,6 +1,7 @@
 # 阶段 07：内容浏览、资源与导出
 
 后续行为补充以 [Spec12：Rust 行为对齐与迁移补全](12-rust-parity-fixes.md) 为准。
+Markdown 渲染的后续替换需求见 [Spec13：基于 ngapost2md 的 Markdown 渲染](13-markdown-rendering.md)。
 
 ## 目标
 

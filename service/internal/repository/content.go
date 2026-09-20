@@ -34,6 +34,21 @@ func (s *Store) ContentBatch(ctx context.Context, f ContentFilter, offset, limit
 	return items, logging.Wrap(err, "read ordered content batch")
 }
 
+// 只检查本次导出范围内的引用目标，不读取正文或扩大 UID 的内容范围。
+func (s *Store) ContentReferenceExists(ctx context.Context, f ContentFilter, maxID, tid, pid int64) (found bool, err error) {
+	ctx, span := logging.Start(ctx, "repository.content_reference_exists")
+	defer span.End(&err)
+	q := s.contentQuery(ctx, f).Where("id <= ? AND tid = ?", maxID, tid)
+	if pid == 0 {
+		q = q.Where("kind = ?", "main")
+	} else {
+		q = q.Where("pid = ?", pid)
+	}
+	var rows []int64
+	err = q.Select("id").Limit(1).Scan(&rows).Error
+	return len(rows) > 0, logging.Wrap(err, "check exported reference target")
+}
+
 type ResourceSettings struct {
 	ID              int  `json:"-"`
 	DownloadEnabled bool `json:"download_enabled"`

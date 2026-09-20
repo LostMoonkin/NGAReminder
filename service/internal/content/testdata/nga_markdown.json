@@ -1,0 +1,80 @@
+{
+  "reference": "ludoux/ngapost2md@e3b94346c805ac851ce2584e5ab4e3735846a3c9: fixMost/processMedia; safety, BBCode and resource adaptations follow Spec13",
+  "cases": [
+    {
+      "name": "app_api_formats",
+      "body": "first<br/>second&lt;br&gt;third &amp;#160;end \\u003cb\\u003eencoded\\u003c/b\\u003e\n<b>bold</b><i>italic</i><del class='gray'>deleted</del>\n[s:ac:哭笑] [s:a2:doge] [s:ng:寄] [s:unknown:keep]\n#anony_105bdda13fb29b421690bf0cdc262b0b 乙杨卓子罗麻\n<div class='dice'><b>ROLL : 1d100</b>=d100(32)=<b>32</b></div>\n[url]https://example.invalid/path[/url] [url=https://example.invalid/?a=1&amp;b=2]link[/url]",
+      "contains": [
+        "first\nsecond\nthird  end **encoded**",
+        "**bold***italic*~~deleted~~",
+        "![哭笑](https://img4.nga.178.com/ngabbs/post/smile/ac15.png)",
+        "![doge](https://img4.nga.178.com/ngabbs/post/smile/a2_27.png)",
+        "![寄](https://img4.nga.178.com/ngabbs/post/smile/ng_9.png)",
+        "\\[s:unknown:keep\\]",
+        "乙杨卓子罗麻? 乙杨卓子罗麻",
+        "**【ROLL** : 1d100= **32】**",
+        "[link](https://example.invalid/?a=1&b=2)"
+      ],
+      "absent": [
+        "#anony_",
+        "<b>",
+        "<del"
+      ]
+    },
+    {
+      "name": "folds_and_media",
+      "body": "<div class=\"foldBox no\"><div class=\"collapse_btn\"><a href=\"javascript:;\" onclick=\"collapse(this);\">+</a>外层标题 ...</div><span class=\"collapse_content\" id=\"foldCnt\">第一行<br/>第二行 [b]强调[/b]</span></div>\n[collapse=BB 折叠]keep [i]inside[/i][/collapse]\n[img]./path/photo.png.medium.jpg[/img]\n<span class=\"video\"><video controls src=\"https://img.nga.cn/video.mp4\"></video></span>\n<span class=\"audio\" onclick=\"audioClick(event)\"> <audio src=\"https://img.nga.cn/audio.mp3\" controls></audio></span>\n[video]https://img.nga.cn/other.mp4[/video]\n[code][s:ac:哭笑]<b>literal</b>[/code]",
+      "contains": [
+        "<summary>外层标题</summary>",
+        "第一行\n第二行 **强调**",
+        "<summary>BB 折叠</summary>",
+        "keep *inside*",
+        "![img](https://img.nga.178.com/attachments/path/photo.png)",
+        "【视频：https://img.nga.cn/video.mp4】",
+        "【音频：https://img.nga.cn/audio.mp3】",
+        "【视频：https://img.nga.cn/other.mp4】",
+        "```\n[s:ac:哭笑]<b>literal</b>\n```"
+      ],
+      "absent": [
+        "onclick=",
+        "javascript:",
+        "foldBox",
+        "<video",
+        "<audio"
+      ]
+    },
+    {
+      "name": "safe_and_malformed",
+      "body": "<script>alert(1)</script><b onclick=\"evil()\">ok</b>\n<a href=\"javascript:alert(1)\">bad link</a>[url=javascript:alert(1)]also bad[/url]\n<img src=\"javascript:evil()\" onerror=\"evil()\">\n[collapse=&lt;/summary&gt;&lt;script&gt;]still here[/collapse]\n[unknown]read me[/unknown][quote]incomplete [b]bold",
+      "contains": [
+        "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "**ok**",
+        "bad link",
+        "also bad",
+        "<summary>&lt;/summary&gt;&lt;script&gt;</summary>",
+        "still here",
+        "\\[unknown\\]read me\\[/unknown\\]",
+        "incomplete **bold**"
+      ],
+      "absent": [
+        "<script>",
+        "onclick=",
+        "onerror=",
+        "href=",
+        "(javascript:"
+      ]
+    },
+    {
+      "name": "literal_code",
+      "body": "<pre><code>&lt;b&gt;literal&lt;/b&gt; [b]sample[/b] &amp; x\n[s:ac:哭笑]</code></pre>\n[code]<br/> &lt;b&gt; \\u003c #anony_105bdda13fb29b421690bf0cdc262b0b[/code]",
+      "contains": [
+        "```\n<b>literal</b> [b]sample[/b] & x\n[s:ac:哭笑]\n```",
+        "```\n<br/> &lt;b&gt; \\u003c #anony_105bdda13fb29b421690bf0cdc262b0b\n```"
+      ],
+      "absent": [
+        "![哭笑]",
+        "乙杨卓子罗麻"
+      ]
+    }
+  ]
+}

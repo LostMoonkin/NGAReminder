@@ -114,7 +114,23 @@ func (m *Monitoring) Export(ctx context.Context, kind string, id int64, format s
 		if e != nil {
 			return file, e
 		}
+		// 缓存只在当前批次内有效；目标查找遵守同一 UID/TID 和快照范围。
+		links := map[content.PostReference]string{}
 		for _, post := range posts {
+			body := content.ParseMarkdown(post.Body, post.TID)
+			for _, ref := range body.References {
+				if _, checked := links[ref]; checked {
+					continue
+				}
+				found, e := m.store.ContentReferenceExists(ctx, filter, maxID, ref.TID, ref.PID)
+				if e != nil {
+					return file, e
+				}
+				links[ref] = ref.URL()
+				if found {
+					links[ref] = "#" + ref.Anchor()
+				}
+			}
 			if currentTID != post.TID {
 				currentTID = post.TID
 				title := post.Subject
@@ -147,7 +163,7 @@ func (m *Monitoring) Export(ctx context.Context, kind string, id int64, format s
 					assets[item.Path] = true
 				}
 			}
-			if err = writePost(writer, post, replacements); err != nil {
+			if err = writePost(writer, post, replacements, body, links); err != nil {
 				return file, err
 			}
 		}
@@ -186,7 +202,7 @@ func (m *Monitoring) Export(ctx context.Context, kind string, id int64, format s
 	success = true
 	return file, nil
 }
-func writePost(writer io.Writer, post repository.Post, replacements map[string]string) error {
+func writePost(writer io.Writer, post repository.Post, replacements map[string]string, body content.MarkdownBody, links map[content.PostReference]string) error {
 	when := "未知时间"
 	if post.PublishedAt != nil {
 		when = post.PublishedAt.UTC().Format(time.RFC3339)
@@ -198,7 +214,16 @@ func writePost(writer io.Writer, post repository.Post, replacements map[string]s
 		floor = fmt.Sprintf("%d 楼下的评论（父帖 %s）", post.ParentFloor, post.ParentKey)
 	}
 	source := content.SafeURL(post.SourceURL)
-	_, err := fmt.Fprintf(writer, "## %s · %s\n\nUID %d · PID %d · %s\n\n%s\n\n[原帖](%s)\n\n", content.EscapeMarkdown(floor), content.EscapeMarkdown(post.Author), post.AuthorUID, post.PID, when, content.Markdown(post.Body, content.ResourceAliases(post.Resources, replacements)), content.Destination(source))
+	anchor := content.PostReference{TID: post.TID, PID: post.PID}.Anchor()
+	if _, err := fmt.Fprintf(writer, "<a id=\"%s\"></a>\n\n", anchor); err != nil {
+		return logging.Wrap(err, "write exported post anchor")
+	}
+	if post.Kind == "main" && post.PID != 0 {
+		if _, err := fmt.Fprintf(writer, "<a id=\"%s\"></a>\n\n", (content.PostReference{TID: post.TID}).Anchor()); err != nil {
+			return logging.Wrap(err, "write exported main post anchor")
+		}
+	}
+	_, err := fmt.Fprintf(writer, "## %s · %s\n\nUID %d · PID %d · %s\n\n%s\n\n[原帖](%s)\n\n", content.EscapeMarkdown(floor), content.EscapeMarkdown(content.AnonymousName(post.Author)), post.AuthorUID, post.PID, when, body.Render(content.MarkdownResourceAliases(post.Resources, replacements), links), content.Destination(source))
 	if err != nil {
 		return logging.Wrap(err, "write exported post")
 	}

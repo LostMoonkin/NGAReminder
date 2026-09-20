@@ -20,7 +20,7 @@ func TestSharedMarkupAndSafeHTML(t *testing.T) {
 		}
 	}
 	markdown := Markdown(body, ResourceAliases(resources, map[string]string{resources[0]: "assets/saved.png"}))
-	for _, part := range []string{"**bold**", "> quoted", "````", "![图片](assets/saved.png)", "**details**", "&lt;script&gt;"} {
+	for _, part := range []string{"**bold**", "> quoted", "````", "![img](assets/saved.png)", "<summary>details</summary>", "&lt;script&gt;"} {
 		if !strings.Contains(markdown, part) {
 			t.Fatal("missing Markdown content", part, markdown)
 		}

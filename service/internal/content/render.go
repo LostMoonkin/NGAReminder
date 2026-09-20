@@ -16,7 +16,7 @@ type node struct {
 var tagPattern = regexp.MustCompile(`\[(/?)([a-zA-Z]+)(?:=([^\]]*))?\]`)
 var breakPattern = regexp.MustCompile(`(?i)<br\s*/?>`)
 
-// 一个小型标记树共享给 Web、Markdown 和通知；未知标记作为普通文本保留。
+// Web 和通知保留现有解析规则；Markdown 的 NGA 混合标记由独立入口转换。
 func parse(body string) *node {
 	body = breakPattern.ReplaceAllString(body, "\n")
 	root := &node{}
@@ -94,9 +94,9 @@ func plain(n *node) string {
 	return b.String()
 }
 func Text(body string) string        { return strings.TrimSpace(plain(parse(body))) }
-func HTML(body string) template.HTML { return template.HTML(render(parse(body), "html", nil)) }
+func HTML(body string) template.HTML { return template.HTML(renderHTML(parse(body), nil)) }
 func HTMLWithResources(body string, urls []string) template.HTML {
-	return template.HTML(render(parse(body), "html", ResourceAliases(urls, nil)))
+	return template.HTML(renderHTML(parse(body), ResourceAliases(urls, nil)))
 }
 func ResourceAliases(urls []string, local map[string]string) map[string]string {
 	result := map[string]string{}
@@ -118,76 +118,43 @@ func ResourceAliases(urls []string, local map[string]string) map[string]string {
 	return result
 }
 func Destination(target string) string {
-	return strings.NewReplacer("(", "%28", ")", "%29", "<", "%3C", ">", "%3E", "\"", "%22", " ", "%20").Replace(target)
-}
-func Markdown(body string, resources map[string]string) string {
-	return render(parse(body), "markdown", resources)
+	return strings.NewReplacer("\\", "%5C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E", "\"", "%22", " ", "%20").Replace(target)
 }
 func EscapeMarkdown(text string) string {
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "|", "\\|").Replace(text)
 }
-func render(n *node, format string, resources map[string]string) string {
-	htmlMode := format == "html"
-	escape := EscapeMarkdown
-	if htmlMode {
-		escape = html.EscapeString
-	}
+func renderHTML(n *node, resources map[string]string) string {
 	var b strings.Builder
-	text := escape(n.text)
-	if htmlMode && n.tag != "code" {
+	text := html.EscapeString(n.text)
+	if n.tag != "code" {
 		text = strings.ReplaceAll(text, "\n", "<br>\n")
 	}
 	b.WriteString(text)
 	for _, c := range n.children {
-		b.WriteString(render(c, format, resources))
+		b.WriteString(renderHTML(c, resources))
 	}
 	inside := b.String()
 	switch n.tag {
 	case "":
 		return inside
 	case "b":
-		if htmlMode {
-			return "<strong>" + inside + "</strong>"
-		}
-		return "**" + inside + "**"
+		return "<strong>" + inside + "</strong>"
 	case "i":
-		if htmlMode {
-			return "<em>" + inside + "</em>"
-		}
-		return "*" + inside + "*"
+		return "<em>" + inside + "</em>"
 	case "u":
-		if htmlMode {
-			return "<u>" + inside + "</u>"
-		}
-		return inside
+		return "<u>" + inside + "</u>"
 	case "s", "del":
-		if htmlMode {
-			return "<del>" + inside + "</del>"
-		}
-		return "~~" + inside + "~~"
+		return "<del>" + inside + "</del>"
 	case "quote":
-		if htmlMode {
-			return "<blockquote>" + inside + "</blockquote>"
-		}
-		return "\n> " + strings.ReplaceAll(inside, "\n", "\n> ") + "\n"
+		return "<blockquote>" + inside + "</blockquote>"
 	case "code":
-		if htmlMode {
-			return "<pre><code>" + html.EscapeString(n.text) + "</code></pre>"
-		}
-		fence := "```"
-		for strings.Contains(n.text, fence) {
-			fence += "`"
-		}
-		return "\n" + fence + "\n" + n.text + "\n" + fence + "\n"
+		return "<pre><code>" + html.EscapeString(n.text) + "</code></pre>"
 	case "collapse":
 		title := n.param
 		if title == "" {
 			title = "折叠内容"
 		}
-		if htmlMode {
-			return "<details><summary>" + escape(title) + "</summary>" + inside + "</details>"
-		}
-		return "\n**" + escape(title) + "**\n\n" + inside + "\n"
+		return "<details><summary>" + html.EscapeString(title) + "</summary>" + inside + "</details>"
 	case "url", "img":
 		target := n.param
 		if target == "" || n.tag == "img" {
@@ -204,17 +171,10 @@ func render(n *node, format string, resources map[string]string) string {
 		if replacement, ok := resources[target]; ok {
 			target = replacement
 		}
-		if htmlMode {
-			if n.tag == "img" {
-				return `<img loading="lazy" referrerpolicy="no-referrer" alt="图片" src="` + html.EscapeString(target) + `">`
-			}
-			return `<a rel="noreferrer" target="_blank" href="` + html.EscapeString(target) + `">` + inside + `</a>`
-		}
-		target = strings.NewReplacer("(", "%28", ")", "%29", "<", "%3C", ">", "%3E", "\"", "%22", " ", "%20").Replace(target)
 		if n.tag == "img" {
-			return "![图片](" + target + ")"
+			return `<img loading="lazy" referrerpolicy="no-referrer" alt="图片" src="` + html.EscapeString(target) + `">`
 		}
-		return "[" + inside + "](" + target + ")"
+		return `<a rel="noreferrer" target="_blank" href="` + html.EscapeString(target) + `">` + inside + `</a>`
 	}
 	return inside
 }

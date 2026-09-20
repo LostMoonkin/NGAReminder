@@ -12,6 +12,8 @@
 
 本轮 14 项修复及迁移补全见 [Spec12](spec/12-rust-parity-fixes.md)。
 
+Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实施状态统一见 [重构计划](plan/README.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 ## 本地运行
@@ -329,7 +331,9 @@ watch 创建/更新额外接受 `channel_ids` 与 `author_uids` 数组；省略�
 
 用户汇总在 `/admin/users`，显示监控用户昵称、已存帖子数、涉及主题数和最近发布时间，包含零内容和暂停的 UID。独立主题元数据保留版面、作者、覆盖范围与最后观察时间；仅保存用户回复的主题也有标题，无帖主题仍列出。Web 原帖链接在页码已知时使用页码锚点，通知继续使用 `tid&pid`；旧 Go 未保存的页码和原始 JSON 不会伪造。
 
-TID 内容在 `/admin/threads/:tid`，UID watch 详情中的“查看用户帖子”进入 `/admin/users/:uid`，每页 50 条。UID 页面和导出只读取该 UID 已保存内容，按 TID 分组，不额外访问 NGA。Web、Markdown 和通知共用标记解析：段落、强调、引用、代码、链接、图片及折叠；未知标记保留文本，HTML 只输出允许标签和 HTTP(S) 链接。相对图片路径通过已存资源元数据解析。
+TID 内容在 `/admin/threads/:tid`，UID watch 详情中的“查看用户帖子”进入 `/admin/users/:uid`，每页 50 条。UID 页面和导出只读取该 UID 已保存内容，按 TID 分组，不额外访问 NGA。Web 和通知保留现有标记解析；Web 支持段落、强调、引用、代码、链接、图片及折叠，未知标记保留文本，HTML 只输出允许标签和 HTTP(S) 链接。相对图片路径通过已存资源元数据解析。
+
+Markdown 按 [Spec13](spec/13-markdown-rendering.md) 复刻 ngapost2md 的渲染规则，支持 NGA app_api 混合标记、表情、匿名编码、骰子、折叠、音视频及带作者/时间的引用。接口已经提供可读匿名名时直接保留；仅转换仍为 `#anony_…` 的文本，不改写数据库。代码块保持原文，折叠使用 `<details>`。引用目标在本次导出中时使用文内跳转，否则回退原帖链接；跨主题主楼锚点互不冲突。普通 Markdown 引用远程资源，ZIP 优先引用已打包文件；表情保持在线地址，导出不补抓正文或下载资源。
 
 页面提供 Markdown 和 ZIP 下载。以开始时的最大帖子 ID 固定内容范围，每批最多 200 条、按 TID/楼层/父子关系/内部 ID 稳定排序。Markdown 包含标题、作者、时间、楼层/父帖和原帖链接。ZIP 包含 `content.md`、`metadata.json` 和 `assets/` 中已保存的相关资源，共享文件只打包一次，缺失项使用远程地址。服务生成临时文件后流式发送，批量导出和资源补下载解除普通 HTTP 响应的 30 秒写入期限，仍随客户端断开取消。完成、客户端断开或生成失败都会清理；异常退出遗留项可从资源页清理。
 
