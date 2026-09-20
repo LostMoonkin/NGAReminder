@@ -42,12 +42,63 @@ func NewNGA(userAgent string, transport http.RoundTripper) *NGA {
 		t.DisableKeepAlives = true
 		transport = t
 	}
-	return &NGA{http: &http.Client{Transport: transport, Timeout: 15 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+	n := &NGA{http: &http.Client{Transport: transport, Timeout: 15 * time.Second},
 		userAgent: userAgent, interval: 500 * time.Millisecond, gate: make(chan struct{}, 1)}
+	n.http.CheckRedirect = n.followRedirect
+	return n
 }
 
 func (n *NGA) Close() { n.http.CloseIdleConnections() }
+
+func (n *NGA) followRedirect(req *http.Request, via []*http.Request) error {
+	// Rust 使用 reqwest 默认策略：允许 10 次跳转（不含初始请求）。
+	if len(via) > 10 {
+		return logging.WithStack(errors.New("NGA exceeded 10 redirects"))
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return logging.WithStack(errors.New("NGA redirect uses an unsupported URL scheme"))
+	}
+	previous := via[len(via)-1]
+	port := func(u *url.URL) string {
+		if value := u.Port(); value != "" {
+			return value
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	sameOrigin := strings.EqualFold(req.URL.Hostname(), previous.URL.Hostname()) &&
+		req.URL.Scheme == previous.URL.Scheme && port(req.URL) == port(previous.URL)
+	// Go 默认也向子域转发 Cookie，且从初始请求复制头；按 reqwest 规则改为
+	// 仅同源沿用上一跳的敏感头，跨源移除后即使跳回原站也不能重新带上。
+	for _, name := range []string{"Authorization", "Cookie", "Cookie2", "Proxy-Authorization", "Www-Authenticate"} {
+		req.Header.Del(name)
+		if sameOrigin {
+			for _, value := range previous.Header.Values(name) {
+				req.Header.Add(name, value)
+			}
+		}
+	}
+	// reqwest 用上一跳 URL 更新 Referer，剔除 userinfo 和 fragment；
+	// HTTPS 降到 HTTP 时不生成新 Referer，沿用上一跳已有值。
+	req.Header.Del("Referer")
+	if previous.URL.Scheme == "https" && req.URL.Scheme == "http" {
+		if value := previous.Header.Get("Referer"); value != "" {
+			req.Header.Set("Referer", value)
+		}
+	} else {
+		referer := *previous.URL
+		referer.User, referer.Fragment, referer.RawFragment = nil, "", ""
+		req.Header.Set("Referer", referer.String())
+	}
+	if err := n.waitTurn(req.Context()); err != nil {
+		return err
+	}
+	zerolog.Ctx(req.Context()).Info().Int("status", req.Response.StatusCode).Int("redirects", len(via)).
+		Str("from_host", previous.URL.Host).Str("to_host", req.URL.Host).Msg("Following NGA redirect")
+	return nil
+}
 
 func (n *NGA) CheckCredentials(ctx context.Context, credentials Credentials) (err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.nga.check_credentials")

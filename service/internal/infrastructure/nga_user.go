@@ -54,7 +54,7 @@ func (n *NGA) userRequest(ctx context.Context, credentials Credentials, uid stri
 		if errors.Is(err, ErrNGASearchUnavailable) && replies && page > 1 {
 			return nil, err
 		}
-		limit, delay := 10, time.Second
+		limit, delay := 10, 3*time.Second
 		if errors.Is(err, ErrNGASearchUnavailable) {
 			limit, delay = 3, 2*time.Second
 		}

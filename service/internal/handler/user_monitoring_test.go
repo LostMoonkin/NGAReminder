@@ -196,10 +196,19 @@ func TestUserMonitoringWorkflow(t *testing.T) {
 	f.failPID = ""
 	f.knownReplies = true
 	f.mu.Unlock()
+	// 水位尚未到达时，已知总数的后续空 503 仍是失败，不能当作历史结束。
+	beforeTail := watch
+	beforeTail.ReplyCursor.Timestamp--
+	if err := store.SaveWatch(context.Background(), &beforeTail); err != nil {
+		t.Fatal(err)
+	}
 	run = runWatch(t, router, cfg.APIToken, 1)
 	after, _ = store.Watch(context.Background(), 1)
-	if run.Status != "failed" || after.ReplyCursor != watch.ReplyCursor || after.TopicCursor != watch.TopicCursor {
+	if run.Status != "failed" || after.ReplyCursor != beforeTail.ReplyCursor || after.TopicCursor != beforeTail.TopicCursor {
 		t.Fatal("known-total empty tail advanced UID watermarks", run, after)
+	}
+	if err := store.SaveWatch(context.Background(), &watch); err != nil {
+		t.Fatal(err)
 	}
 	f.mu.Lock()
 	f.knownReplies = false

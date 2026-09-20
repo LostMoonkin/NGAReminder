@@ -12,6 +12,8 @@
 - 管理页可创建、修改、暂停、恢复、重置和删除 UID 监控，并手动运行。
 - UID 每轮先读取用户资料页，校验返回 UID 并解析 GBK HTML 中的 `__UCPUSER.username`。本轮成功后将用户名写入监控 `title`，在概览与详情展示；用户填写的备注保持独立。空名或 `UID<目标 UID>` 占位名沿用数字 UID 展示。
 - UID 首次初始化读取主题/回帖列表建立各自水位，不导入历史内容或生成新内容通知。
+- 主题与回帖初始化分别读到首个含有效候选的页面；增量沿用 Rust 的水位停止规则，处理完整页后，只要该页有候选的 `(发布时间, TID/PID)` 小于或等于本轮开始时的对应水位，即停止该列表翻页。相等也属于已采集内容；同页中其他较新的候选仍须处理。没有遇到水位才按服务端分页信息继续，不为旧主题的回复活动扫描全部历史。
+- 无有效候选的页不能视为到达水位，不能仅因无权记录造成短页而提前结束。无新增且两份列表首页均遇到水位时，整轮通常读取 3 页：资料页、主题首页、回帖首页；新增跨页时按需继续并补取详情，不设固定 3 页上限。
 - 后续保存目标 UID 的新主题与新回帖。主题只保存主楼及必要上下文，回复只保存目标内容，不扩展抓取整条讨论。
 - 详情返回后再次核对作者；按 PID 请求的回帖即使返回 `lou=0`，仍按回复身份及其 PID 保存。
 - 删除或重置监控保留内容；重置后重新静默建立水位，不将已有内容重新通知。
@@ -29,8 +31,9 @@
 
 - 依赖 [阶段 02](02-nga-and-thread-monitoring.md)，复用账号、内容保存与错误日志能力。
 - UID 协议参考 [NGA 契约](../../../archive/rust-service/service/docs/NGA_API_CONTRACT.md)；免拉取的业务边界参考 [历史 ADR](../../../archive/rust-service/docs/adr/0001-separate-no-fetch-periods-from-fetch-schedules.md)。
-- 用户请求头以 [Rust 实现及其回归测试](../../../archive/rust-service/service/src/nga/mod.rs) 为准：主题/回帖列表仅显式设置配置的 `User-Agent`、`Sec-Fetch-User: ?1` 与最小 Cookie（`ngaPassportUid`、可选 `ngaPassportUrlencodedUname`、`ngaPassportCid`），不附加通用 API 的 `Content-Type`、`Accept`、`Accept-Language`、`Origin` 或 `Referer`。资料页保留通用头及完整 Cookie，但 `Referer` 必须为 `https://bbs.nga.cn/nuke.php?func=ucp&uid=<目标 UID>`，且只发送一次。历史契约中“所有数据请求使用通用头”的描述不适用于用户列表。
+- 用户初始请求头以 [Rust 实现及其回归测试](../../../archive/rust-service/service/src/nga/mod.rs) 为准：主题/回帖列表仅显式设置配置的 `User-Agent`、`Sec-Fetch-User: ?1` 与最小 Cookie（`ngaPassportUid`、可选 `ngaPassportUrlencodedUname`、`ngaPassportCid`），不附加通用 API 的 `Content-Type`、`Accept`、`Accept-Language`、`Origin` 或 `Referer`。资料页保留通用头及完整 Cookie，但初始 `Referer` 必须为 `https://bbs.nga.cn/nuke.php?func=ucp&uid=<目标 UID>`，且只发送一次。发生重定向时按阶段 02 的 reqwest 对齐规则处理 Cookie 和 Referer。历史契约中“所有数据请求使用通用头”的描述不适用于用户列表。
 - 无数据、网络错误和登录失效必须能区分，不能用失败响应建立空基线或推进水位。
+- 用户主题/回帖列表返回 2048“服务器忙”时，每次失败响应后等待 3 秒再重试，最多请求 10 次；仍受调用方超时、取消及账号限流约束。2048“必须登录/请登录”按认证失效处理，不作忙碌重试。
 - 只需进程内调度和互斥，不需要跨进程租约和运行审计平台。
 
 ## 非目标
@@ -41,6 +44,7 @@
 ## 验收标准
 
 - [x] UID 初始化静默完成，后续只保存目标 UID 的新主题/回帖，且不抓取整条讨论。
+- [x] 无新增且首页已达水位时不访问历史后页；已知/未知总数、与水位同秒同 ID、同页边界之后的较新 ID 均正确处理。必要页面失败仍保留两份水位和已保存内容。
 - [x] 用户列表与资料页请求头对齐 Rust；中文用户名可解析、保存并展示，资料页缺失或 UID 不符时不建立基线或推进水位。
 - [x] 同一 TID 下两个不同 PID 的回帖即使详情均为 `lou=0`，仍各保存一条回复。
 - [x] 本地固定时间样例覆盖间隔覆盖、跨午夜和区间边界；运行时间与页面配置一致。
@@ -57,3 +61,5 @@
 - 验证阶段 02 Go SQLite 原地升级、遗留运行标记中断、UID 水位重启保持、实际调度循环只执行一次到期运行，以及核验模式关闭后台访问。
 - `CGO_ENABLED=0 go build ./...`、`CGO_ENABLED=0 go vet ./...`、`CGO_ENABLED=0 go test ./...` 通过；`gofmt`、页面脚本语法、文档相对链接和 `git diff --check` 通过。
 - 实际二进制使用临时配置监听 `0.0.0.0` 随机端口，验证 HTTP 健康检查、免密码管理页、TID/UID 配置、调度字段重启持久化、独立调度 trace、SIGTERM 和 SQLite 完整性。未访问真实 NGA，未修改运行配置或正式数据。
+
+2026-09-20 修复 UID 增量过度翻页：Go 原先每轮按总页数扫描主题历史，回帖也未将完整水位相等视为停止边界。恢复上述 Rust 水位规则，本地 fixture 中 8 页旧主题由整轮读取 10 页降为 3 页。回归覆盖忙碌历史页不被请求、静默基线、跨页新增、同秒候选和未到水位的必要页面失败；运行日志核验确认实际失败发生在主题历史第 7～9 页，包含持续 2048 和重试后 HTTP 302。
