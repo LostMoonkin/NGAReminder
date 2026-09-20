@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 )
 
 func (h *Handler) notificationRoutes(router *gin.Engine) {
+	router.GET("/admin/inbox", h.notifications)
+	router.GET("/admin/channels", h.notifications)
 	for _, prefix := range []string{"/admin", "/api/v1"} {
 		group := router.Group(prefix)
 		if prefix == "/api/v1" {
@@ -34,7 +37,11 @@ func (h *Handler) notifications(c *gin.Context) {
 		h.problem(c, service.InvalidInput("页码必须为有效正整数"))
 		return
 	}
-	data, err := h.monitor.Notifications().Overview(c.Request.Context(), page)
+	filter := "all"
+	if !isAPI(c) {
+		filter = c.DefaultQuery("filter", "all")
+	}
+	data, err := h.monitor.Notifications().FilteredOverview(c.Request.Context(), page, filter)
 	if err != nil {
 		h.problem(c, err)
 		return
@@ -43,7 +50,22 @@ func (h *Handler) notifications(c *gin.Context) {
 		c.JSON(200, data)
 		return
 	}
-	h.render(c, 200, "notifications", gin.H{"Data": data, "Page": page, "Next": page + 1, "Previous": page - 1, "TraceID": logging.TraceID(c.Request.Context())})
+	name := "notifications"
+	if c.FullPath() == "/admin/channels" {
+		name = "channels"
+	}
+	view := gin.H{"Data": data, "Page": page, "Next": page + 1, "Previous": page - 1, "Filter": filter, "TraceID": logging.TraceID(c.Request.Context())}
+	selected, _ := strconv.ParseInt(c.Query("event"), 10, 64)
+	if len(data.Events) > 0 {
+		view["Event"] = data.Events[0]
+		for _, event := range data.Events {
+			if event.ID == selected {
+				view["Event"] = event
+				break
+			}
+		}
+	}
+	h.render(c, 200, name, view)
 }
 func (h *Handler) saveFeishuApp(c *gin.Context) {
 	var input infrastructure.AppCredentials
@@ -61,7 +83,7 @@ func (h *Handler) saveFeishuApp(c *gin.Context) {
 		h.problem(c, err)
 		return
 	}
-	h.respond(c, 200, data, "/admin/notifications")
+	h.respond(c, 200, data, "/admin/channels")
 }
 func (h *Handler) saveChannel(c *gin.Context) {
 	var input service.ChannelInput
@@ -91,7 +113,7 @@ func (h *Handler) saveChannel(c *gin.Context) {
 	if id == 0 {
 		status = 201
 	}
-	h.respond(c, status, data, "/admin/notifications")
+	h.respond(c, status, data, "/admin/channels")
 }
 func (h *Handler) channelAction(action string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -109,7 +131,7 @@ func (h *Handler) channelAction(action string) gin.HandlerFunc {
 			h.problem(c, err)
 			return
 		}
-		h.respond(c, 200, gin.H{"status": "ok"}, "/admin/notifications")
+		h.respond(c, 200, gin.H{"status": "ok"}, "/admin/channels")
 	}
 }
 func (h *Handler) markRead(read bool) gin.HandlerFunc {
@@ -122,7 +144,7 @@ func (h *Handler) markRead(read bool) gin.HandlerFunc {
 			h.problem(c, err)
 			return
 		}
-		h.respond(c, 200, gin.H{"read": read}, "/admin/notifications#inbox")
+		h.respond(c, 200, gin.H{"read": read}, inboxReturn(c))
 	}
 }
 func (h *Handler) retryDelivery(c *gin.Context) {
@@ -134,7 +156,7 @@ func (h *Handler) retryDelivery(c *gin.Context) {
 		h.problem(c, err)
 		return
 	}
-	h.respond(c, 200, gin.H{"status": "pending"}, "/admin/notifications#inbox")
+	h.respond(c, 200, gin.H{"status": "pending"}, inboxReturn(c))
 }
 func bindNotificationForm(c *gin.Context, input *service.WatchInput) error {
 	if c.PostForm("notifications_present") != "1" {
@@ -167,4 +189,23 @@ func containsID(values []int64, id int64) bool {
 		}
 	}
 	return false
+}
+
+// 重定向只组合固定站内路径与受限参数，不接受任意 return URL。
+func inboxReturn(c *gin.Context) string {
+	page, _ := strconv.Atoi(c.PostForm("return_page"))
+	if page < 1 || page > int(^uint(0)>>1)/50 {
+		page = 1
+	}
+	filter := c.PostForm("return_filter")
+	switch filter {
+	case "all", "unread", "delivery", "alerts":
+	default:
+		filter = "all"
+	}
+	event, _ := strconv.ParseInt(c.PostForm("return_event"), 10, 64)
+	if event < 0 {
+		event = 0
+	}
+	return fmt.Sprintf("/admin/inbox?page=%d&filter=%s&event=%d", page, filter, event)
 }

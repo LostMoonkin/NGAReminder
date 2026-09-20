@@ -6,3 +6,8 @@ import "embed"
 //
 //go:embed templates/*.html
 var Templates embed.FS
+
+// Static 保存管理台样式与渐进增强脚本。
+//
+//go:embed static/*
+var Static embed.FS

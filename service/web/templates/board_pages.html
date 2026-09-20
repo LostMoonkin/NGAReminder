@@ -1,0 +1,79 @@
+{{define "admin"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+  <section class="board-hero">
+    <div><p class="eyebrow">YOUR PERSONAL WATCHLIST</p><h1>让关注，有条不紊。</h1><p class="muted">在一个工作台，照看你的所有 NGA 动态。</p></div>
+    <div class="board-stats"><div><strong>{{len .Data.Watches}}</strong><span>个监控目标</span></div><div><strong>{{.PostCount}}</strong><span>条已保存内容</span></div><div><strong>{{len .Data.Threads}}</strong><span>个已存主题</span></div></div>
+  </section>
+  {{template "background-notice" .Settings}}
+  {{if ne .Data.Account.Status "valid"}}<div class="notice">{{template "icon" "key"}}<p>NGA 账号：{{status .Data.Account.Status}}。采集需要有效凭据。</p><a href="/admin/settings" class="text-link">检查账号 {{template "icon" "arrow"}}</a></div>{{end}}
+  {{template "board" .}}
+  <div class="grid overview-bottom">
+    <section class="card"><div class="section-heading"><h2>最近采集结果</h2><a href="/admin/watches" class="text-link">管理监控 {{template "icon" "arrow"}}</a></div><p class="muted small">各监控的最新结果，按运行时间显示最近 5 项。</p>
+      {{range .RecentRuns}}<div class="activity-row"><div><a href="/admin/watches/{{.WatchID}}#runs">监控 #{{.WatchID}}</a><p class="small muted">{{status .Source}} · {{status .Status}} · 新增 {{.Saved}} 条</p></div><time class="small muted">{{when .FinishedAt}}</time></div>{{else}}<div class="empty">尚未运行。采集完成后，可在这里查看最新结果。</div>{{end}}
+    </section>
+    <section class="card"><div class="section-heading"><h2>运行状态</h2><a href="/admin/settings" class="text-link">设置 {{template "icon" "arrow"}}</a></div>
+      <dl><dt>NGA 账号</dt><dd>{{status .Data.Account.Status}}</dd><dt>后台任务</dt><dd>{{if .Settings.BackgroundEnabled}}已启用{{else}}已关闭{{end}}</dd><dt>本地数据库</dt><dd><span class="badge">SQLite 可用</span></dd><dt>调度时区</dt><dd>{{.Settings.Timezone}}</dd></dl>
+    </section>
+  </div>
+  {{template "footer" .}}
+</main></body></html>{{end}}
+
+{{define "watches"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">WATCHLIST</p><h1>监控管理</h1><p class="muted">管理关注的主题与用户，安排每一次采集。</p></div></header>
+{{template "background-notice" .Settings}}{{template "board" .}}{{template "footer" .}}
+</main></body></html>{{end}}
+
+{{define "board"}}
+<section data-filter-group>
+  <div class="toolbar">
+    <div class="segments js-only" aria-label="筛选监控类型"><button type="button" data-filter="all" aria-pressed="true">全部 <span>{{len .Data.Watches}}</span></button><button type="button" data-filter="tid" aria-pressed="false">主题</button><button type="button" data-filter="uid" aria-pressed="false">用户</button></div>
+    <label class="search-box js-only">{{template "icon" "search"}}<input type="search" data-search aria-label="搜索监控名称或 ID" placeholder="搜索名称、TID 或 UID"></label>
+    <a class="button" href="/admin/watches/new">{{template "icon" "plus"}}新建监控</a>
+  </div>
+  <p class="small muted filter-result js-only" data-filter-result aria-live="polite"></p>
+  <div class="kanban">
+  {{range .Columns}}<section class="board-column {{.Key}}">
+    <h2 class="board-column-title"><span><i class="status-dot"></i>{{.Title}}</span><span data-column-count>{{len .Watches}}</span></h2>
+    {{range .Watches}}<article class="watch-tile" data-filter-item data-kind="{{.Kind}}" data-search-text="{{.Title}} {{.Label}} {{.TID}} {{.UID}}">
+      <div class="tile-top"><span class="target-icon {{.Kind}}">{{if eq .Kind "uid"}}{{template "icon" "user"}}{{else}}{{template "icon" "thread"}}{{end}}</span><span class="mono muted">{{if eq .Kind "uid"}}UID {{.UID}}{{else}}TID {{.TID}}{{end}}</span></div>
+      <h3><a href="/admin/watches/{{.ID}}">{{watchTitle .}}</a></h3>
+      <p class="muted small">{{if .Label}}{{.Label}} · {{end}}基础间隔 {{.IntervalSeconds}} 秒</p>
+      <div class="tile-state">{{template "watch-status" .}}</div>
+      <p class="small muted">{{if .Paused}}恢复后继续采集{{else if ne .State "ready"}}请先处理账号凭据{{else if .NoFetch}}{{if .NoFetchUntil}}下次采集不早于 {{when .NoFetchUntil}}{{else}}每周全天免拉取{{end}}{{else if .NextRunAt}}下次 {{when .NextRunAt}}{{else}}等待调度{{end}}</p>
+      {{with .LastRun}}<p class="small muted">最近：{{status .Status}} · 新增 {{.Saved}} 条</p>{{end}}
+      <div class="tile-footer"><span class="small muted">{{if .BaselineComplete}}{{if eq .Kind "tid"}}水位 {{.CursorFloor}} 楼{{else}}基线已完成{{end}}{{else}}待初始化{{end}}</span>
+        <div class="actions compact"><a href="/admin/watches/{{.ID}}" class="text-link">详情 {{template "icon" "arrow"}}</a>
+        <form method="post" action="/admin/watches/{{.ID}}/run"><button class="icon-button" title="手动运行一次" aria-label="运行 {{watchTitle .}}" {{if or (not $.Settings.BackgroundEnabled) .Paused (ne .State "ready")}}disabled{{else}}{{with .LastRun}}{{if eq .Status "running"}}disabled{{end}}{{end}}{{end}}>{{template "icon" "play"}}</button></form></div>
+      </div>
+    </article>{{end}}
+    <p class="column-empty small muted" data-column-empty {{if .Watches}}hidden{{end}}>此状态下暂无监控</p>
+  </section>{{end}}
+  </div>
+</section>
+{{end}}
+
+{{define "watch-status"}}
+{{if .Paused}}<span class="badge gray">已暂停</span>
+{{else if ne .State "ready"}}<span class="badge amber">{{status .State}}</span>
+{{else if and .LastRun (eq .LastRun.Status "running")}}<span class="badge">采集中</span>
+{{else if .NoFetch}}<span class="badge amber">免拉取中{{if .NoFetchUntil}} · 至 {{when .NoFetchUntil}}{{end}}</span>
+{{else}}<span class="badge">{{if .BaselineComplete}}待采集{{else}}待初始化{{end}}</span>{{end}}
+{{end}}
+
+{{define "new-watch"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main" class="narrow">
+<header class="page-heading"><div><a class="back-link" href="/admin/watches">← 监控管理</a><h1>新建监控</h1><p class="muted">选择一个主题或用户，把后续动态留在这里。</p></div></header>
+{{template "background-notice" .Settings}}
+<nav class="tabs" aria-label="监控类型"><a href="/admin/watches/new?kind=tid" {{if eq .Kind "tid"}}aria-current="page"{{end}}>主题监控 · TID</a><a href="/admin/watches/new?kind=uid" {{if eq .Kind "uid"}}aria-current="page"{{end}}>用户监控 · UID</a></nav>
+<section class="card"><form method="post" action="/admin/watches">
+<input type="hidden" name="kind" value="{{.Kind}}">
+<div class="grid">{{if eq .Kind "uid"}}<label>用户 UID<input name="uid" type="number" min="1" required placeholder="填写用户资料中的 UID"></label>{{else}}<label>主题 TID<input name="tid" type="number" min="1" required placeholder="填写主题链接中的 tid"></label>{{end}}<label>备注<input name="label" placeholder="为这份关注起个名字"></label></div>
+{{if eq .Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>{{template "history-concurrency"}}{{else}}<p class="notice">首次只建立主题和回帖水位，不导入历史；可在详情中静默回填历史回复。</p>{{end}}
+<p class="small muted">首次运行建立静默基线，不发送历史通知。时段按 {{.Settings.Timezone}} 解释。</p>
+{{template "schedule"}}
+<fieldset class="channel-choices"><legend>通知渠道</legend><input type="hidden" name="notifications_present" value="1">{{range .Channels}}<label class="check"><input type="checkbox" name="channel_ids" value="{{.ID}}">{{.Name}} <span class="muted">· {{if .Enabled}}已启用{{else}}已关闭{{end}}</span></label>{{else}}<p class="small muted">暂无渠道，新内容仍会进入收件箱。可稍后在通知渠道页配置。</p>{{end}}</fieldset>
+{{if eq .Kind "tid"}}<label>作者 UID 白名单<input name="author_uids" placeholder="逗号分隔；留空表示全部作者"></label>{{end}}
+<div class="form-actions"><a href="/admin/watches" class="text-link">取消</a><button type="submit">{{template "icon" "plus"}}创建监控</button></div>
+</form></section>{{template "footer" .}}
+</main></body></html>{{end}}

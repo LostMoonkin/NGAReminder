@@ -45,9 +45,18 @@ type FeishuAppInfo struct {
 	AppID      string `json:"app_id"`
 }
 
-func (n *Notifications) Overview(ctx context.Context, page int) (data NotificationOverview, err error) {
+func (n *Notifications) Overview(ctx context.Context, page int) (NotificationOverview, error) {
+	return n.FilteredOverview(ctx, page, "all")
+}
+
+func (n *Notifications) FilteredOverview(ctx context.Context, page int, filter string) (data NotificationOverview, err error) {
 	ctx, span := logging.Start(ctx, "service.notification_overview")
 	defer span.End(&err)
+	switch filter {
+	case "all", "unread", "delivery", "alerts":
+	default:
+		return data, InvalidInput("收件箱筛选类型无效")
+	}
 	app, err := n.store.FeishuApp(ctx)
 	if err != nil {
 		return data, err
@@ -68,7 +77,7 @@ func (n *Notifications) Overview(ctx context.Context, page int) (data Notificati
 	if data.Alerts, err = n.store.Alerts(ctx, page); err != nil {
 		return data, err
 	}
-	data.Events, err = n.store.Inbox(ctx, page)
+	data.Events, err = n.store.FilteredInbox(ctx, page, filter)
 	return data, err
 }
 func (n *Notifications) AppCredentials(ctx context.Context) (app infrastructure.AppCredentials, err error) {

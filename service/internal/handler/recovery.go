@@ -44,7 +44,7 @@ func (h *Handler) startBackfill(c *gin.Context) {
 		c.JSON(202, result)
 		return
 	}
-	c.Redirect(303, fmt.Sprintf("/admin/watches/%d", id))
+	c.Redirect(303, fmt.Sprintf("/admin/watches/%d#recovery", id))
 }
 func (h *Handler) backfill(c *gin.Context) {
 	id, ok := h.id(c, "id")

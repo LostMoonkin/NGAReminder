@@ -1,0 +1,14 @@
+{{define "watch-config"}}
+  <form method="post" action="/admin/watches/{{.Data.Watch.ID}}">
+    <input type="hidden" name="kind" value="{{.Data.Watch.Kind}}">
+    <div class="grid">{{if eq .Data.Watch.Kind "uid"}}<label>UID<input name="uid" type="number" min="1" value="{{.Data.Watch.UID}}" required></label>{{else}}<label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label>{{end}}<label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
+    {{if eq .Data.Watch.Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>{{else}}<p>UID 首次运行与重置后只建立水位，不导入历史。</p>{{end}}
+    {{if eq .Data.Watch.Kind "tid"}}{{template "history-concurrency" .Data.Watch}}{{end}}
+    {{template "schedule" .Data.Watch}}
+    <input type="hidden" name="notifications_present" value="1">
+    <fieldset class="channel-choices"><legend>通知渠道</legend>{{range .Data.Channels}}<label class="check"><input type="checkbox" name="channel_ids" value="{{.ID}}" {{if containsID $.Data.Watch.ChannelIDs .ID}}checked{{end}}>{{.Name}} <span class="muted">· {{if .Enabled}}已启用{{else}}已关闭{{end}}</span></label>{{else}}<p class="small muted">暂无渠道，新内容仍会进入收件箱。</p>{{end}}</fieldset>
+    {{if eq .Data.Watch.Kind "tid"}}<label>作者 UID 白名单（逗号分隔，留空表示全部作者）<input name="author_uids" value="{{intlist .Data.Watch.AuthorUIDs}}"></label>{{end}}
+    <p class="small muted">未选渠道时仍将匹配的新内容放入收件箱；初始化和历史内容保持静默。</p>
+    <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改并发数、备注、频率或免拉取时段不影响水位。</p><div class="form-actions"><button type="submit">保存配置</button></div>
+  </form>
+{{end}}

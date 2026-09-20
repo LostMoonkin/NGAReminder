@@ -1,0 +1,45 @@
+{{define "account"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h1>设置 · NGA 账号</h1><p class="muted">管理连接与运行环境，让提醒稳定发生。</p></div></header>
+<div class="settings-layout">{{template "settings-nav" .}}<div class="settings-content">
+{{template "background-notice" .Settings}}
+  <section class="card" id="account">
+    <h2>NGA 账号 <span class="badge">{{status .Account.Status}}</span></h2>
+    <p class="muted">UID {{if .Account.UIDMasked}}{{.Account.UIDMasked}}{{else}}—{{end}} · 最近校验 {{when .Account.CheckedAt}}</p>
+    {{if .Account.LastError}}<p class="notice">{{.Account.LastError}}</p>{{end}}
+    <form method="post" action="/admin/nga-account" autocomplete="off">
+      <label>完整 Cookie<textarea name="cookie" spellcheck="false" placeholder="ngaPassportUid=…; ngaPassportCid=…"></textarea></label>
+      <p class="muted small">Cookie 不回显。先校验新凭据，成功后才替换；失败保留原凭据。也可留空 Cookie，手动填写以下两项。</p>
+      <div class="grid"><label>passport UID<input name="passport_uid" inputmode="numeric"></label><label>passport CID<input name="passport_cid" type="password" autocomplete="new-password"></label></div>
+      <button type="submit">校验并保存凭据</button>
+    </form>
+    <div class="actions">
+      <form method="post" action="/admin/nga-account/check"><button class="secondary">校验已保存凭据</button></form>
+      <form method="post" action="/admin/renewal/start"><button type="submit">手动续期</button></form>
+      <a class="text-link" href="/admin/renewal">续期设置与记录 →</a>
+    </div>
+    <p class="muted small">手动续期会向指定管理员发送飞书私聊确认。首次使用请先配置续期登录凭据和管理员。</p>
+  </section>
+
+</div></div>{{template "footer" .}}</main></body></html>{{end}}
+{{define "runtime"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h1>设置 · 运行配置</h1><p class="muted">管理连接与运行环境，让提醒稳定发生。</p></div></header>
+<div class="settings-layout">{{template "settings-nav" .}}<div class="settings-content">
+  <section class="card">
+    <h2>当前运行设置</h2>
+    <p class="muted">修改配置文件或环境变量后，重启服务生效。</p>
+    <dl>
+      <dt>监听地址</dt><dd><code>{{.Settings.ListenAddress}}</code></dd>
+      <dt>数据库</dt><dd><code>{{.Settings.DatabasePath}}</code></dd>
+      <dt>资源目录</dt><dd><code>{{.Settings.AssetsPath}}</code></dd>
+      <dt>日志目录</dt><dd><code>{{.Settings.LogsPath}}</code></dd>
+      <dt>单资源下载上限</dt><dd>{{.Settings.MaxDownloadBytes}} 字节</dd>
+      <dt>保存原始帖子 JSON</dt><dd>{{if .Settings.StoreRawPayload}}开启{{else}}关闭{{end}}</dd>
+      <dt>服务时区</dt><dd>{{.Settings.Timezone}}</dd>
+      <dt>当前时间</dt><dd>{{.Settings.CurrentTime}}</dd>
+      <dt>后台任务</dt><dd>{{if .Settings.BackgroundEnabled}}允许启动{{else}}关闭{{end}}</dd>
+    </dl>
+  </section>
+
+</div></div>{{template "footer" .}}</main></body></html>{{end}}

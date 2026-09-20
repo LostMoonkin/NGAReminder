@@ -16,6 +16,8 @@ Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实�
 
 文件日志与 SQL 分流见 [Spec14](spec/14-daily-file-logging.md)。
 
+管理台采用已选定的 B 方案：顶部导航与监控状态看板，见 [UI 重设计 Spec15](spec/15-admin-ui.md)。运行概览为 `/admin`；监控在 `/admin/watches`，内容在 `/admin/library`，收件箱在 `/admin/inbox`，通知渠道在 `/admin/channels`，账号与运行配置归入 `/admin/settings`。原有监控详情、正文、续期、Bot、资源及导出路由保留。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。

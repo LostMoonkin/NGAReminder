@@ -1,0 +1,43 @@
+{{define "library"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">SAVED CONTENT</p><h1>内容库</h1><p class="muted">让值得保留的讨论，成为随时可读的收藏。</p></div></header>
+<nav class="tabs" aria-label="内容分类"><a href="/admin/library" aria-current="page">已保存主题</a><a href="/admin/users">用户内容</a></nav>
+<section class="card" data-filter-group>
+<div class="section-heading"><div><h2>按主题浏览</h2><p class="small muted">删除监控后，已保存帖子仍会保留。</p></div><label class="search-box js-only">{{template "icon" "search"}}<input type="search" data-search placeholder="搜索主题名称或 TID" aria-label="搜索已保存主题"></label></div>
+<p class="small muted js-only" data-filter-result aria-live="polite"></p>
+<div class="scroll"><table><thead><tr><th>主题</th><th>已保存帖子</th><th>最近观察</th><th>内容</th></tr></thead><tbody>
+{{range .Data.Threads}}<tr data-filter-item data-search-text="{{.TID}} {{.Title}} {{.AuthorName}} {{.ForumName}}"><td class="table-title"><a href="/admin/threads/{{.TID}}">{{if .Title}}{{.Title}}{{else}}TID {{.TID}}{{end}}</a><span class="table-meta">TID {{.TID}} · {{.ForumName}} · {{.AuthorName}} · {{if eq .Coverage "full"}}主题元数据{{else}}局部元数据{{end}}</span></td><td>{{.Count}} 条</td><td class="small muted">{{when .LastSeenAt}}</td><td><a class="text-link" href="/admin/threads/{{.TID}}">阅读 {{template "icon" "arrow"}}</a></td></tr>
+{{else}}<tr><td colspan="4" class="empty">尚无保存内容，采集完成后会出现在这里。</td></tr>{{end}}
+</tbody></table></div>
+</section>{{template "footer" .}}</main></body></html>{{end}}
+
+{{define "users"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">SAVED CONTENT</p><h1>内容库</h1><p class="muted">按关注的用户，回看已保存的发言。</p></div></header>
+<nav class="tabs" aria-label="内容分类"><a href="/admin/library">已保存主题</a><a href="/admin/users" aria-current="page">用户内容</a></nav>
+<section class="card" data-filter-group><div class="section-heading"><div><h2>用户内容汇总</h2><p class="small muted">仅展示已监控用户的本地内容。</p></div><label class="search-box js-only">{{template "icon" "search"}}<input data-search type="search" placeholder="搜索昵称或 UID" aria-label="搜索用户内容"></label></div><p class="small muted js-only" data-filter-result aria-live="polite"></p>
+<div class="scroll"><table><thead><tr><th>用户</th><th>已保存帖子</th><th>涉及主题</th><th>最近发布时间</th><th>监控</th></tr></thead><tbody>
+{{range .Users}}<tr data-filter-item data-search-text="{{.UID}} {{.Username}}"><td class="table-title"><a href="/admin/users/{{.UID}}">{{if .Username}}{{.Username}}{{else}}UID {{.UID}}{{end}}</a><span class="table-meta">UID {{.UID}}</span></td><td>{{.PostCount}}</td><td>{{.ThreadCount}}</td><td class="small muted">{{when .LastPublishedAt}}</td><td><a class="text-link" href="/admin/watches/{{.WatchID}}">查看监控 {{template "icon" "arrow"}}</a></td></tr>{{else}}<tr><td colspan="5" class="empty">暂无 UID 监控</td></tr>{{end}}
+</tbody></table></div></section>{{template "footer" .}}</main></body></html>{{end}}
+
+{{define "posts"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main" class="reader">
+<header class="page-heading"><div><a class="back-link" href="{{if .Data.UID}}/admin/users{{else}}/admin/library{{end}}">← 内容库</a><h1>{{if .Data.UID}}UID {{.Data.UID}}{{else}}TID {{.Data.TID}}{{end}} · 已保存帖子</h1><p class="muted">共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div>
+<div class="actions"><form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><button class="secondary" name="format" value="markdown">{{template "icon" "download"}}下载 Markdown</button></form><form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><button name="format" value="zip">{{template "icon" "download"}}导出 ZIP</button></form></div></header>
+<div class="notice neutral">{{template "icon" "library"}}<p>{{if .Data.UID}}仅展示该用户已保存的内容，按主题分组。{{else}}正在阅读本地保存内容。{{end}}导出不会额外抓取正文，ZIP 包含已下载的相关资源。</p></div>
+<section class="card">
+{{$tid := 0}}
+{{range .Data.Posts}}{{if ne $tid .TID}}<h2>TID {{.TID}} {{.Subject}}</h2>{{$tid = .TID}}{{end}}<article class="post">
+<div class="post-meta"><strong>{{if eq .Kind "main"}}主楼{{else if eq .Kind "comment"}}{{.ParentFloor}} 楼下的评论{{else}}{{.Floor}} 楼{{end}} · {{.Author}}</strong><span class="muted">UID {{.AuthorUID}} · PID {{.PID}} · {{when .PublishedAt}}</span></div>
+{{if .Subject}}<p>{{.Subject}}</p>{{end}}<div class="post-body">{{rich .Body .Resources}}</div>
+<a class="text-link" href="{{.WebURL}}" target="_blank" rel="noreferrer">NGA 原帖 {{template "icon" "external"}}</a>
+{{if .ParentKey}}<p class="small muted">父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}</p>{{end}}
+{{if .Resources}}<details><summary>资源地址（{{len .Resources}}）</summary>{{range .Resources}}<p class="small"><a href="{{.}}" target="_blank" rel="noreferrer">{{.}}</a></p>{{end}}</details>{{end}}
+</article>{{else}}<div class="empty"><h2>还没有保存内容</h2><p>从现在开始的基线不会导入旧楼层，后续采集的内容会出现在这里。</p></div>{{end}}
+<nav class="pagination" aria-label="帖子分页"><span>第 {{.Data.Page}} 页 · 共 {{.Data.Total}} 条</span><div class="pagination-links">{{if .Previous}}<a href="?page={{.Previous}}">← 上一页</a>{{end}}{{if .Next}}<a href="?page={{.Next}}">下一页 →</a>{{end}}</div></nav>
+</section><details class="card"><summary>相关采集记录</summary>{{template "runs" .Data.Runs}}</details>
+{{template "footer" .}}</main></body></html>{{end}}
+
+{{define "problem"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main" class="narrow">
+<section class="card"><h1>操作未完成</h1><p class="notice">{{.Message}}</p><p class="small muted">可通过顶部导航返回相应页面，检查参数或运行状态后重试。</p><div class="actions"><a class="text-link" href="/admin/watches">监控管理 {{template "icon" "arrow"}}</a><a class="text-link" href="/admin/settings">账号设置 {{template "icon" "arrow"}}</a></div></section>{{template "footer" .}}</main></body></html>{{end}}

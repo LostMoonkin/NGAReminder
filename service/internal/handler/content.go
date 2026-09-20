@@ -96,7 +96,12 @@ func (h *Handler) resources(c *gin.Context) {
 		c.JSON(200, data)
 		return
 	}
-	h.render(c, 200, "resources", gin.H{"Data": data, "TraceID": logging.TraceID(c.Request.Context())})
+	settings, err := h.admin.Settings(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	h.render(c, 200, "resources", gin.H{"Data": data, "Settings": settings, "TraceID": logging.TraceID(c.Request.Context())})
 }
 func (h *Handler) saveResourceSettings(c *gin.Context) {
 	var input struct {

@@ -123,11 +123,23 @@ func (s *Store) Enqueue(ctx context.Context, eventID int64, channel Channel) (er
 	defer span.End(&err)
 	return logging.Wrap(s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Delivery{EventID: eventID, ChannelID: channel.ID, ChannelName: channel.Name, Status: "pending", NextAttempt: time.Now().UTC()}).Error, "enqueue notification")
 }
-func (s *Store) Inbox(ctx context.Context, page int) (items []InboxEvent, err error) {
+func (s *Store) Inbox(ctx context.Context, page int) ([]InboxEvent, error) {
+	return s.FilteredInbox(ctx, page, "all")
+}
+
+// 先筛选再分页，避免“未读”只筛选当前 50 条而漏掉更早的事件。
+func (s *Store) FilteredInbox(ctx context.Context, page int, filter string) (items []InboxEvent, err error) {
 	ctx, span := logging.Start(ctx, "repository.inbox")
 	defer span.End(&err)
 	items = []InboxEvent{}
-	if err = s.db.WithContext(ctx).Order("id DESC").Offset((page - 1) * 50).Limit(50).Find(&items).Error; err != nil {
+	query := s.db.WithContext(ctx)
+	switch filter {
+	case "unread":
+		query = query.Where("read = ?", false)
+	case "delivery":
+		query = query.Where("EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = inbox_events.id AND d.status IN ?)", []string{"pending", "failed"})
+	}
+	if err = query.Order("id DESC").Offset((page - 1) * 50).Limit(50).Find(&items).Error; err != nil {
 		return nil, logging.Wrap(err, "read inbox")
 	}
 	for i := range items {

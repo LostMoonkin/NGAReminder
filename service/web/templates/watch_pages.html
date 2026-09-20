@@ -1,0 +1,29 @@
+{{define "watch"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><a class="back-link" href="/admin/watches">← 监控管理</a><h1>{{watchTitle .Data.Watch}}</h1><p class="muted">{{if eq .Data.Watch.Kind "uid"}}UID {{.Data.Watch.UID}}{{else}}TID {{.Data.Watch.TID}}{{end}} · {{.Data.Watch.Label}}</p></div>
+<div class="actions">
+{{if .Data.Watch.Paused}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/resume"><button class="secondary">恢复监控</button></form>{{else}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/pause"><button class="secondary">暂停监控</button></form>{{end}}
+<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button {{if or (not .Data.BackgroundEnabled) .Data.Watch.Paused (ne .Data.Watch.State "ready")}}disabled{{else}}{{with .Data.Watch.LastRun}}{{if eq .Status "running"}}disabled{{end}}{{end}}{{end}}>{{template "icon" "play"}}手动运行一次</button></form>
+</div></header>
+{{template "background-notice" .Data}}
+{{range .Data.Runs}}{{if eq .Status "running"}}<span hidden data-auto-refresh></span>{{end}}{{end}}
+<div data-tabs>
+<nav class="tabs" data-tab-nav aria-label="监控详情">
+<a id="tab-overview" href="#overview" aria-controls="overview">监控概况</a><a id="tab-configuration" href="#configuration" aria-controls="configuration">采集配置</a><a id="tab-runs" href="#runs" aria-controls="runs">运行记录</a><a id="tab-recovery" href="#recovery" aria-controls="recovery">{{if eq .Data.Watch.Kind "uid"}}历史回填{{else}}楼层补偿{{end}}</a>
+</nav>
+<section id="overview" data-tab-panel aria-labelledby="tab-overview" class="tab-panel">
+<div class="watch-overview"><section class="card">
+<div class="section-heading"><h2>采集状态</h2>{{template "watch-status" .Data.Watch}}</div>
+<dl><dt>初始化与水位</dt><dd>{{template "watermark" .Data.Watch}}</dd><dt>采集间隔</dt><dd>基础间隔 {{.Data.Watch.IntervalSeconds}} 秒</dd><dt>免拉取时段</dt><dd>{{template "no-fetch" .Data.Watch}}</dd><dt>下次执行</dt><dd>{{if or .Data.Watch.Paused (ne .Data.Watch.State "ready")}}暂停{{else if .Data.Watch.NoFetch}}{{if .Data.Watch.NoFetchUntil}}不早于 {{when .Data.Watch.NoFetchUntil}}{{else}}每周全天免拉取{{end}}{{else if .Data.Watch.NextRunAt}}{{when .Data.Watch.NextRunAt}}{{else}}等待调度{{end}}</dd><dt>时区</dt><dd>{{.Data.Timezone}}</dd></dl>
+<details class="danger-zone"><summary>重置基线或删除监控</summary><p class="small muted">已保存的内容会保留；重置基线会清除旧缺口，删除监控会停止后续采集。</p>
+<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/reset" data-confirm="重建此监控的基线？已有楼层缺口记录将清除，已保存内容保留。">{{if eq .Data.Watch.Kind "tid"}}<label>重建模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>{{end}}<button class="secondary">重置基线（保留帖子）</button></form>
+<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/delete" class="actions" data-confirm="删除这项监控？后续采集将停止，已保存帖子继续保留在内容库中。"><button class="danger">删除监控（保留帖子）</button></form>
+</details></section>
+<aside><section class="card"><span class="target-icon">{{template "icon" "library"}}</span><h2 style="margin-top:16px">已保存内容</h2><p class="small muted">阅读已收录的帖子，或导出一份本地副本。</p><div class="actions">{{if eq .Data.Watch.Kind "tid"}}<a class="text-link" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子 {{template "icon" "arrow"}}</a>{{else}}<a class="text-link" href="/admin/users/{{.Data.Watch.UID}}">查看用户帖子 {{template "icon" "arrow"}}</a>{{end}}</div></section>
+<section class="card"><h2>关于手动运行</h2><p class="small muted">可绕过免拉取时段；手动暂停后需先恢复。认证暂停需要先修复账号凭据。</p><p class="small muted">运行期间自动更新结果；编辑配置时停止刷新。</p></section></aside></div>
+</section>
+<section id="configuration" data-tab-panel aria-labelledby="tab-configuration" class="tab-panel card"><h2>监控配置</h2>{{template "watch-config" .}}</section>
+<section id="runs" data-tab-panel aria-labelledby="tab-runs" class="tab-panel card run-list">{{template "runs" .Data.Runs}}</section>
+<section id="recovery" data-tab-panel aria-labelledby="tab-recovery" class="tab-panel">{{template "recovery" .Data}}</section>
+</div>{{template "footer" .}}
+</main></body></html>{{end}}

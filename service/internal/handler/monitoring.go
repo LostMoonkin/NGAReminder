@@ -72,7 +72,7 @@ func (h *Handler) saveAccount(c *gin.Context) {
 		h.problem(c, err)
 		return
 	}
-	h.respond(c, http.StatusOK, data, "/admin#account")
+	h.respond(c, http.StatusOK, data, "/admin/settings")
 }
 
 func (h *Handler) checkAccount(c *gin.Context) {
@@ -81,7 +81,7 @@ func (h *Handler) checkAccount(c *gin.Context) {
 		h.problem(c, err)
 		return
 	}
-	h.respond(c, http.StatusOK, data, "/admin#account")
+	h.respond(c, http.StatusOK, data, "/admin/settings")
 }
 
 func (h *Handler) saveWatch(c *gin.Context) {
@@ -117,7 +117,11 @@ func (h *Handler) saveWatch(c *gin.Context) {
 	if id == 0 {
 		status = http.StatusCreated
 	}
-	h.respond(c, status, watch, fmt.Sprintf("/admin/watches/%d", watch.ID))
+	destination := fmt.Sprintf("/admin/watches/%d", watch.ID)
+	if id != 0 {
+		destination += "#configuration"
+	}
+	h.respond(c, status, watch, destination)
 }
 
 func (h *Handler) watch(c *gin.Context) {
@@ -133,6 +137,9 @@ func (h *Handler) watch(c *gin.Context) {
 	if isAPI(c) {
 		c.JSON(http.StatusOK, data)
 		return
+	}
+	if len(data.Runs) > 0 {
+		data.Watch.LastRun = &data.Runs[0]
 	}
 	h.render(c, http.StatusOK, "watch", gin.H{"Data": data, "TraceID": logging.TraceID(c.Request.Context())})
 }
@@ -151,7 +158,7 @@ func (h *Handler) watchAction(action string) gin.HandlerFunc {
 				return
 			}
 			c.Header("Location", fmt.Sprintf("/api/v1/runs/%d", run.ID))
-			h.respond(c, http.StatusAccepted, run, destination)
+			h.respond(c, http.StatusAccepted, run, destination+"#runs")
 			return
 		}
 		var input struct {
@@ -169,7 +176,7 @@ func (h *Handler) watchAction(action string) gin.HandlerFunc {
 			return
 		}
 		if action == "delete" {
-			destination = "/admin"
+			destination = "/admin/watches"
 		}
 		h.respond(c, http.StatusOK, watch, destination)
 	}

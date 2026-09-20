@@ -1,34 +1,41 @@
-{{define "notifications"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
-<header><div><p class="brand">NGA REMINDER</p><h1>通知与收件箱</h1></div><a href="/admin">返回概览</a></header>
-<section class="card"><h2>飞书应用 {{if .Data.App.Configured}}<span class="badge">已配置</span>{{else}}<span class="muted">· 未配置</span>{{end}}</h2>
-<p class="muted">所有飞书通知目标共用同一个自建应用；需开启机器人能力并授予发送消息、上传图片权限。App Secret 不回显，修改时留空保留。</p>
-<form method="post" action="/admin/feishu-app" autocomplete="off" data-feishu-app>
-  {{if .Data.App.Configured}}<p class="small muted" data-feishu-hint>应用已保存，点击“修改”后才能编辑。</p>{{end}}
-  <fieldset {{if .Data.App.Configured}}disabled{{end}}>
-    <label>App ID<input name="app_id" value="{{.Data.App.AppID}}" spellcheck="false"></label>
-    <label>App Secret<input type="password" name="app_secret" autocomplete="new-password" {{if .Data.App.Configured}}placeholder="已配置，留空保留原 Secret"{{end}}></label>
-  </fieldset>
-  <div class="actions">
-    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-edit>修改</button>{{end}}
-    <button type="submit" data-feishu-save {{if .Data.App.Configured}}hidden disabled{{end}}>保存应用</button>
-    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-cancel hidden>取消</button>{{end}}
-  </div>
-</form></section>
-<section class="card"><h2>通知渠道</h2><p class="muted">设备 key、服务地址及接收 ID 加密保存，不回显。关闭渠道同时暂停新增投递和已有记录的重试。</p>
-{{range .Data.Channels}}<article><p><strong>#{{.ID}} {{.Name}}</strong> · {{.Kind}} · {{if .Enabled}}已启用{{else}}已关闭{{end}}</p>
-<div class="actions"><form method="post" action="/admin/channels/{{.ID}}/test"><button>测试通知</button></form><form method="post" action="/admin/channels/{{.ID}}/{{if .Enabled}}disable{{else}}enable{{end}}"><button class="secondary">{{if .Enabled}}关闭{{else}}启用{{end}}</button></form><form method="post" action="/admin/channels/{{.ID}}/delete"><button class="danger">删除（须先解除监控引用）</button></form></div>
-<details><summary>修改渠道</summary><form method="post" action="/admin/channels/{{.ID}}"><input type="hidden" name="kind" value="{{.Kind}}"><input type="hidden" name="enabled" value="{{.Enabled}}"><label>名称<input name="name" value="{{.Name}}" required></label>{{template "channel-fields" .Kind}}<p class="muted small">密钥和接收地址留空保留；分组按本次填写更新。</p><button>保存修改</button></form></details></article>{{else}}<p>尚无通知渠道。</p>{{end}}
-<details><summary>新增 Bark</summary><form method="post" action="/admin/channels"><input type="hidden" name="kind" value="bark"><input type="hidden" name="enabled" value="true"><label>名称<input name="name" required></label>{{template "channel-fields" "bark"}}<button>添加 Bark</button></form></details>
-<details><summary>新增飞书接收者</summary><form method="post" action="/admin/channels"><input type="hidden" name="kind" value="feishu"><input type="hidden" name="enabled" value="true"><label>名称<input name="name" required></label>{{template "channel-fields" "feishu"}}<button>添加飞书目标</button></form></details>
-<p><a href="/admin">在监控详情中选择渠道与作者白名单</a></p></section>
-<section class="card"><h2>系统告警</h2>
-{{range .Data.Alerts}}<article><strong>{{.Title}}</strong> · {{if .ResolvedAt}}已解除{{else}}待处理{{end}}<p>{{.Body}}</p><p>{{when .CreatedAt}}</p>
-{{$open := not .ResolvedAt}}{{range .Deliveries}}<p>{{.ChannelName}} · {{status .Status}} · {{.Attempts}}/5 · {{.Error}}</p>{{if and $open (ne .Status "sent")}}<form method="post" action="/admin/deliveries/{{.ID}}/retry"><button>重新投递</button></form>{{end}}{{end}}</article>{{else}}<p>暂无系统告警。</p>{{end}}
-{{if eq (len .Data.Alerts) 50}}<a href="?page={{.Next}}">下一页告警</a>{{end}}
-</section><section class="card" id="inbox"><h2>收件箱 · 第 {{.Page}} 页</h2>
-{{range .Data.Events}}<article><p><strong>#{{.ID}} {{if .Read}}已读{{else}}未读{{end}} · {{.Post.Subject}}</strong></p><p>{{.Post.Author}} · {{when .Post.PublishedAt}} · TID {{.Post.TID}} / PID {{.Post.PID}}</p><pre>{{summary .Post.Body 500}}</pre><p><a href="{{.Post.WebURL}}" target="_blank" rel="noreferrer">NGA 原帖</a> · <a href="/admin/threads/{{.Post.TID}}">已保存内容</a></p><p class="small">来源：{{range .Sources}}监控 #{{.WatchID}} {{.Label}}；{{end}}</p>
-<form method="post" action="/admin/inbox/{{.ID}}/{{if .Read}}unread{{else}}read{{end}}"><button class="secondary">标记{{if .Read}}未读{{else}}已读{{end}}</button></form>
-{{range .Deliveries}}<p>{{.ChannelName}} · {{status .Status}} · 已尝试 {{.Attempts}}/5 次{{if .Error}} · {{.Error}}{{end}}</p>{{if ne .Status "sent"}}<form method="post" action="/admin/deliveries/{{.ID}}/retry"><button class="secondary">重新投递</button></form>{{end}}<p class="small muted">关联 ID：{{.TraceID}}</p>{{else}}<p class="small muted">未选择启用的通知渠道。</p>{{end}}</article>{{else}}<p>暂无匹配的新内容。</p>{{end}}
-<nav class="actions">{{if .Previous}}<a href="?page={{.Previous}}#inbox">上一页</a>{{end}}{{if eq (len .Data.Events) 50}}<a href="?page={{.Next}}#inbox">下一页</a>{{end}}</nav></section>
-<footer>关联 ID：{{.TraceID}}</footer></main></body></html>{{end}}
-{{define "channel-fields"}}{{if eq . "bark"}}<label>服务地址<input name="server_url" placeholder="https://api.day.app"></label><label>设备 key<input name="device_key" type="password" autocomplete="new-password"></label><label>分组<input name="group" placeholder="NGA Reminder"></label>{{else}}<label>接收 ID 类型<select name="receive_id_type"><option value="">默认 chat_id / 保留现有类型</option><option>chat_id</option><option>open_id</option><option>user_id</option><option>union_id</option><option>email</option></select></label><label>接收 ID<input name="receive_id" type="password" autocomplete="new-password"></label>{{end}}{{end}}
+{{define "notifications"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">INBOX</p><h1>收件箱</h1><p class="muted">阅读新动态，也清楚每一条通知的去向。</p></div></header>
+<nav class="tabs" aria-label="收件箱分类"><a href="/admin/inbox?filter=all" {{if eq .Filter "all"}}aria-current="page"{{end}}>全部消息</a><a href="/admin/inbox?filter=unread" {{if eq .Filter "unread"}}aria-current="page"{{end}}>未读</a><a href="/admin/inbox?filter=delivery" {{if eq .Filter "delivery"}}aria-current="page"{{end}}>待处理投递</a><a href="/admin/inbox?filter=alerts" {{if eq .Filter "alerts"}}aria-current="page"{{end}}>系统告警</a></nav>
+{{if eq .Filter "alerts"}}
+<section class="card"><h2>系统告警</h2><p class="small muted">账号认证及后台服务的重要事件。</p>
+{{range .Data.Alerts}}<article class="post">
+<div class="section-heading"><h3>{{.Title}}</h3><span class="badge {{if .ResolvedAt}}gray{{else}}amber{{end}}">{{if .ResolvedAt}}已解除{{else}}待处理{{end}}</span></div>
+<p>{{.Body}}</p><p class="small muted">{{when .CreatedAt}}</p>
+{{$open := not .ResolvedAt}}{{range .Deliveries}}<div class="delivery"><strong>{{.ChannelName}}</strong> · {{status .Status}} · {{.Attempts}} / 5 次
+{{if .Error}}<p>{{.Error}}</p>{{end}}
+{{if and $open (ne .Status "sent")}}<form method="post" action="/admin/deliveries/{{.ID}}/retry" class="actions">{{template "inbox-return" $}}<button class="secondary">重新投递</button></form>{{end}}
+</div>{{end}}
+<div class="actions"><a class="text-link" href="/admin/settings">查看账号状态 {{template "icon" "arrow"}}</a></div>
+</article>{{else}}<div class="empty">暂无系统告警。</div>{{end}}
+<nav class="pagination" aria-label="告警分页"><span>第 {{.Page}} 页</span><div class="pagination-links">{{if .Previous}}<a href="?filter=alerts&page={{.Previous}}">← 上一页</a>{{end}}{{if eq (len .Data.Alerts) 50}}<a href="?filter=alerts&page={{.Next}}">下一页 →</a>{{end}}</div></nav>
+</section>
+{{else}}
+{{if .Event}}<div class="inbox-layout" id="inbox">
+<nav class="message-list" aria-label="消息列表">{{range .Data.Events}}
+<a class="message-preview" href="/admin/inbox?filter={{$.Filter}}&page={{$.Page}}&event={{.ID}}" {{if eq $.Event.ID .ID}}aria-current="true"{{end}}><span class="small muted">{{.Post.Author}} · {{when .Post.PublishedAt}}</span><h3>{{if not .Read}}<i class="status-dot"></i> {{end}}{{if .Post.Subject}}{{.Post.Subject}}{{else}}TID {{.Post.TID}} · 新回复{{end}}</h3><p>{{summary .Post.Body 120}}</p></a>
+{{end}}</nav>
+{{with .Event}}<article class="message-body">
+<div class="section-heading"><span class="badge {{if .Read}}gray{{end}}">{{if .Read}}已读{{else}}未读{{end}}</span><form method="post" action="/admin/inbox/{{.ID}}/{{if .Read}}unread{{else}}read{{end}}">{{template "inbox-return" $}}<button class="secondary">标记{{if .Read}}未读{{else}}已读{{end}}</button></form></div>
+<h2>{{if .Post.Subject}}{{.Post.Subject}}{{else}}TID {{.Post.TID}} · 新回复{{end}}</h2>
+<p class="small muted">{{.Post.Author}} · {{when .Post.PublishedAt}} · TID {{.Post.TID}} / PID {{.Post.PID}}</p>
+<div class="message-text">{{summary .Post.Body 1500}}</div>
+<div class="actions"><a class="text-link" href="/admin/threads/{{.Post.TID}}">阅读已保存内容 {{template "icon" "arrow"}}</a><a class="text-link" href="{{.Post.WebURL}}" target="_blank" rel="noreferrer">NGA 原帖 {{template "icon" "external"}}</a></div>
+<details><summary>来源监控</summary>{{range .Sources}}<p class="small">监控 #{{.WatchID}} · {{.Label}}</p>{{end}}</details>
+<div class="danger-zone"><h3>通知投递</h3>{{range .Deliveries}}<div class="delivery">
+<div class="section-heading"><strong>{{.ChannelName}}</strong><span class="badge {{if ne .Status "sent"}}amber{{end}}">{{status .Status}}</span></div>
+<p>已尝试 {{.Attempts}} / 5 次{{if .Error}} · {{.Error}}{{end}}</p>
+{{if ne .Status "sent"}}<form method="post" action="/admin/deliveries/{{.ID}}/retry" class="actions">{{template "inbox-return" $}}<button class="secondary">重新投递</button></form>{{end}}
+<details><summary>诊断信息</summary><p class="mono">关联 ID：{{.TraceID}}</p></details>
+</div>{{else}}<p class="small muted">未选择启用的通知渠道。</p>{{end}}</div>
+</article>{{end}}
+</div>{{else}}<section class="card empty"><h2>这里暂时没有消息</h2><p>{{if eq .Filter "unread"}}当前没有未读内容。{{else if eq .Filter "delivery"}}当前没有待处理的投递。{{else}}匹配的新内容会出现在这里，初始化与历史回填保持静默。{{end}}</p></section>{{end}}
+<nav class="pagination" aria-label="消息分页"><span>第 {{.Page}} 页 · 每页最多 50 条</span><div class="pagination-links">{{if .Previous}}<a href="?filter={{.Filter}}&page={{.Previous}}">← 上一页</a>{{end}}{{if eq (len .Data.Events) 50}}<a href="?filter={{.Filter}}&page={{.Next}}">下一页 →</a>{{end}}</div></nav>
+{{end}}{{template "footer" .}}</main></body></html>{{end}}
+
+{{define "inbox-return"}}<input type="hidden" name="return_page" value="{{.Page}}"><input type="hidden" name="return_filter" value="{{.Filter}}">{{with .Event}}<input type="hidden" name="return_event" value="{{.ID}}">{{end}}{{end}}

@@ -1,142 +1,3 @@
-{{define "head"}}
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>NGA Reminder · 管理台</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #f4f6f8; color: #1f2937; font: 15px/1.65 system-ui, sans-serif; }
-  main { width: min(920px, 100% - 40px); margin: 64px auto; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 28px; }
-  h1, h2, p { margin: 0 0 12px; }
-  h1 { font-size: 26px; letter-spacing: -.7px; }
-  h2 { font-size: 17px; }
-  .brand { color: #617080; font-size: 13px; letter-spacing: .08em; }
-  .muted { color: #657282; }
-  .card { background: white; border: 1px solid #dde3ea; border-radius: 12px; padding: 26px; margin-bottom: 20px; }
-  button, .button { display: inline-block; background: #245a83; color: white; border: 0; border-radius: 7px; padding: 10px 18px; font: inherit; cursor: pointer; text-decoration: none; }
-  button:hover, .button:hover { background: #194568; }
-  .secondary { background: #e9eef3; color: #33475c; }
-  .secondary:hover { background: #dbe4ed; }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 13px; background: #e3f3eb; color: #246746; }
-  .notice { padding: 13px 16px; background: #fff6df; border-radius: 7px; margin-bottom: 18px; color: #71551e; }
-  dl { margin: 0; display: grid; grid-template-columns: 160px 1fr; }
-  dt, dd { margin: 0; padding: 12px 0; border-bottom: 1px solid #edf0f4; }
-  dt { color: #657282; } dd { overflow-wrap: anywhere; }
-  code { font-size: 13px; overflow-wrap: anywhere; }
-  footer { color: #758190; font-size: 12px; overflow-wrap: anywhere; }
-  a { color: #245a83; } input, textarea, select { width: 100%; padding: 9px 11px; border: 1px solid #bdc9d5; border-radius: 6px; font: inherit; background: white; color: inherit; }
-  label { display: block; margin: 10px 0; } textarea { min-height: 80px; } .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 14px; } .actions form { margin: 0; } .danger { background: #983d3d; }
-  [data-feishu-app] fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
-  [data-feishu-app] fieldset:disabled input { background: #f4f6f8; color: #33475c; }
-  [data-feishu-app] [hidden] { display: none; }
-  .scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 12px 9px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 12px 0; background: #f4f6f8; padding: 16px; border-radius: 6px; }
-  article + article { border-top: 1px solid #dde3ea; padding-top: 20px; } .small { font-size: 13px; } details { margin-top: 14px; } summary { cursor: pointer; }
-  @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; flex-direction: column; } .card { padding: 20px; } dl { grid-template-columns: 1fr; } dt { padding-bottom: 0; border: 0; } }
-.post-body img{max-width:100%;height:auto}.post-body blockquote{border-left:3px solid #a1b2c4;padding-left:1em;margin-left:0}.post-body pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
-<script>
-document.addEventListener('click', event => {
-  const appAction = event.target.closest('[data-feishu-edit], [data-feishu-cancel]');
-  if (appAction) {
-    const form = appAction.closest('[data-feishu-app]');
-    const editing = appAction.hasAttribute('data-feishu-edit');
-    if (!editing) form.reset();
-    form.querySelector('fieldset').disabled = !editing;
-    form.querySelector('[data-feishu-edit]').hidden = editing;
-    form.querySelector('[data-feishu-save]').hidden = !editing;
-    form.querySelector('[data-feishu-save]').disabled = !editing;
-    form.querySelector('[data-feishu-cancel]').hidden = !editing;
-    form.querySelector('[data-feishu-hint]').textContent = editing
-      ? '正在修改应用配置，保存后生效。'
-      : '应用已保存，点击“修改”后才能编辑。';
-    (editing ? form.elements.app_id : form.querySelector('[data-feishu-edit]')).focus();
-  }
-  const add = event.target.closest('[data-add-rule]');
-  if (add) {
-    const group = add.closest('[data-rule-group]');
-    group.querySelector('[data-rule-list]').append(group.querySelector('template').content.cloneNode(true));
-  }
-  const remove = event.target.closest('[data-remove-rule]');
-  if (remove) remove.closest('[data-rule-row]').remove();
-});
-</script>
-{{end}}
-{{define "admin"}}<!doctype html>
-<html lang="zh-CN"><head>{{template "head"}}</head><body>
-<main>
-  <header>
-    <div><p class="brand">NGA REMINDER</p><h1>运行概览</h1><span class="badge">服务运行中 · SQLite 可用</span></div>
-    <div class="actions"><a class="button secondary" href="/admin/notifications">通知与收件箱</a><a class="button secondary" href="/admin/bot">飞书 Bot</a><a class="button secondary" href="/admin">刷新</a></div>
-  </header>
-  {{if not .Settings.BackgroundEnabled}}<div class="notice">后台任务已关闭。当前可检查配置和数据；凭据校验、手动采集及自动任务均已停用，不会访问 NGA。</div>{{end}}
-  <section class="card" id="account">
-    <h2>NGA 账号 <span class="badge">{{status .Data.Account.Status}}</span></h2>
-    <p class="muted">UID {{if .Data.Account.UIDMasked}}{{.Data.Account.UIDMasked}}{{else}}—{{end}} · 最近校验 {{when .Data.Account.CheckedAt}}</p>
-    {{if .Data.Account.LastError}}<p class="notice">{{.Data.Account.LastError}}</p>{{end}}
-    <form method="post" action="/admin/nga-account" autocomplete="off">
-      <label>完整 Cookie<textarea name="cookie" spellcheck="false" placeholder="ngaPassportUid=…; ngaPassportCid=…"></textarea></label>
-      <p class="muted small">Cookie 不回显。先校验新凭据，成功后才替换；失败保留原凭据。也可留空 Cookie，手动填写以下两项。</p>
-      <div class="grid"><label>passport UID<input name="passport_uid" inputmode="numeric"></label><label>passport CID<input name="passport_cid" type="password" autocomplete="new-password"></label></div>
-      <button type="submit">校验并保存凭据</button>
-    </form>
-    <div class="actions">
-      <form method="post" action="/admin/nga-account/check"><button class="secondary">校验已保存凭据</button></form>
-      <form method="post" action="/admin/renewal/start"><button type="submit">手动续期</button></form>
-      <a class="button secondary" href="/admin/renewal">续期设置与记录</a>
-    </div>
-    <p class="muted small">手动续期会向指定管理员发送飞书私聊确认。首次使用请先配置续期登录凭据和管理员。</p>
-  </section>
-  <section class="card">
-    <h2>TID / UID 监控</h2>
-    <p class="muted">按配置间隔自动采集，同一时间只执行一个任务。时段按 {{.Settings.Timezone}} 解释；手动运行可绕过免拉取，但需先恢复手动暂停。</p>
-    <div class="scroll"><table><thead><tr><th>目标 / 备注</th><th>状态 / 水位</th><th>最近结果 / 下次执行</th><th></th></tr></thead><tbody>
-      {{range .Data.Watches}}<tr><td>{{if eq .Kind "uid"}}UID {{.UID}}{{else}}TID {{.TID}}{{end}}<br>{{.Label}}<br><span class="small muted">{{.Title}}</span></td>
-      <td>{{if .Paused}}已暂停 · {{end}}{{status .State}}<br>{{template "watermark" .}}<br>{{template "no-fetch" .}}</td>
-      <td>{{with .LastRun}}<span>{{status .Source}} · {{status .Status}} · 新增 {{.Saved}} 条</span><br><span class="small muted">{{when .FinishedAt}}</span>{{else}}尚未运行{{end}}<br>下次：{{if or .Paused (ne .State "ready")}}暂停{{else if .NextRunAt}}{{when .NextRunAt}}{{else if .NoFetch}}每周全天免拉取{{else}}等待调度{{end}}</td>
-      <td><a href="/admin/watches/{{.ID}}">配置与运行</a></td></tr>{{else}}<tr><td colspan="4">还没有监控。</td></tr>{{end}}
-    </tbody></table></div>
-    <details><summary>新增 TID 监控</summary><form method="post" action="/admin/watches">
-      <input type="hidden" name="kind" value="tid">
-      <div class="grid"><label>TID<input name="tid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
-      <label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>
-      {{template "history-concurrency"}}
-      <p class="small muted">首次运行建立静默基线。从现在开始以首次运行成功时的水位为界，不导入旧楼层。</p>
-      <p class="small muted">增量仅检查首页和新增内容所在的尾部页面，不重拉全部历史；旧楼新评论只在本轮访问到的页面中采集。</p>
-      {{template "schedule"}}
-      <button>创建 TID 监控</button>
-    </form></details>
-    <details><summary>新增 UID 监控</summary><form method="post" action="/admin/watches">
-      <input type="hidden" name="kind" value="uid">
-      <div class="grid"><label>UID<input name="uid" type="number" min="1" required></label><label>备注<input name="label"></label></div>
-      <p class="small muted">首次只建立主题和回帖水位，不导入历史；后续只保存该用户的新主楼与新回帖。</p>
-      {{template "schedule"}}
-      <button>创建 UID 监控</button>
-    </form></details>
-  </section>
-  <section class="card" id="saved-threads">
-    <h2>已保存主题</h2><p><a href="/admin/users">用户内容汇总</a></p><p class="muted">删除监控后，已保存帖子仍可在这里浏览。</p>
-    {{range .Data.Threads}}<p><a href="/admin/threads/{{.TID}}">TID {{.TID}} {{.Title}}</a> · {{.Count}} 条 · {{.ForumName}} · {{.AuthorName}} · {{if eq .Coverage "full"}}主题元数据{{else}}局部元数据{{end}} · {{when .LastSeenAt}}</p>{{else}}<p>尚无主题。</p>{{end}}
-  </section>
-  <section class="card">
-    <h2>当前运行设置</h2>
-    <p class="muted">修改配置文件或环境变量后，重启服务生效。</p>
-    <dl>
-      <dt>监听地址</dt><dd><code>{{.Settings.ListenAddress}}</code></dd>
-      <dt>数据库</dt><dd><code>{{.Settings.DatabasePath}}</code></dd>
-      <dt>资源目录</dt><dd><code>{{.Settings.AssetsPath}}</code></dd>
-      <dt>日志目录</dt><dd><code>{{.Settings.LogsPath}}</code></dd>
-      <dt>单资源下载上限</dt><dd>{{.Settings.MaxDownloadBytes}} 字节</dd>
-      <dt>保存原始帖子 JSON</dt><dd>{{if .Settings.StoreRawPayload}}开启{{else}}关闭{{end}}</dd>
-      <dt>服务时区</dt><dd>{{.Settings.Timezone}}</dd>
-      <dt>当前时间</dt><dd>{{.Settings.CurrentTime}}</dd>
-      <dt>后台任务</dt><dd>{{if .Settings.BackgroundEnabled}}允许启动{{else}}关闭{{end}}</dd>
-    </dl>
-  </section>
-  <footer>关联 ID：<code>{{.TraceID}}</code></footer>
-</main></body></html>{{end}}
-
 {{define "runs"}}
 <h2>最近运行</h2>
 {{range .}}
@@ -147,75 +8,16 @@ document.addEventListener('click', event => {
 {{else}}<p class="muted">尚未运行。</p>{{end}}
 {{end}}
 
-{{define "watch"}}<!doctype html>
-<html lang="zh-CN"><head>{{template "head"}}{{range .Data.Runs}}{{if eq .Status "running"}}<meta http-equiv="refresh" content="3">{{end}}{{end}}</head><body><main>
-<header><div><p class="brand">NGA REMINDER</p><h1>{{if eq .Data.Watch.Kind "uid"}}UID {{.Data.Watch.UID}}{{else}}TID {{.Data.Watch.TID}}{{end}}</h1><p>{{.Data.Watch.Title}}</p></div><a class="button secondary" href="/admin">返回概览</a></header>
-<section class="card">
-  <h2>监控配置</h2>
-  {{if not .Data.BackgroundEnabled}}<p class="notice">后台任务已关闭；自动和手动采集均已停用。</p>{{end}}
-  <p>{{if .Data.Watch.Paused}}已暂停 · {{end}}{{status .Data.Watch.State}} · {{template "watermark" .Data.Watch}}</p>
-  <p>{{template "no-fetch" .Data.Watch}} · 下次：{{if or .Data.Watch.Paused (ne .Data.Watch.State "ready")}}暂停{{else if .Data.Watch.NextRunAt}}{{when .Data.Watch.NextRunAt}}{{else if .Data.Watch.NoFetch}}每周全天免拉取{{else}}等待调度{{end}} · 时区 {{.Data.Timezone}}</p>
-  <form method="post" action="/admin/watches/{{.Data.Watch.ID}}">
-    <input type="hidden" name="kind" value="{{.Data.Watch.Kind}}">
-    <div class="grid">{{if eq .Data.Watch.Kind "uid"}}<label>UID<input name="uid" type="number" min="1" value="{{.Data.Watch.UID}}" required></label>{{else}}<label>TID<input name="tid" type="number" min="1" value="{{.Data.Watch.TID}}" required></label>{{end}}<label>备注<input name="label" value="{{.Data.Watch.Label}}"></label></div>
-    {{if eq .Data.Watch.Kind "tid"}}<label>初始化模式<select name="init_mode"><option value="full" {{if eq .Data.Watch.InitMode "full"}}selected{{end}}>保存全部可访问历史</option><option value="from_now" {{if eq .Data.Watch.InitMode "from_now"}}selected{{end}}>从现在开始</option></select></label>{{else}}<p>UID 首次运行与重置后只建立水位，不导入历史。</p>{{end}}
-    {{if eq .Data.Watch.Kind "tid"}}{{template "history-concurrency" .Data.Watch}}{{end}}
-    {{template "schedule" .Data.Watch}}
-    <input type="hidden" name="notifications_present" value="1">
-    <label>通知渠道<select name="channel_ids" multiple>{{range .Data.Channels}}<option value="{{.ID}}" {{if containsID $.Data.Watch.ChannelIDs .ID}}selected{{end}}>{{.Name}} · {{if .Enabled}}启用{{else}}关闭{{end}}</option>{{end}}</select></label>
-    {{if eq .Data.Watch.Kind "tid"}}<label>作者 UID 白名单（逗号分隔，留空表示全部作者）<input name="author_uids" value="{{intlist .Data.Watch.AuthorUIDs}}"></label>{{end}}
-    <p class="small muted">未选渠道时仍将匹配的新内容放入收件箱；初始化和历史内容保持静默。</p>
-    <p class="small muted">修改目标 ID 或初始化模式会重置基线，已保存内容保留。修改并发数、备注、频率或免拉取时段不影响水位。</p><button>保存配置</button>
-  </form>
-  <div class="actions">
-    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/run"><button>手动运行一次</button></form>
-    {{if .Data.Watch.Paused}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/resume"><button class="secondary">恢复监控</button></form>{{else}}<form method="post" action="/admin/watches/{{.Data.Watch.ID}}/pause"><button class="secondary">暂停监控</button></form>{{end}}
-    {{if eq .Data.Watch.Kind "tid"}}<a class="button secondary" href="/admin/threads/{{.Data.Watch.TID}}">查看帖子</a>{{else}}<a class="button secondary" href="/admin/users/{{.Data.Watch.UID}}">查看用户帖子</a>{{end}}
-  </div>
-  <p class="small muted">手动暂停会阻止自动和手动运行；认证暂停需修复账号后才恢复。手动运行绕过免拉取时段。运行中页面每 3 秒刷新。</p>
-  <details><summary>重置基线或删除监控</summary>
-    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/reset">{{if eq .Data.Watch.Kind "tid"}}<label>重建模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>{{end}}<button class="secondary">重置基线（保留帖子）</button></form>
-    <form method="post" action="/admin/watches/{{.Data.Watch.ID}}/delete" class="actions"><button class="danger">删除监控（保留帖子）</button></form>
-  </details>
-</section>
-{{template "recovery" .Data}}
-<section class="card">{{template "runs" .Data.Runs}}</section>
-<footer>页面关联 ID：<code>{{.TraceID}}</code></footer>
-</main></body></html>{{end}}
-
-{{define "posts"}}<!doctype html>
-<html lang="zh-CN"><head>{{template "head"}}</head><body><main>
-<header><div><p class="brand">NGA REMINDER</p><h1>{{if .Data.UID}}UID {{.Data.UID}}{{else}}TID {{.Data.TID}}{{end}} · 已保存帖子</h1><p>共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div><a class="button secondary" href="/admin">返回概览</a></header>
-<section class="card">
-  <p><a href="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}?format=markdown">下载 Markdown</a> · <a href="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}?format=zip">下载 ZIP（含已保存资源）</a></p>
- {{$tid := 0}}
-  {{range .Data.Posts}}{{if ne $tid .TID}}<h2>TID {{.TID}} {{.Subject}}</h2>{{$tid = .TID}}{{end}}<article>
-    <p><strong>{{if eq .Kind "main"}}主楼{{else if eq .Kind "comment"}}{{.ParentFloor}} 楼下的评论{{else}}{{.Floor}} 楼{{end}} · {{.Author}}</strong> <span class="muted small">UID {{.AuthorUID}} · PID {{.PID}} · {{when .PublishedAt}}</span></p>
-    {{if .Subject}}<p>{{.Subject}}</p>{{end}}<div class="post-body">{{rich .Body .Resources}}</div>
-    <p class="small"><a href="{{.WebURL}}" target="_blank" rel="noreferrer">NGA 原帖</a>{{if .ParentKey}} · 父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}{{end}}</p>
-    {{if .Resources}}<details><summary>资源地址（{{len .Resources}}）</summary>{{range .Resources}}<p class="small"><a href="{{.}}" target="_blank" rel="noreferrer">{{.}}</a></p>{{end}}</details>{{end}}
-  </article>{{else}}<p>尚无保存内容；从现在开始的基线不会导入旧楼层。</p>{{end}}
-  <nav class="actions">{{if .Previous}}<a class="button secondary" href="?page={{.Previous}}">上一页</a>{{end}}{{if .Next}}<a class="button secondary" href="?page={{.Next}}">下一页</a>{{end}}</nav>
-</section>
-<section class="card">{{template "runs" .Data.Runs}}</section>
-<footer>关联 ID：<code>{{.TraceID}}</code></footer>
-</main></body></html>{{end}}
-
-{{define "problem"}}<!doctype html>
-<html lang="zh-CN"><head>{{template "head"}}</head><body><main><section class="card">
-<h1>操作未完成</h1><p class="notice">{{.Message}}</p><p>关联 ID：<code>{{.TraceID}}</code></p><a class="button secondary" href="/admin">返回管理页</a>
-</section></main></body></html>{{end}}
-
 {{define "watermark"}}{{if .BaselineComplete}}基线已完成{{else}}待初始化{{end}}{{if eq .Kind "uid"}}<br><span class="small">主题水位 {{.TopicCursor.Timestamp}} / TID {{.TopicCursor.ID}}<br>回帖水位 {{.ReplyCursor.Timestamp}} / PID {{.ReplyCursor.ID}}</span>{{else}} · 水位 {{.CursorFloor}} 楼{{end}}{{end}}
 
 {{define "no-fetch"}}{{if .NoFetch}}<span class="badge">免拉取中{{if .NoFetchUntil}}，至 {{when .NoFetchUntil}}{{else}}，每周全天{{end}}</span>{{else}}当前不在免拉取时段{{end}}{{end}}
 
-{{define "interval-row"}}<div data-rule-row class="card">
+{{define "interval-row"}}<div data-rule-row class="rule-row">
 <div class="grid"><label>星期<input name="interval_weekdays" value="{{if .}}{{weekdays .Weekdays}}{{else}}1,2,3,4,5{{end}}" required></label><label>间隔（秒）<input name="interval_override_seconds" type="number" min="30" max="86400" value="{{if .}}{{.IntervalSeconds}}{{else}}60{{end}}" required></label></div>
 <div class="grid"><label>开始<input name="interval_start" type="time" value="{{if .}}{{.Start}}{{else}}09:00{{end}}" required></label><label>结束<input name="interval_end" type="time" value="{{if .}}{{.End}}{{else}}18:00{{end}}" required></label></div>
 <button type="button" class="secondary" data-remove-rule>删除规则</button></div>{{end}}
 
-{{define "period-row"}}<div data-rule-row class="card">
+{{define "period-row"}}<div data-rule-row class="rule-row">
 <label>星期<input name="period_weekdays" value="{{if .}}{{weekdays .Weekdays}}{{else}}1,2,3,4,5,6,7{{end}}" required></label>
 <div class="grid"><label>开始<input name="period_start" type="time" value="{{if .}}{{.Start}}{{else}}23:00{{end}}" required></label><label>结束<input name="period_end" type="time" value="{{if .}}{{.End}}{{else}}07:00{{end}}" required></label></div>
 <button type="button" class="secondary" data-remove-rule>删除时段</button></div>{{end}}
@@ -238,9 +40,3 @@ document.addEventListener('click', event => {
 <label>历史页面并发数<input name="history_concurrency" type="number" min="1" max="16" value="{{if .}}{{.HistoryConcurrency}}{{else}}1{{end}}" required></label>
 <p class="small muted">1 表示串行，最多 16；仅全量初始化时生效。不同监控可同时运行，所有 NGA 请求共用 120 QPM 限流。</p>
 {{end}}
-
-{{define "users"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
-<h1>用户内容汇总</h1><p><a href="/admin">返回概览</a></p>
-<table><thead><tr><th>用户</th><th>已保存帖子</th><th>涉及主题</th><th>最新发布时间</th><th>监控</th></tr></thead><tbody>
-{{range .Users}}<tr><td><a href="/admin/users/{{.UID}}">{{if .Username}}{{.Username}}{{else}}UID {{.UID}}{{end}}</a></td><td>{{.PostCount}}</td><td>{{.ThreadCount}}</td><td>{{when .LastPublishedAt}}</td><td><a href="/admin/watches/{{.WatchID}}">查看监控</a></td></tr>{{else}}<tr><td colspan="5">暂无 UID 监控</td></tr>{{end}}
-</tbody></table><footer>关联 ID：{{.TraceID}}</footer></main></body></html>{{end}}

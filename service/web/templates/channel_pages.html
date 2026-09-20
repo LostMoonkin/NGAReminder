@@ -1,0 +1,29 @@
+{{define "channels"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">DELIVERY CHANNELS</p><h1>通知渠道</h1><p class="muted">把匹配的新内容，送到你习惯查看的地方。</p></div><a class="button" href="#new-channel">{{template "icon" "plus"}}添加渠道</a></header>
+<div class="grid channel-grid">{{range .Data.Channels}}<section class="card channel-card">
+<div class="tile-top"><span class="target-icon">{{template "icon" "channel"}}</span><span class="badge {{if not .Enabled}}gray{{end}}">{{if .Enabled}}已启用{{else}}已关闭{{end}}</span></div><h2>{{.Name}}</h2><p class="small muted">{{if eq .Kind "bark"}}Bark · 设备推送{{else}}飞书 · 应用消息{{end}}</p><p class="small muted">收件地址和密钥已加密保存，不回显。</p>
+<div class="actions channel-actions"><form method="post" action="/admin/channels/{{.ID}}/test"><button class="secondary">测试通知</button></form><form method="post" action="/admin/channels/{{.ID}}/{{if .Enabled}}disable{{else}}enable{{end}}"><button class="secondary">{{if .Enabled}}关闭渠道{{else}}启用渠道{{end}}</button></form></div>
+<details><summary>编辑渠道</summary><form method="post" action="/admin/channels/{{.ID}}"><input type="hidden" name="kind" value="{{.Kind}}"><input type="hidden" name="enabled" value="{{.Enabled}}"><label>名称<input name="name" value="{{.Name}}" required></label>{{template "channel-fields" .Kind}}<p class="small muted">密钥和接收地址留空保留；分组按本次填写更新。</p><div class="form-actions"><button>保存修改</button></div></form></details>
+<details class="danger-zone"><summary>删除渠道</summary><p class="small muted">须先在监控配置中解除此渠道引用。</p><form method="post" action="/admin/channels/{{.ID}}/delete" data-confirm="删除此通知渠道？请确认已解除所有监控引用。"><div class="actions"><button class="danger">删除渠道</button></div></form></details>
+</section>{{else}}<section class="card empty"><h2>还没有通知渠道</h2><p>添加 Bark 设备或飞书收件者；未选渠道时，内容仍会进入收件箱。</p></section>{{end}}</div>
+<section class="card" id="new-channel"><h2>添加通知渠道</h2><div class="grid">
+<details><summary>新增 Bark 设备</summary><form method="post" action="/admin/channels"><input type="hidden" name="kind" value="bark"><input type="hidden" name="enabled" value="true"><label>名称<input name="name" required></label>{{template "channel-fields" "bark"}}<div class="form-actions"><button>添加 Bark</button></div></form></details>
+<details><summary>新增飞书接收者</summary><form method="post" action="/admin/channels"><input type="hidden" name="kind" value="feishu"><input type="hidden" name="enabled" value="true"><label>名称<input name="name" required></label>{{template "channel-fields" "feishu"}}<div class="form-actions"><button>添加飞书目标</button></div></form></details>
+</div></section>
+<section class="card"><h2>飞书应用 {{if .Data.App.Configured}}<span class="badge">已配置</span>{{else}}<span class="muted">· 未配置</span>{{end}}</h2>
+<p class="muted">所有飞书通知目标共用同一个自建应用；需开启机器人能力并授予发送消息、上传图片权限。App Secret 不回显，修改时留空保留。</p>
+<form method="post" action="/admin/feishu-app" autocomplete="off" data-feishu-app>
+  {{if .Data.App.Configured}}<p class="small muted" data-feishu-hint>应用已保存，点击“修改”后才能编辑。</p>{{end}}
+  <fieldset {{if .Data.App.Configured}}disabled{{end}}>
+    <label>App ID<input name="app_id" value="{{.Data.App.AppID}}" spellcheck="false"></label>
+    <label>App Secret<input type="password" name="app_secret" autocomplete="new-password" {{if .Data.App.Configured}}placeholder="已配置，留空保留原 Secret"{{end}}></label>
+  </fieldset>
+  <div class="actions">
+    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-edit>修改</button>{{end}}
+    <button type="submit" data-feishu-save {{if .Data.App.Configured}}hidden disabled{{end}}>保存应用</button>
+    {{if .Data.App.Configured}}<button type="button" class="secondary" data-feishu-cancel hidden>取消</button>{{end}}
+  </div>
+</form></section>
+<div class="notice neutral">{{template "icon" "info"}}<p>在监控的「采集配置」中选择通知渠道与作者白名单。关闭渠道后，新增投递和已有重试都会暂停。</p><a class="text-link" href="/admin/watches">管理监控 {{template "icon" "arrow"}}</a></div>
+{{template "footer" .}}</main></body></html>{{end}}

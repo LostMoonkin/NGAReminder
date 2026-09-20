@@ -1,0 +1,74 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{{.Title}} · NGA Reminder</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+<script src="/admin/static/admin.js" defer></script>
+{{end}}
+
+{{define "nav"}}
+<a class="skip-link" href="#main">跳转至主要内容</a>
+{{template "icons"}}
+<header class="topbar">
+  <a class="brand" href="/admin"><span class="brand-logo">N</span><span>NGA Reminder<small>KEEP WHAT MATTERS</small></span></a>
+  <nav class="main-nav" aria-label="主导航">
+    <a href="/admin" {{if eq .Nav "overview"}}aria-current="page"{{end}}>{{template "icon" "overview"}}运行概览</a>
+    <a href="/admin/watches" {{if eq .Nav "watches"}}aria-current="page"{{end}}>{{template "icon" "monitor"}}监控管理</a>
+    <a href="/admin/library" {{if eq .Nav "library"}}aria-current="page"{{end}}>{{template "icon" "library"}}内容库</a>
+    <a href="/admin/inbox" {{if eq .Nav "inbox"}}aria-current="page"{{end}}>{{template "icon" "inbox"}}收件箱</a>
+    <a href="/admin/channels" {{if eq .Nav "channels"}}aria-current="page"{{end}}>{{template "icon" "channel"}}通知渠道</a>
+    <a href="/admin/settings" {{if eq .Nav "settings"}}aria-current="page"{{end}}>{{template "icon" "settings"}}设置</a>
+  </nav>
+  <span class="workspace-label">个人工作空间</span>
+</header>
+<dialog id="confirmation" aria-labelledby="confirmation-title">
+  <div class="dialog-header"><h2 id="confirmation-title">确认操作</h2><button type="button" class="icon-button" data-close-confirm aria-label="关闭">{{template "icon" "close"}}</button></div>
+  <p data-confirm-message></p>
+  <div class="form-actions"><button type="button" class="secondary" data-close-confirm>取消</button><button type="button" class="danger" data-confirm-submit>确认继续</button></div>
+</dialog>
+{{end}}
+
+{{define "footer"}}
+<footer class="page-footer"><span>NGA Reminder · 为每一份关注，留个位置。</span><details><summary>诊断信息</summary><span>关联 ID：<code>{{.TraceID}}</code></span></details></footer>
+{{end}}
+
+{{define "settings-nav"}}
+<nav class="settings-nav" aria-label="设置分类">
+<a href="/admin/settings" {{if eq .Section "account"}}aria-current="page"{{end}}>{{template "icon" "key"}}NGA 账号</a>
+<a href="/admin/renewal" {{if eq .Section "renewal"}}aria-current="page"{{end}}>{{template "icon" "refresh"}}Cookie 续期</a>
+<a href="/admin/bot" {{if eq .Section "bot"}}aria-current="page"{{end}}>{{template "icon" "bot"}}飞书 Bot</a>
+<a href="/admin/resources" {{if eq .Section "resources"}}aria-current="page"{{end}}>{{template "icon" "folder"}}资源维护</a>
+<a href="/admin/settings/runtime" {{if eq .Section "runtime"}}aria-current="page"{{end}}>{{template "icon" "settings"}}运行配置</a>
+</nav>
+{{end}}
+
+{{define "background-notice"}}
+{{if not .BackgroundEnabled}}<div class="notice" role="status">{{template "icon" "info"}}<p>后台任务已关闭。当前可检查配置和数据；凭据校验、手动采集及自动任务均已停用，不会访问 NGA。</p></div>{{end}}
+{{end}}
+
+{{define "icon"}}<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-{{.}}"></use></svg>{{end}}
+{{define "icons"}}
+<svg xmlns="http://www.w3.org/2000/svg" class="icon-definitions" aria-hidden="true">
+<symbol id="icon-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+<symbol id="icon-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M6 12l3-4 4 5 4-5 1 1"/></symbol>
+<symbol id="icon-library" viewBox="0 0 24 24"><path d="M3 4h5v16H3zm7 0h5v16h-5zm7 1 3-1 3 15-3 1Z"/></symbol>
+<symbol id="icon-inbox" viewBox="0 0 24 24"><path d="m4 4-2 10v6h20v-6L20 4ZM2 14h6l2 3h4l2-3h6"/></symbol>
+<symbol id="icon-channel" viewBox="0 0 24 24"><path d="M12 3v5M3 6l6 4m6 0 6-4M7 15l-4 6m14-6 4 6"/><circle cx="12" cy="12" r="4"/></symbol>
+<symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/></symbol>
+<symbol id="icon-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></symbol>
+<symbol id="icon-thread" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8m-8 4h8m-8 4h5"/></symbol>
+<symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-5-5 5 5-5 5"/></symbol>
+<symbol id="icon-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M9 3H4v17h17v-5"/></symbol>
+<symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 1l1 5M4 12l1 5a8 8 0 0 0 13 1"/></symbol>
+<symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-6-6 3-3m0 6 3-3"/></symbol>
+<symbol id="icon-bot" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="14" rx="3"/><path d="M12 3v4M1 12h3m16 0h3M8 16h8m-8-4h1m7 0h1"/></symbol>
+<symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3ZM3 6V3h7l2 3h9v3"/></symbol>
+<symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+<symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+<symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
+<symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8Z"/></symbol>
+<symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+</svg>
+{{end}}

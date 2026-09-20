@@ -5,6 +5,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 
 	"ngareminder/service/internal/content"
 	"ngareminder/service/internal/logging"
+	"ngareminder/service/internal/repository"
 	"ngareminder/service/internal/service"
 	"ngareminder/service/web"
 )
@@ -23,7 +25,7 @@ type Handler struct {
 }
 
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(web.Templates, "templates/*.html")
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "watchTitle": watchTitle, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(web.Templates, "templates/*.html")
 	if err != nil {
 		return nil, logging.Wrap(err, "load admin templates")
 	}
@@ -50,6 +52,24 @@ func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger)
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	router.GET("/readyz", h.ready)
 	router.GET("/admin", h.dashboard)
+	router.GET("/admin/watches", h.dashboard)
+	router.GET("/admin/watches/new", h.newWatch)
+	router.GET("/admin/library", h.dashboard)
+	router.GET("/admin/settings", h.accountSettings)
+	router.GET("/admin/settings/runtime", h.runtimeSettings)
+	for _, asset := range []struct{ name, mime string }{
+		{"admin.css", "text/css; charset=utf-8"},
+		{"admin.js", "text/javascript; charset=utf-8"},
+	} {
+		body, readErr := web.Static.ReadFile("static/" + asset.name)
+		if readErr != nil {
+			return nil, logging.Wrap(readErr, "load admin asset")
+		}
+		router.GET("/admin/static/"+asset.name, func(c *gin.Context) {
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Data(http.StatusOK, asset.mime, body)
+		})
+	}
 	router.GET("/api/v1/settings", h.authorizeAPI, h.settings)
 	h.monitoringRoutes(router)
 	h.notificationRoutes(router)
@@ -147,10 +167,44 @@ func (h *Handler) dashboard(c *gin.Context) {
 		h.problem(c, err)
 		return
 	}
-	h.render(c, http.StatusOK, "admin", gin.H{"Settings": settings, "Data": data, "TraceID": logging.TraceID(c.Request.Context())})
+	name := "admin"
+	switch c.FullPath() {
+	case "/admin/watches":
+		name = "watches"
+	case "/admin/library":
+		name = "library"
+	}
+	columns := []watchColumn{{Key: "active", Title: "采集与待采集"}, {Key: "quiet", Title: "免拉取时段"}, {Key: "paused", Title: "暂停与待处理"}}
+	for _, watch := range data.Watches {
+		for i := range columns {
+			if columns[i].Key == watchGroup(watch) {
+				columns[i].Watches = append(columns[i].Watches, watch)
+			}
+		}
+	}
+	recent := []repository.Run{}
+	for _, watch := range data.Watches {
+		if watch.LastRun != nil {
+			recent = append(recent, *watch.LastRun)
+		}
+	}
+	sort.Slice(recent, func(i, j int) bool { return recent[i].StartedAt.After(recent[j].StartedAt) })
+	if len(recent) > 5 {
+		recent = recent[:5]
+	}
+	var posts int64
+	for _, thread := range data.Threads {
+		posts += thread.Count
+	}
+	h.render(c, http.StatusOK, name, gin.H{"Settings": settings, "Data": data, "Columns": columns, "PostCount": posts, "RecentRuns": recent, "TraceID": logging.TraceID(c.Request.Context())})
 }
 
-func (h *Handler) render(c *gin.Context, status int, name string, data any) {
+func (h *Handler) render(c *gin.Context, status int, name string, data gin.H) {
+	meta := adminPageMeta(name)
+	data["Title"], data["Nav"], data["Section"] = meta.title, meta.nav, meta.section
+	if data["TraceID"] == nil {
+		data["TraceID"] = logging.TraceID(c.Request.Context())
+	}
 	var body bytes.Buffer
 	if err := h.pages.ExecuteTemplate(&body, name, data); err != nil {
 		fail(c, http.StatusInternalServerError, "页面暂时不可用", logging.Wrap(err, "render admin page"))
