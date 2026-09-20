@@ -24,7 +24,7 @@ type options struct {
 func main() { os.Exit(execute()) }
 
 func execute() (code int) {
-	l := logging.New(os.Stderr)
+	l := logging.NewConsole(os.Stderr)
 	l.SetSecrets(os.Getenv("NGA_MIGRATE_PG_URL"), os.Getenv("NGA_MIGRATE_OLD_KEY"), os.Getenv("NGA_REMINDER_ENCRYPTION_KEY"))
 	ctx, cancel := signal.NotifyContext(l.WithContext(context.Background()), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

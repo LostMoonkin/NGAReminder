@@ -27,6 +27,14 @@ func New(out io.Writer) *Logger {
 	return &Logger{Logger: zerolog.New(w).Level(zerolog.InfoLevel).With().Timestamp().Logger(), writer: w}
 }
 
+// NewConsole 在结构化字段脱敏后输出文本，供命令行入口使用。
+func NewConsole(out io.Writer) *Logger {
+	return New(zerolog.ConsoleWriter{
+		Out: out, NoColor: true, TimeFormat: "2006-01-02 15:04:05 -07:00",
+		FieldsOrder: []string{"listen_address", "event", "operation", "trace_id", "span_id", "parent_span_id"},
+	})
+}
+
 func (l *Logger) SetSecrets(secrets ...string) {
 	pairs := make([]string, 0, len(secrets)*2)
 	for _, secret := range secrets {

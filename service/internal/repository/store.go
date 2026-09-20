@@ -20,6 +20,10 @@ type Store struct {
 	pool *sql.DB
 }
 
+// sqlite v1.2.2 重建表时通过 GORM.DB() 将 *sql.Tx 还原为连接池，再申请连接。
+// 包装事务使驱动复用当前连接，避免单连接池自锁；提交和回滚仍由外层事务负责。
+type migrationTx struct{ *sql.Tx }
+
 // application_id 标识 Go 数据库，防止配置失误把 Rust/其他 SQLite 当作新库升级。
 const applicationID = 0x4e474147
 
@@ -68,6 +72,7 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	}
 	// 阶段 02 的 TID 唯一索引会把所有 UID 监控的 tid=0 视为重复；原子升级为按类型的部分索引。
 	if err = db.Transaction(func(tx *gorm.DB) error {
+		tx.Statement.ConnPool = &migrationTx{tx.Statement.ConnPool.(*sql.Tx)}
 		// 旧索引只有 event/channel 两列；加入独立告警目标后原子重建。
 		if tx.Migrator().HasTable(&Delivery{}) && !tx.Migrator().HasColumn(&Delivery{}, "alert_id") {
 			if e := tx.Exec("DROP INDEX IF EXISTS delivery_target").Error; e != nil {

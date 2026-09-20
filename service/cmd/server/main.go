@@ -27,7 +27,7 @@ import (
 func main() { os.Exit(execute()) }
 
 func execute() (exitCode int) {
-	log := logging.New(os.Stdout)
+	log := logging.NewConsole(os.Stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, span := logging.Start(log.WithContext(ctx), "process")

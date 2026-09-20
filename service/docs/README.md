@@ -16,6 +16,8 @@ Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实�
 
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
+真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
+
 ## 本地运行
 
 需要 Go 1.27.0 或更新版本。所有构建和检查设置 `CGO_ENABLED=0`。SQLite 使用 [libtnb/sqlite](https://github.com/libtnb/sqlite) 的 GORM 驱动，底层为纯 Go 的 modernc SQLite，无需安装 SQLite、C 编译器或数据库服务。
@@ -244,11 +246,11 @@ UID 初始化与增量规则：
 
 SQLite 使用 WAL、5 秒 busy timeout 和单连接。数据库通过 `application_id` 标记归属；非空且没有 Go 标记的 SQLite 会被拒绝打开，避免误用旧 Rust 数据库。Go 必须使用独立的数据路径，旧 PG 数据通过 [阶段 09](spec/09-data-migration.md) 显式迁移。
 
-日志默认以 info 级别逐行输出 JSON 到 stdout。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
+日志默认以 info 级别逐行输出传统文本到 stdout，格式为 `时间 级别 消息 key=value ...`，不带 ANSI 颜色码；重定向到文件时仍为文本。启动成功日志中的 `listen_address` 显示实际监听地址和端口。迁移工具的 stderr 日志使用相同格式。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
 
 异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求或实际开始业务的调度操作；请求日志也记录 `run_id` 和 `run_trace_id`。后台空 tick 的只读检查不打印日志（含 repository/SQL）；采集、投递、续期过期处理、楼层缺口过期和 Bot 连接变更开始时再记录业务调用链，检查失败仍记录错误详情和 stack trace。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 watch ID、TID/UID、PID、页码、触发来源、初始化模式、水位和数量，Cookie 不写入日志。
 
-错误由终止操作的入口记录一次，带 `error`、`causes`、`stack`；栈在错误创建或第三方边界捕获，包含函数、文件和行号。panic 恢复为通用 500 响应，原始栈留在日志中。`message`、`error`、`causes` 中的已知凭据会脱敏，关联 ID、数字及 JSON 结构保持完整；业务代码仍需按 [规范](../AGENTS.md#调用链与日志) 显式选择安全字段。
+错误由终止操作的入口记录一次，带 `error`、`causes`、`stack`；栈在错误创建或第三方边界捕获，包含函数、文件和行号。panic 恢复为通用 500 响应，原始栈留在日志中。先对 `message`、`error`、`causes` 中的已知凭据脱敏，再转换成文本，关联 ID、数字及其他字段保持完整；业务代码仍需按 [规范](../AGENTS.md#调用链与日志) 显式选择安全字段。
 
 ## 开发检查
 

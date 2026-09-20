@@ -3,10 +3,112 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+func legacyDeliveryDatabase(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legacy-deliveries.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 旧版本的 event_id/channel_id 没有默认值，升级时会触发 SQLite 重建表。
+	for _, statement := range []string{
+		fmt.Sprintf("PRAGMA application_id = %d", applicationID),
+		"CREATE TABLE deliveries (id integer PRIMARY KEY AUTOINCREMENT, event_id integer, channel_id integer, channel_name text, status text, attempts integer, next_attempt datetime, error text, trace_id text, updated_at datetime)",
+		"CREATE UNIQUE INDEX delivery_target ON deliveries(event_id, channel_id)",
+		"INSERT INTO deliveries (event_id, channel_id, channel_name, status, attempts, error, trace_id) VALUES (37, 8, 'fixture channel', 'sent', 2, '', 'fixture-trace')",
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatal(statement, err)
+		}
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestUpgradeLegacyDeliveryDefaults(t *testing.T) {
+	path := legacyDeliveryDatabase(t)
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		store, err := Open(ctx, path)
+		if err != nil {
+			cancel()
+			t.Fatalf("legacy delivery upgrade did not finish: %v", err)
+		}
+		var delivery Delivery
+		if err = store.db.WithContext(ctx).First(&delivery, 1).Error; err != nil {
+			t.Error(err)
+		} else if delivery.EventID != 37 || delivery.ChannelID != 8 || delivery.ChannelName != "fixture channel" || delivery.Status != "sent" || delivery.Attempts != 2 || delivery.TraceID != "fixture-trace" || delivery.AlertID != 0 {
+			t.Errorf("upgrade changed existing delivery: %+v", delivery)
+		}
+		for _, column := range []string{"alert_id", "event_id", "channel_id"} {
+			var value string
+			if err = store.db.WithContext(ctx).Raw("SELECT dflt_value FROM pragma_table_info('deliveries') WHERE name = ?", column).Scan(&value).Error; err != nil || value != "0" {
+				t.Errorf("delivery default for %s was not upgraded: %q %v", column, value, err)
+			}
+		}
+		if err = store.Close(ctx); err != nil {
+			t.Error(err)
+		}
+		cancel()
+	}
+}
+
+func TestUpgradeLegacyDeliveryRollback(t *testing.T) {
+	path := legacyDeliveryDatabase(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// 重建 deliveries 后，重复 UID 使最后建立监控唯一索引失败。
+	for _, statement := range []string{
+		"CREATE TABLE watches (id integer PRIMARY KEY AUTOINCREMENT, kind text DEFAULT 'tid', uid integer)",
+		"INSERT INTO watches (kind, uid) VALUES ('uid', 1001), ('uid', 1001)",
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	store, err := Open(ctx, path)
+	if err == nil {
+		store.Close(ctx)
+		t.Fatal("duplicate UID must fail the upgrade")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("upgrade blocked instead of rolling back: %v", err)
+	}
+	if !strings.Contains(err.Error(), "watches.uid") {
+		t.Fatalf("upgrade failed before the final UID index: %v", err)
+	}
+	var count int
+	for _, query := range []string{
+		"SELECT count(*) FROM pragma_table_info('deliveries') WHERE name = 'alert_id'",
+		"SELECT count(*) FROM sqlite_master WHERE name = 'threads'",
+	} {
+		if err = db.QueryRow(query).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed migration left schema changes: %s: %d %v", query, count, err)
+		}
+	}
+	if err = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'delivery_target'").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failed migration removed the original delivery index: %d %v", count, err)
+	}
+	if err = db.QueryRow("SELECT count(*) FROM deliveries WHERE id = 1 AND event_id = 37 AND channel_id = 8 AND status = 'sent' AND attempts = 2").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failed migration changed the original delivery: %d %v", count, err)
+	}
+}
 
 func TestUpgradeSpec02Database(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy-go.db")
