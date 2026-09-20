@@ -14,6 +14,8 @@
 
 Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实施状态统一见 [重构计划](plan/README.md)。
 
+文件日志与 SQL 分流见 [Spec14](spec/14-daily-file-logging.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
@@ -55,7 +57,7 @@ CGO_ENABLED=0 go build -o bin/nga-reminder ./cmd/server
 ./bin/nga-reminder -config config.json
 ```
 
-使用 Ctrl-C 或向服务进程发送 SIGTERM 停止。启动脚本通过 `exec` 运行二进制，脚本 PID 即服务 PID。服务取消正在执行的采集，最多等待 10 秒处理已有 HTTP 请求，保存中断结果后关闭网络和数据库连接；运行日志直接输出到当前终端。异常退出留下的 `running` 记录在下次启动时标为 `interrupted`，保留已提交水位；未暂停的监控到期后重新运行，也可手动重跑，不补造离线期间的每次任务。
+使用 Ctrl-C 或向服务进程发送 SIGTERM 停止。启动脚本通过 `exec` 运行二进制，脚本 PID 即服务 PID。服务取消正在执行的采集，最多等待 10 秒处理已有 HTTP 请求，保存中断结果后关闭网络和数据库连接；普通运行日志同时输出到当前终端和日志目录，SQL 日志单独保存；只有 error SQL 同时输出到终端。异常退出留下的 `running` 记录在下次启动时标为 `interrupted`，保留已提交水位；未暂停的监控到期后重新运行，也可手动重跑，不补造离线期间的每次任务。
 
 ## Docker Compose 部署
 
@@ -96,7 +98,7 @@ docker compose down
 docker compose up -d --build
 ```
 
-升级前先停止服务，备份整个 `data/` 和本地 Compose 配置，另行保管部署密钥。日志写入标准输出，由 Docker 按每个文件 10 MiB、最多 3 个文件轮转；上面的 `logs -f` 只跟随输出，Ctrl-C 不会停止服务。Compose 字段语义见 [Docker 官方说明](https://docs.docker.com/reference/compose-file/services/)。
+升级前先停止服务，备份整个 `data/` 和本地 Compose 配置，另行保管部署密钥。服务自行将日志写入 `/app/data/logs`（宿主机默认 `service/data/logs`），按天切分并保留 30 天，不依赖 Docker 日志驱动。Compose 中的 `json-file` 仅额外保留终端输出，`docker compose logs -f` 看不到非 error SQL；完整 SQL 见 `sql-YYYY-MM-DD.log`。Ctrl-C 只结束日志跟随，不会停止服务。Compose 字段语义见 [Docker 官方说明](https://docs.docker.com/reference/compose-file/services/)。
 
 ## 配置
 
@@ -109,6 +111,7 @@ docker compose up -d --build
 | `listen_address` | `0.0.0.0:8989`，监听所有网卡，使用 `host:port`；端口 0 表示由系统分配 |
 | `database_path` | `data/nga-reminder.db`，本地持久化 SQLite 文件，不能为 `:memory:` |
 | `assets_path` | `data/assets`，本地资源目录 |
+| `logs_path` | `data/logs`，日志目录；环境变量为 `NGA_REMINDER_LOGS_PATH` |
 | `api_token` | 必填，不能全为空白，无最小长度要求；按原值匹配，不裁剪空白 |
 | `encryption_key` | 必填，标准 Base64 编码，解码后为 32 字节，与数据库分开保管 |
 | `timezone` | `Asia/Shanghai`，有效的 IANA 时区 |
@@ -117,7 +120,7 @@ docker compose up -d --build
 | `store_raw_payload` | `false`；开启后为新保存的帖子保留完整原始 JSON，不回抓旧内容 |
 | `background_enabled` | `true`；设置 `false` 进入关闭后台任务的核验模式 |
 
-文件中的相对数据路径以配置文件所在目录为基准；环境变量覆盖的相对路径也使用这个基准。没有配置文件时，以进程工作目录为基准。首次启动创建数据目录和当前所需表，启动过程不会写回配置文件。
+文件中的相对数据库、资源和日志路径以配置文件所在目录为基准；环境变量覆盖的相对路径也使用这个基准。没有配置文件时，以进程工作目录为基准。首次启动创建数据目录和当前所需表，启动过程不会写回配置文件。
 
 临时关闭后台任务：
 
@@ -246,7 +249,9 @@ UID 初始化与增量规则：
 
 SQLite 使用 WAL、5 秒 busy timeout 和单连接。数据库通过 `application_id` 标记归属；非空且没有 Go 标记的 SQLite 会被拒绝打开，避免误用旧 Rust 数据库。Go 必须使用独立的数据路径，旧 PG 数据通过 [阶段 09](spec/09-data-migration.md) 显式迁移。
 
-日志默认以 info 级别逐行输出传统文本到 stdout，格式为 `时间 级别 消息 key=value ...`，不带 ANSI 颜色码；重定向到文件时仍为文本。启动成功日志中的 `listen_address` 显示实际监听地址和端口。迁移工具的 stderr 日志使用相同格式。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
+日志默认级别为 info，有效配置加载后服务直接写入 `logs_path`，无需重定向或 Docker `json-file`。普通日志同时输出到 stdout 和 `app-YYYY-MM-DD.log`；SQL 日志只写入 `sql-YYYY-MM-DD.log`，error SQL 也输出到终端。SQL 不混入普通文件，但业务边界仍在普通日志中记录操作失败，可用同一 trace 关联。两类文件与终端均为无颜色的传统文本，格式为 `时间 级别 消息 key=value ...`。启动成功日志中的 `listen_address` 显示实际监听地址和端口。迁移工具的 stderr 日志使用相同格式。一次请求中的操作共用 `trace_id`，每层记录 `span_id`、`parent_span_id`、`operation`、开始和结束；结束记录 `result` 和 `duration_ms`。SQL 记录挂在对应 repository 操作下，使用占位符，不打印实参；HTTP 只记录匹配的路由，不记录 query、请求头或表单内容。
+
+日志文件日期和文本时间使用配置的 `timezone`。午夜后第一条日志自动切换日期，同一天重启追加原文件；保留今天及此前 29 个自然日，启动和跨天写入时清理更早的 `app-YYYY-MM-DD.log`、`sql-YYYY-MM-DD.log`，不删除其他文件、目录或符号链接。日志路径不可用时启动失败；运行期间文件写入、切分或清理失败会在 stdio 报错，正常退出关闭文件。配置加载之前的引导日志仅输出到终端。修改 `logs_path` 或时区后重启生效。
 
 异步采集使用独立 trace：运行记录中的 `trace_id` 对应采集，`source_trace_id` 对应触发 HTTP 请求或实际开始业务的调度操作；请求日志也记录 `run_id` 和 `run_trace_id`。后台空 tick 的只读检查不打印日志（含 repository/SQL）；采集、投递、续期过期处理、楼层缺口过期和 Bot 连接变更开始时再记录业务调用链，检查失败仍记录错误详情和 stack trace。NGA HTTP 日志记录脱敏 URL、状态、耗时，采集业务日志记录 watch ID、TID/UID、PID、页码、触发来源、初始化模式、水位和数量，Cookie 不写入日志。
 

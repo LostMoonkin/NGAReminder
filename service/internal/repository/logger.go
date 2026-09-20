@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/rs/zerolog"
+	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	"ngareminder/service/internal/logging"
@@ -15,9 +17,10 @@ type sqlLogger struct{ fallback context.Context }
 
 func (l sqlLogger) context(ctx context.Context) context.Context {
 	if logging.TraceID(ctx) == "" {
-		return l.fallback
+		ctx = l.fallback
 	}
-	return ctx
+	log := zerolog.Ctx(ctx).With().Str("log_type", "sql").Logger()
+	return log.WithContext(ctx)
 }
 
 func (l sqlLogger) LogMode(logger.LogLevel) logger.Interface { return l }
@@ -36,9 +39,15 @@ func (l sqlLogger) Error(ctx context.Context, message string, args ...any) {
 
 func (l sqlLogger) Trace(ctx context.Context, begin time.Time, query func() (string, int64), err error) {
 	statement, rows := query()
-	// 查询属于当前 repository span；错误详情由返回给 handler/startup 的 error 统一记录。
-	zerolog.Ctx(l.context(ctx)).Info().Str("event", "sql").Str("sql", statement).
-		Int64("rows", rows).Bool("failed", err != nil).Dur("duration_ms", time.Since(begin)).Msg("")
+	// SQL 错误保留查询现场；业务边界仍按原调用链记录操作失败。
+	ctx = l.context(ctx)
+	log := zerolog.Ctx(ctx).With().Str("event", "sql").Str("sql", statement).
+		Int64("rows", rows).Bool("failed", err != nil).Dur("duration_ms", time.Since(begin)).Logger()
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		logging.Error(log.WithContext(ctx), err, "SQL query failed", zerolog.ErrorLevel)
+		return
+	}
+	log.Info().Msg("")
 }
 
 func (l sqlLogger) ParamsFilter(_ context.Context, statement string, _ ...any) (string, []any) {

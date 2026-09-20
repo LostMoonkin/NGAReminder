@@ -25,6 +25,7 @@ type Config struct {
 	ListenAddress     string `json:"listen_address"`
 	DatabasePath      string `json:"database_path"`
 	AssetsPath        string `json:"assets_path"`
+	LogsPath          string `json:"logs_path"`
 	APIToken          string `json:"api_token"`
 	EncryptionKey     string `json:"encryption_key"`
 	Timezone          string `json:"timezone"`
@@ -39,12 +40,13 @@ type Public struct {
 	ListenAddress     string `json:"listen_address"`
 	DatabasePath      string `json:"database_path"`
 	AssetsPath        string `json:"assets_path"`
+	LogsPath          string `json:"logs_path"`
 	Timezone          string `json:"timezone"`
 	BackgroundEnabled bool   `json:"background_enabled"`
 }
 
 func (c Config) Public() Public {
-	return Public{ListenAddress: c.ListenAddress, DatabasePath: c.DatabasePath, AssetsPath: c.AssetsPath, Timezone: c.Timezone, BackgroundEnabled: c.BackgroundEnabled, MaxDownloadBytes: c.MaxDownloadBytes, StoreRawPayload: c.StoreRawPayload}
+	return Public{ListenAddress: c.ListenAddress, DatabasePath: c.DatabasePath, AssetsPath: c.AssetsPath, LogsPath: c.LogsPath, Timezone: c.Timezone, BackgroundEnabled: c.BackgroundEnabled, MaxDownloadBytes: c.MaxDownloadBytes, StoreRawPayload: c.StoreRawPayload}
 }
 
 func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey} }
@@ -52,7 +54,7 @@ func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey
 func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	_, span := logging.Start(ctx, "config.load")
 	defer span.End(&err)
-	cfg = Config{MaxDownloadBytes: DefaultMaxDownloadBytes, ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
+	cfg = Config{MaxDownloadBytes: DefaultMaxDownloadBytes, ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", LogsPath: "data/logs", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
 	base := "."
 	if filename != "" {
 		var file *os.File
@@ -73,6 +75,7 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	}
 	for name, target := range map[string]*string{
 		"LISTEN_ADDRESS": &cfg.ListenAddress, "DATABASE_PATH": &cfg.DatabasePath, "ASSETS_PATH": &cfg.AssetsPath,
+		"LOGS_PATH":      &cfg.LogsPath,
 		"API_TOKEN":      &cfg.APIToken,
 		"ENCRYPTION_KEY": &cfg.EncryptionKey, "TIMEZONE": &cfg.Timezone,
 		"NGA_USER_AGENT": &cfg.NGAUserAgent,
@@ -102,7 +105,7 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	if err = cfg.validate(); err != nil {
 		return cfg, err
 	}
-	for _, path := range []*string{&cfg.DatabasePath, &cfg.AssetsPath} {
+	for _, path := range []*string{&cfg.DatabasePath, &cfg.AssetsPath, &cfg.LogsPath} {
 		if !filepath.IsAbs(*path) {
 			*path = filepath.Join(base, *path)
 		}
@@ -128,6 +131,9 @@ func (c Config) validate() error {
 	}
 	if c.DatabasePath == "" || c.DatabasePath == ":memory:" || c.AssetsPath == "" {
 		return logging.WithStack(errors.New("database_path and assets_path must be non-empty local persistent paths"))
+	}
+	if strings.TrimSpace(c.LogsPath) == "" {
+		return logging.WithStack(errors.New("logs_path must be a non-empty local directory"))
 	}
 	if strings.TrimSpace(c.APIToken) == "" {
 		return logging.WithStack(errors.New("api_token must not be empty or contain only whitespace"))

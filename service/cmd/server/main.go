@@ -41,6 +41,10 @@ func execute() (exitCode int) {
 			logging.Error(ctx, err, "Server startup or execution failed", zerolog.ErrorLevel)
 		}
 		span.End(&err)
+		if closeErr := log.Close(); closeErr != nil {
+			logging.Error(ctx, closeErr, "Closing log files failed", zerolog.ErrorLevel)
+			exitCode = 1
+		}
 	}()
 	flags := flag.NewFlagSet("nga-reminder", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -63,6 +67,11 @@ func execute() (exitCode int) {
 		err = loadErr
 		return 1
 	}
+	if err = log.EnableFiles(cfg.LogsPath, cfg.Timezone); err != nil {
+		return 1
+	}
+	zerolog.Ctx(ctx).Info().Str("logs_path", cfg.LogsPath).Str("timezone", cfg.Timezone).
+		Int("retention_days", 30).Msg("Daily log files enabled")
 	if err = run(ctx, log, cfg); err != nil {
 		return 1
 	}

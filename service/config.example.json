@@ -2,6 +2,7 @@
   "listen_address": "0.0.0.0:8989",
   "database_path": "data/nga-reminder.db",
   "assets_path": "data/assets",
+  "logs_path": "data/logs",
   "api_token": "replace-with-your-api-token",
   "encryption_key": "replace-with-32-random-bytes-in-base64",
   "timezone": "Asia/Shanghai",

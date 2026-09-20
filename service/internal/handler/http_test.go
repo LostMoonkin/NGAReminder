@@ -245,7 +245,8 @@ func assertErrorStack(t *testing.T, data []byte, traceID, function string) {
 	t.Helper()
 	count := 0
 	for _, e := range events(t, data) {
-		if e["trace_id"] != traceID || e["level"] != "error" {
+		// SQL 文件独立记录查询错误；这里校验业务边界仍只记录一次完整错误。
+		if e["trace_id"] != traceID || e["level"] != "error" || e["log_type"] == "sql" {
 			continue
 		}
 		count++

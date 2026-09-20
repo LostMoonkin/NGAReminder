@@ -44,6 +44,9 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 	if cfg.Timezone != "Asia/Shanghai" || cfg.BackgroundEnabled || cfg.DatabasePath != filepath.Join(dir, "data/nga-reminder.db") {
 		t.Fatal("incorrect environment override or relative path resolution")
 	}
+	if cfg.LogsPath != filepath.Join(dir, "data/logs") || cfg.Public().LogsPath != cfg.LogsPath {
+		t.Fatal("default log directory or public setting is incorrect")
+	}
 	if cfg.APIToken != "x" || cfg.ListenAddress != "127.0.0.1:0" {
 		t.Fatal("short tokens and dynamic ports supported by the old service must be preserved")
 	}
@@ -60,6 +63,7 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 		{"NGA_REMINDER_MAX_DOWNLOAD_BYTES", "0", "max_download_bytes"},
 		{"NGA_REMINDER_MAX_DOWNLOAD_BYTES", "invalid", "MAX_DOWNLOAD_BYTES"},
 		{"NGA_REMINDER_STORE_RAW_PAYLOAD", "invalid", "STORE_RAW_PAYLOAD"},
+		{"NGA_REMINDER_LOGS_PATH", "", "logs_path"},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			t.Setenv(tc.name, tc.value)
@@ -71,5 +75,38 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 				t.Fatal("errors must not contain secret values from invalid configuration")
 			}
 		})
+	}
+}
+
+func TestLogDirectoryOverrides(t *testing.T) {
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "config.json")
+	body, _ := json.Marshal(map[string]string{"api_token": "fake", "encryption_key": base64.StdEncoding.EncodeToString(make([]byte, 32)), "logs_path": "custom/logs"})
+	if err := os.WriteFile(filename, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := logging.New(io.Discard).WithContext(context.Background())
+	cfg, err := Load(ctx, filename)
+	if err != nil || cfg.LogsPath != filepath.Join(dir, "custom/logs") {
+		t.Fatalf("file log path was not resolved relative to config: %v", err)
+	}
+	for _, path := range []string{"overridden/logs", filepath.Join(dir, "absolute")} {
+		t.Setenv("NGA_REMINDER_LOGS_PATH", path)
+		cfg, err = Load(ctx, filename)
+		expected := path
+		if !filepath.IsAbs(expected) {
+			expected = filepath.Join(dir, expected)
+		}
+		if err != nil || cfg.LogsPath != expected {
+			t.Fatalf("environment log path did not override file: %v", err)
+		}
+	}
+	t.Chdir(dir)
+	t.Setenv("NGA_REMINDER_LOGS_PATH", "cwd-logs")
+	t.Setenv("NGA_REMINDER_API_TOKEN", "fake")
+	t.Setenv("NGA_REMINDER_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	cfg, err = Load(ctx, "")
+	if err != nil || cfg.LogsPath != filepath.Join(dir, "cwd-logs") {
+		t.Fatalf("log path without config did not use working directory: %v", err)
 	}
 }

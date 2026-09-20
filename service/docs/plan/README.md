@@ -34,6 +34,8 @@
 
 补充功能：[Spec13：基于 ngapost2md 的 Markdown 渲染](../spec/13-markdown-rendering.md)，已完成实现与自测。仅复刻渲染规则，不引入整个上游仓库；保留现有导出范围与资源处理。
 
+补充功能：[Spec14：日志文件、按日切分与 SQL 分流](../spec/14-daily-file-logging.md)，已完成实现与自测。默认 `data/logs`，按配置时区切分并保留 30 天；普通日志同时输出到终端，SQL 独立保存且仅 error 输出到终端。
+
 实际切换顺序：**Rust server 停机 → PG 迁移 SQLite → 核验 → Go 服务上线**。Go 制品、迁移工具、部署配置和副本演练在正式停机前准备完成；阶段编号不是停机期间的开发顺序。
 
 ## 本轮的简化边界

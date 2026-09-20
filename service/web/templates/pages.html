@@ -126,6 +126,7 @@ document.addEventListener('click', event => {
       <dt>监听地址</dt><dd><code>{{.Settings.ListenAddress}}</code></dd>
       <dt>数据库</dt><dd><code>{{.Settings.DatabasePath}}</code></dd>
       <dt>资源目录</dt><dd><code>{{.Settings.AssetsPath}}</code></dd>
+      <dt>日志目录</dt><dd><code>{{.Settings.LogsPath}}</code></dd>
       <dt>单资源下载上限</dt><dd>{{.Settings.MaxDownloadBytes}} 字节</dd>
       <dt>保存原始帖子 JSON</dt><dd>{{if .Settings.StoreRawPayload}}开启{{else}}关闭{{end}}</dd>
       <dt>服务时区</dt><dd>{{.Settings.Timezone}}</dd>

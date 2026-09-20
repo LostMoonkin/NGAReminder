@@ -146,17 +146,21 @@ func TestPollingReadErrorsRemainVisible(t *testing.T) {
 		if err := poll(ctx, time.Now()); err == nil {
 			t.Fatal("closed database must fail the poll")
 		}
-		count := 0
+		count, sqlCount := 0, 0
 		for _, event := range events(t, logs.Bytes()) {
 			if event["level"] == "error" {
-				count++
+				if event["log_type"] == "sql" {
+					sqlCount++
+				} else {
+					count++
+				}
 				if event["trace_id"] == "" || event["error"] == nil || len(event["causes"].([]any)) == 0 || len(event["stack"].([]any)) == 0 {
 					t.Fatal("polling error is missing its trace, cause, or stack")
 				}
 			}
 		}
-		if count != 1 {
-			t.Fatalf("polling error was logged %d times, want 1", count)
+		if count != 1 || sqlCount != 1 {
+			t.Fatalf("expected one boundary error and one SQL error, got %d and %d", count, sqlCount)
 		}
 	}
 }

@@ -16,10 +16,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Logger 只补充项目需要的脱敏；业务代码从 context 取得原生 zerolog。
+// Logger 统一脱敏和日志出口；业务代码从 context 取得原生 zerolog。
 type Logger struct {
 	zerolog.Logger
 	writer *redactingWriter
+	files  *dailyWriter
 }
 
 func New(out io.Writer) *Logger {
@@ -29,10 +30,15 @@ func New(out io.Writer) *Logger {
 
 // NewConsole 在结构化字段脱敏后输出文本，供命令行入口使用。
 func NewConsole(out io.Writer) *Logger {
-	return New(zerolog.ConsoleWriter{
+	return New(consoleWriter(out, nil))
+}
+
+func consoleWriter(out io.Writer, location *time.Location) zerolog.ConsoleWriter {
+	return zerolog.ConsoleWriter{
 		Out: out, NoColor: true, TimeFormat: "2006-01-02 15:04:05 -07:00",
-		FieldsOrder: []string{"listen_address", "event", "operation", "trace_id", "span_id", "parent_span_id"},
-	})
+		TimeLocation: location,
+		FieldsOrder:  []string{"listen_address", "event", "operation", "trace_id", "span_id", "parent_span_id"},
+	}
 }
 
 func (l *Logger) SetSecrets(secrets ...string) {
@@ -82,6 +88,20 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 	}
 	_, err = w.out.Write(append(encoded, '\n'))
 	if err != nil {
+		if files, ok := w.out.(*dailyWriter); ok {
+			// 独立终端出口避免递归写入故障文件，并保留脱敏、调用链和完整错误栈。
+			fallback := New(consoleWriter(files.console, files.location))
+			fallback.writer.replacements = w.replacements
+			fields := fallback.With()
+			for _, key := range []string{"trace_id", "span_id", "parent_span_id", "operation"} {
+				if value, ok := event[key].(string); ok {
+					fields = fields.Str(key, value)
+				}
+			}
+			logger := fields.Logger()
+			Error(logger.WithContext(context.Background()), err, "Log file output failed", zerolog.ErrorLevel)
+			return len(p), nil
+		}
 		return 0, err
 	}
 	return len(p), nil

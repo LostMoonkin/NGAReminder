@@ -10,6 +10,7 @@ services:
       NGA_REMINDER_LISTEN_ADDRESS: "0.0.0.0:8989"
       NGA_REMINDER_DATABASE_PATH: "/app/data/nga-reminder.db"
       NGA_REMINDER_ASSETS_PATH: "/app/data/assets"
+      NGA_REMINDER_LOGS_PATH: "/app/data/logs"
       NGA_REMINDER_API_TOKEN: "replace-with-your-api-token"
       # 用 openssl rand -base64 32 生成；已有数据必须沿用原部署密钥。
       NGA_REMINDER_ENCRYPTION_KEY: "replace-with-32-random-bytes-in-base64"
@@ -20,6 +21,7 @@ services:
       NGA_REMINDER_STORE_RAW_PAYLOAD: "false"
     volumes:
       - ./data:/app/data
+    # 可选保留终端输出；完整日志由服务写入 /app/data/logs，保留 30 天。
     logging:
       driver: json-file
       options:
