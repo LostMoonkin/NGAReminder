@@ -423,7 +423,7 @@ func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) 
 				return n.store.SaveDelivery(ctx, &d)
 			}
 		}
-		notice, e := n.deliveryNotice(ctx, d)
+		notice, e := n.deliveryNotice(ctx, d, c.Kind)
 		if e != nil {
 			return e
 		}
@@ -481,7 +481,7 @@ func (n *Notifications) Start() {
 }
 func (n *Notifications) Close() { n.wg.Wait(); n.work.Lock(); defer n.work.Unlock(); n.sender.Close() }
 
-func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Delivery) (infrastructure.Notice, error) {
+func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Delivery, kind string) (infrastructure.Notice, error) {
 	if d.AlertID != 0 {
 		alert, err := n.store.Alert(ctx, d.AlertID)
 		if err != nil {
@@ -515,5 +515,11 @@ func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Deliver
 		title = "用户监控：" + name
 		break
 	}
-	return infrastructure.Notice{Title: title, Text: heading + "\n" + content.Summary(p.Body, 1500) + "\n" + p.SourceURL, URL: p.SourceURL, Images: p.Resources}, nil
+	body := content.Summary(p.Body, 1500)
+	text := heading + "\n" + body + "\n" + p.SourceURL
+	if kind == "feishu" {
+		// 飞书沿用原卡片间距，原帖地址仅作为按钮目标，不重复追加到正文。
+		text = heading + "\n\n" + body
+	}
+	return infrastructure.Notice{Title: title, Text: text, URL: p.SourceURL, Images: p.Resources}, nil
 }

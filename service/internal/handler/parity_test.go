@@ -355,7 +355,8 @@ func TestNotificationTitlesFollowRust(t *testing.T) {
 		if err = json.Unmarshal([]byte(message), &notice); err != nil {
 			t.Fatal(err)
 		}
-		if notice["title"] != want || !strings.Contains(notice["body"], " · #7") || notice["url"] != post.SourceURL {
+		wantBody := fmt.Sprintf("%s · #7\nBody\n%s", author, post.SourceURL)
+		if notice["title"] != want || notice["body"] != wantBody || notice["url"] != post.SourceURL {
 			t.Fatal("notice differs from Rust", notice, want)
 		}
 	}

@@ -113,7 +113,7 @@ func (n *Notifier) Send(ctx context.Context, kind string, target ChannelTarget, 
 		}
 		return nil
 	}
-	elements := []any{map[string]any{"tag": "div", "text": map[string]string{"tag": "plain_text", "content": notice.Text}}}
+	elements := []any{map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": notice.Text}}}
 	for index, source := range notice.Images {
 		if index >= 3 {
 			break
@@ -131,9 +131,9 @@ func (n *Notifier) Send(ctx context.Context, kind string, target ChannelTarget, 
 			logging.Error(ctx, e, "Notification image unavailable; sending text and source links", zerolog.WarnLevel)
 		}
 	}
-	elements[0] = map[string]any{"tag": "div", "text": map[string]string{"tag": "plain_text", "content": notice.Text}}
-	elements = append(elements, map[string]any{"tag": "action", "actions": []any{map[string]any{"tag": "button", "text": map[string]string{"tag": "plain_text", "content": "查看原帖"}, "url": notice.URL}}})
-	card := map[string]any{"header": map[string]any{"title": map[string]string{"tag": "plain_text", "content": notice.Title}}, "elements": elements}
+	elements[0] = map[string]any{"tag": "div", "text": map[string]string{"tag": "lark_md", "content": notice.Text}}
+	elements = append(elements, map[string]any{"tag": "action", "actions": []any{map[string]any{"tag": "button", "text": map[string]string{"tag": "plain_text", "content": "查看帖子"}, "type": "primary", "url": notice.URL}}})
+	card := map[string]any{"header": map[string]any{"template": "blue", "title": map[string]string{"tag": "plain_text", "content": notice.Title}}, "elements": elements}
 	return n.SendMessage(ctx, app, target.ReceiveIDType, target.ReceiveID, "interactive", card, uuid)
 }
 
