@@ -33,9 +33,10 @@ type Notifications struct {
 func (m *Monitoring) Notifications() *Notifications { return m.notifications }
 
 type NotificationOverview struct {
-	App      FeishuAppInfo           `json:"app"`
-	Channels []repository.Channel    `json:"channels"`
-	Events   []repository.InboxEvent `json:"events"`
+	Alerts   []repository.SystemAlert `json:"alerts"`
+	App      FeishuAppInfo            `json:"app"`
+	Channels []repository.Channel     `json:"channels"`
+	Events   []repository.InboxEvent  `json:"events"`
 }
 
 // 管理页可回显应用标识，Secret 和密文不进入展示数据。
@@ -62,6 +63,9 @@ func (n *Notifications) Overview(ctx context.Context, page int) (data Notificati
 	}
 	data.App.Configured = app.Configured
 	if data.Channels, err = n.store.Channels(ctx); err != nil {
+		return data, err
+	}
+	if data.Alerts, err = n.store.Alerts(ctx, page); err != nil {
 		return data, err
 	}
 	data.Events, err = n.store.Inbox(ctx, page)
@@ -192,7 +196,12 @@ func (n *Notifications) SaveChannel(ctx context.Context, id int64, input Channel
 	}
 	channel.Name, channel.Kind, channel.Enabled = strings.TrimSpace(input.Name), input.Kind, input.Enabled
 	zerolog.Ctx(ctx).Info().Int64("channel_id", id).Str("kind", input.Kind).Bool("enabled", input.Enabled).Msg("Saving notification channel")
-	err = n.store.SaveChannel(ctx, &channel)
+	err = n.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
+		if e := tx.SaveChannel(ctx, &channel); e != nil {
+			return e
+		}
+		return tx.EnqueueOpenAlerts(ctx)
+	})
 	return channel, err
 }
 func (n *Notifications) ChangeChannel(ctx context.Context, id int64, action string) (err error) {
@@ -221,7 +230,10 @@ func (n *Notifications) ChangeChannel(ctx context.Context, id int64, action stri
 			return tx.DeleteChannel(ctx, id)
 		}
 		c.Enabled = action == "enable"
-		return tx.SaveChannel(ctx, &c)
+		if e := tx.SaveChannel(ctx, &c); e != nil {
+			return e
+		}
+		return tx.EnqueueOpenAlerts(ctx)
 	})
 }
 func (n *Notifications) TestChannel(ctx context.Context, id int64) (err error) {
@@ -327,6 +339,15 @@ func (n *Notifications) Retry(ctx context.Context, id int64) (err error) {
 	if !c.Enabled {
 		return InvalidInput("渠道已关闭，请先启用")
 	}
+	if d.AlertID != 0 {
+		alert, e := n.store.Alert(ctx, d.AlertID)
+		if e != nil {
+			return e
+		}
+		if alert.ResolvedAt != nil {
+			return InvalidInput("该告警已解除，无需重新投递")
+		}
+	}
 	if d.Status == "sent" {
 		return InvalidInput("该通知已发送成功")
 	}
@@ -383,15 +404,21 @@ func (n *Notifications) Deliver(ctx context.Context, now time.Time) (err error) 
 		}
 		ctx, span = logging.Start(ctx, "service.deliver_notifications")
 		zerolog.Ctx(ctx).Info().Int64("channel_id", c.ID).Int64("delivery_id", d.ID).Int("attempt", d.Attempts+1).Msg("Starting notification delivery")
-		event, e := n.store.Event(ctx, d.EventID)
+		if d.AlertID != 0 {
+			alert, e := n.store.Alert(ctx, d.AlertID)
+			if e != nil {
+				return e
+			}
+			if alert.ResolvedAt != nil {
+				d.Status, d.Error = "cancelled", "告警已解除"
+				return n.store.SaveDelivery(ctx, &d)
+			}
+		}
+		notice, e := n.deliveryNotice(ctx, d)
 		if e != nil {
 			return e
 		}
-		p := event.Post
-		notice := infrastructure.Notice{Title: content.Summary(p.Subject, 80), Text: p.Author + "\n" + content.Summary(p.Body, 1500) + "\n" + p.SourceURL, URL: p.SourceURL, Images: p.Resources}
-		if notice.Title == "" {
-			notice.Title = fmt.Sprintf("NGA TID %d", p.TID)
-		}
+
 		sendErr := n.send(ctx, c, notice, fmt.Sprintf("nga-delivery-%d", d.ID))
 		d.Attempts++
 		d.TraceID = logging.TraceID(ctx)
@@ -444,3 +471,40 @@ func (n *Notifications) Start() {
 	})
 }
 func (n *Notifications) Close() { n.wg.Wait(); n.work.Lock(); defer n.work.Unlock(); n.sender.Close() }
+
+func (n *Notifications) deliveryNotice(ctx context.Context, d repository.Delivery) (infrastructure.Notice, error) {
+	if d.AlertID != 0 {
+		alert, err := n.store.Alert(ctx, d.AlertID)
+		if err != nil {
+			return infrastructure.Notice{}, err
+		}
+		return infrastructure.Notice{Title: alert.Title, Text: alert.Body, URL: alert.URL}, nil
+	}
+	event, err := n.store.Event(ctx, d.EventID)
+	if err != nil {
+		return infrastructure.Notice{}, err
+	}
+	p := event.Post
+	title := ""
+	thread, err := n.store.Thread(ctx, p.TID)
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return infrastructure.Notice{}, err
+	}
+	title = content.Summary(thread.Title, 80)
+	if title == "" {
+		title = fmt.Sprintf("NGA TID %d", p.TID)
+	}
+	heading := fmt.Sprintf("%s · #%d", p.Author, p.Floor)
+	for _, source := range event.Sources {
+		if source.Kind != "uid" {
+			continue
+		}
+		name := p.Author
+		if strings.TrimSpace(name) == "" {
+			name = fmt.Sprintf("UID %d", p.AuthorUID)
+		}
+		title = "用户监控：" + name
+		break
+	}
+	return infrastructure.Notice{Title: title, Text: heading + "\n" + content.Summary(p.Body, 1500) + "\n" + p.SourceURL, URL: p.SourceURL, Images: p.Resources}, nil
+}

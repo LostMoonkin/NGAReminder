@@ -23,11 +23,20 @@ func postKey(r row) string {
 }
 
 func (m *importer) content() error {
+	if err := m.walk("threads", func(r row) error {
+		v := repository.Thread{TID: r.number("tid"), FID: r.number("fid"), Title: r.text("title"), ForumName: r.text("forum_name"), AuthorUID: r.number("author_uid"), AuthorName: r.text("author_name"), Coverage: r.text("coverage"), RemoteRows: r.number("remote_vrows"), RemoteTotalPages: int(r.number("remote_total_pages")), FirstSeenAt: r.at("first_seen_at"), LastSeenAt: r.at("last_seen_at")}
+		if v.TID <= 0 || v.Coverage != "full" && v.Coverage != "partial" {
+			return sourceError(r.table, "tid/coverage", "invalid thread metadata")
+		}
+		return m.write(&v)
+	}); err != nil {
+		return err
+	}
 	if err := m.write(&repository.ResourceSettings{ID: 1, DownloadEnabled: m.o.DownloadEnabled}); err != nil {
 		return err
 	}
 	if err := m.walk("assets", func(r row) error {
-		v := repository.Resource{URL: r.text("source_url"), MIME: r.text("mime_type"), Size: r.number("size_bytes")}
+		v := repository.Resource{OriginalName: r.text("original_name"), URL: r.text("source_url"), MIME: r.text("mime_type"), Size: r.number("size_bytes")}
 		if v.URL == "" || v.Size < 0 {
 			return sourceError(r.table, "source_url", "invalid asset metadata")
 		}
@@ -57,7 +66,13 @@ func (m *importer) content() error {
 		return err
 	}
 	return m.walk("posts", func(r row) error {
-		v := repository.Post{ID: m.id(r.table, r.text("id")), TID: r.number("tid"), Key: postKey(r), PID: r.number("pid"), Kind: r.text("post_kind"), Floor: r.number("floor_number"), AuthorUID: r.number("author_uid"), Author: r.text("author_name"), Subject: r.text("subject"), Body: r.text("content_raw"), CreatedAt: r.at("first_seen_at")}
+		v := repository.Post{PageNumber: int(r.number("page_number")), RawPayload: json.RawMessage(r.text("raw_payload")), ID: m.id(r.table, r.text("id")), TID: r.number("tid"), Key: postKey(r), PID: r.number("pid"), Kind: r.text("post_kind"), Floor: r.number("floor_number"), AuthorUID: r.number("author_uid"), Author: r.text("author_name"), Subject: r.text("subject"), Body: r.text("content_raw"), CreatedAt: r.at("first_seen_at")}
+		if v.PageNumber < 1 {
+			return sourceError(r.table, "page_number", "page number must be positive")
+		}
+		if len(v.RawPayload) > 0 && !json.Valid(v.RawPayload) {
+			return sourceError(r.table, "raw_payload", "invalid raw post JSON")
+		}
 		if v.TID <= 0 {
 			return sourceError(r.table, "tid", "TID must be positive")
 		}

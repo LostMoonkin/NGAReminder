@@ -140,7 +140,20 @@ func (m *Monitoring) nextRun(watch repository.Watch, now time.Time) *time.Time {
 			return until
 		}
 	}
-	next := now.Add(intervalAt(watch, now.In(m.location))).UTC()
+	local := now.In(m.location)
+	next := now.Add(intervalAt(watch, local)).UTC()
+	// 覆盖规则变化时重新采集并计算间隔，不能被当前较长的间隔跨过。
+	for offset := -1; offset <= 7; offset++ {
+		for _, rule := range watch.IntervalRules {
+			if window, ok := windowOnDay(rule.TimeWindow, local.AddDate(0, 0, offset)); ok {
+				for _, boundary := range []time.Time{window.start, window.end} {
+					if boundary.After(now) && boundary.Before(next) {
+						next = boundary.UTC()
+					}
+				}
+			}
+		}
+	}
 	return &next
 }
 

@@ -158,7 +158,7 @@ func (m *Monitoring) backfillReplies(ctx context.Context, credentials infrastruc
 				post.PublishedAt = &published
 			}
 			if post.AuthorUID == job.UID && !published.Before(job.StartAt) && !published.After(job.EndAt) {
-				posts = append(posts, storedPost(post))
+				posts = append(posts, m.storedPost(post))
 			}
 			e = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 				saved, e := tx.InsertPosts(ctx, posts)
@@ -198,6 +198,9 @@ func pauseAccount(ctx context.Context, tx *repository.Store, now time.Time, mess
 	changed = account.Status != "auth_paused"
 	account.Status, account.LastError, account.CheckedAt = "auth_paused", message, &now
 	if err = tx.SaveAccount(ctx, &account); err != nil {
+		return false, err
+	}
+	if err = tx.EnsureAuthAlert(ctx); err != nil {
 		return false, err
 	}
 	return changed, tx.SetAuthPaused(ctx, true)

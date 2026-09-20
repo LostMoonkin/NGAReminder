@@ -41,6 +41,8 @@ func (f *noticeFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	switch {
 	case r.URL.Host == "bark.example.invalid":
 		f.barkCalls++
+		body, _ := io.ReadAll(r.Body)
+		f.message = string(body)
 		if f.barkFail {
 			return noticeResponse(`{"code":500}`), nil
 		}
@@ -60,7 +62,9 @@ func (f *noticeFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			_ = png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1)))
 			return noticeResponse(data.String()), nil
 		}
-		return noticeResponse("not an image"), nil
+		response := noticeResponse("not found")
+		response.StatusCode = http.StatusNotFound
+		return response, nil
 	}
 	return nil, fmt.Errorf("unexpected notification fixture endpoint")
 }

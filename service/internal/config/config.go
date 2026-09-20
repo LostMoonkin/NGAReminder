@@ -17,7 +17,11 @@ import (
 	"ngareminder/service/internal/logging"
 )
 
+const DefaultMaxDownloadBytes int64 = 10 * 1024 * 1024
+
 type Config struct {
+	MaxDownloadBytes  int64  `json:"max_download_bytes"`
+	StoreRawPayload   bool   `json:"store_raw_payload"`
 	ListenAddress     string `json:"listen_address"`
 	DatabasePath      string `json:"database_path"`
 	AssetsPath        string `json:"assets_path"`
@@ -30,6 +34,8 @@ type Config struct {
 
 // Public 是管理页/API 的允许字段；新增凭据不会因序列化 Config 而泄露。
 type Public struct {
+	MaxDownloadBytes  int64  `json:"max_download_bytes"`
+	StoreRawPayload   bool   `json:"store_raw_payload"`
 	ListenAddress     string `json:"listen_address"`
 	DatabasePath      string `json:"database_path"`
 	AssetsPath        string `json:"assets_path"`
@@ -38,7 +44,7 @@ type Public struct {
 }
 
 func (c Config) Public() Public {
-	return Public{c.ListenAddress, c.DatabasePath, c.AssetsPath, c.Timezone, c.BackgroundEnabled}
+	return Public{ListenAddress: c.ListenAddress, DatabasePath: c.DatabasePath, AssetsPath: c.AssetsPath, Timezone: c.Timezone, BackgroundEnabled: c.BackgroundEnabled, MaxDownloadBytes: c.MaxDownloadBytes, StoreRawPayload: c.StoreRawPayload}
 }
 
 func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey} }
@@ -46,7 +52,7 @@ func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey
 func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	_, span := logging.Start(ctx, "config.load")
 	defer span.End(&err)
-	cfg = Config{ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
+	cfg = Config{MaxDownloadBytes: DefaultMaxDownloadBytes, ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
 	base := "."
 	if filename != "" {
 		var file *os.File
@@ -81,6 +87,18 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 			return cfg, logging.WithStack(errors.New("NGA_REMINDER_BACKGROUND_ENABLED must be true or false"))
 		}
 	}
+	if value, ok := os.LookupEnv("NGA_REMINDER_STORE_RAW_PAYLOAD"); ok {
+		cfg.StoreRawPayload, err = strconv.ParseBool(value)
+		if err != nil {
+			return cfg, logging.WithStack(errors.New("NGA_REMINDER_STORE_RAW_PAYLOAD must be true or false"))
+		}
+	}
+	if value, ok := os.LookupEnv("NGA_REMINDER_MAX_DOWNLOAD_BYTES"); ok {
+		cfg.MaxDownloadBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return cfg, logging.WithStack(errors.New("NGA_REMINDER_MAX_DOWNLOAD_BYTES must be an integer"))
+		}
+	}
 	if err = cfg.validate(); err != nil {
 		return cfg, err
 	}
@@ -97,6 +115,9 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 }
 
 func (c Config) validate() error {
+	if c.MaxDownloadBytes <= 0 || c.MaxDownloadBytes == int64(^uint64(0)>>1) {
+		return logging.WithStack(errors.New("max_download_bytes must be positive and allow a one-byte overflow check"))
+	}
 	_, port, err := net.SplitHostPort(c.ListenAddress)
 	if err != nil {
 		return logging.WithStack(errors.New("listen_address must use the host:port format"))

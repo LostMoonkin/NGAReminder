@@ -1,9 +1,15 @@
 package infrastructure
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"image"
+	"image/png"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -33,4 +39,31 @@ func TestLoginResponseFixtures(t *testing.T) {
 	if err == nil {
 		t.Fatal("error response cookies were accepted")
 	}
+}
+
+func TestPrepareLoginWithArchivedAccountPage(t *testing.T) {
+	account, err := os.ReadFile("../../../archive/rust-service/service/tests/fixtures/nga/account_page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captcha bytes.Buffer
+	if err = png.Encode(&captcha, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	client := NewNGA("fixture-agent", roundTrip(func(r *http.Request) (*http.Response, error) {
+		body, mime := "entry", "text/html"
+		switch r.URL.Path {
+		case "/nuke/account_copy.html":
+			body = string(account)
+		case "/login_check_code.php":
+			body, mime = captcha.String(), "image/png"
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {mime}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}))
+	defer client.Close()
+	challenge, _, err := client.PrepareLogin(context.Background())
+	if err != nil {
+		t.Fatal("archived JavaScript PEM could not prepare login", err)
+	}
+	challenge.Close()
 }

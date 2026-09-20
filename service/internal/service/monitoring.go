@@ -27,6 +27,7 @@ func (e *InputError) Error() string     { return e.Message }
 func InvalidInput(message string) error { return logging.WithStack(&InputError{message}) }
 
 type Monitoring struct {
+	storeRaw      bool
 	store         *repository.Store
 	nga           *infrastructure.NGA
 	cipher        *infrastructure.CredentialCipher
@@ -67,13 +68,23 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	}
 	lifeCtx, cancel := context.WithCancel(ctx)
 	notices := &Notifications{store: store, cipher: cipher, sender: sender, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx}
-	monitor = &Monitoring{notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
+	monitor = &Monitoring{storeRaw: cfg.StoreRawPayload, notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
 	monitor.bot = &Bot{monitor: monitor}
 	monitor.renewal = &Renewal{monitor: monitor}
-	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}}
+	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}, maxDownloadBytes: cfg.MaxDownloadBytes}
 	if err = store.InterruptRenewals(initCtx); err != nil {
 		cancel()
 		return nil, err
+	}
+	if cfg.BackgroundEnabled {
+		account, e := store.Account(initCtx)
+		if e == nil && account.Status == "auth_paused" {
+			e = store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error { return tx.EnsureAuthAlert(ctx) })
+		}
+		if e != nil {
+			cancel()
+			return nil, e
+		}
 	}
 	return monitor, nil
 }
@@ -227,6 +238,9 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 				return e
 			}
 			if account.Status == "auth_paused" {
+				if e := tx.EnsureAuthAlert(ctx); e != nil {
+					return e
+				}
 				return tx.SetAuthPaused(ctx, true)
 			}
 			return nil
@@ -250,6 +264,9 @@ func (m *Monitoring) SaveAccount(ctx context.Context, input AccountInput, checkO
 	account.Status, account.LastError = "valid", ""
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		if e := tx.SaveAccount(ctx, &account); e != nil {
+			return e
+		}
+		if e := tx.ResolveAuthAlert(ctx); e != nil {
 			return e
 		}
 		return tx.SetAuthPaused(ctx, false)
@@ -501,6 +518,9 @@ func (m *Monitoring) Run(ctx context.Context, id int64) (run repository.Run, err
 
 // 对页面和持久化摘要只提供已知安全的错误语义；内部原因和栈由结束边界统一记录。
 func FailureMessage(err error) string {
+	if errors.Is(err, infrastructure.ErrNGAUserMissing) {
+		return "用户不存在，已停止自动采集"
+	}
 	var login *infrastructure.LoginError
 	if errors.As(err, &login) {
 		labels := map[string]string{"protocol_changed": "NGA 登录协议已变化，请手动更新 Cookie", "invalid_captcha_image": "验证码图片无效，请重新发起", "invalid_captcha": "验证码错误，请重新发起", "invalid_credentials": "NGA 登录名或密码错误，请修改配置后重试", "unsupported_challenge": "NGA 要求手机、短信或腾讯验证，请手动更新 Cookie", "busy": "NGA 服务器忙，请稍后重新发起", "candidate_cookie_missing": "登录响应未提供可校验 Cookie，请手动更新", "login_rejected": "NGA 拒绝登录，请检查账号后重新发起", "response_too_large": "NGA 登录响应异常，请手动更新 Cookie"}

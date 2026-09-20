@@ -1,5 +1,7 @@
 # 阶段 09：Rust PostgreSQL 数据迁移到 Go SQLite
 
+后续行为补充以 [Spec12：Rust 行为对齐与迁移补全](12-rust-parity-fixes.md) 为准。
+
 ## 目标
 
 在 Rust 服务停机后，用脚本完整导出 PostgreSQL 数据，并转换为 Go 服务可直接使用的 SQLite 文件。assets 继续挂载原目录，不迁移资源文件。

@@ -139,6 +139,9 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		return err
 	}
 	watch.Title = first.Title
+	if err := m.store.UpsertThread(ctx, storedThread(first.Metadata, "full", first.Rows, first.TotalPages, first.PerPage)); err != nil {
+		return err
+	}
 	gaps, err := loadGapMap(ctx, m.store, watch.ID)
 	if err != nil {
 		return err
@@ -217,7 +220,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 					continue
 				}
 			}
-			posts = append(posts, storedPost(post))
+			posts = append(posts, m.storedPost(post))
 		}
 		next := *run
 		err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
@@ -303,6 +306,9 @@ func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.
 func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, watch *repository.Watch, cause error) error {
 	now := time.Now().UTC()
 	run.Status, run.FinishedAt, run.Error = "failed", &now, FailureMessage(cause)
+	if watch.Kind == "uid" && errors.Is(cause, infrastructure.ErrNGAMissing) {
+		run.Error = "用户的候选主题或回复不存在，本轮失败，稍后重试"
+	}
 	switch {
 	case errors.Is(cause, context.Canceled):
 		run.Status = "interrupted"
@@ -312,7 +318,7 @@ func (m *Monitoring) finishFailedRun(ctx context.Context, run *repository.Run, w
 		run.Status = "skipped_busy"
 	case errors.Is(cause, infrastructure.ErrNGAAuth):
 		run.Status = "auth_paused"
-	case errors.Is(cause, infrastructure.ErrNGAMissing):
+	case errors.Is(cause, infrastructure.ErrNGAUserMissing), watch.Kind == "tid" && errors.Is(cause, infrastructure.ErrNGAMissing):
 		run.Status = "missing"
 	}
 	triggerRenewal := false

@@ -15,6 +15,8 @@ func (h *Handler) renewalRoutes(router *gin.Engine) {
 		group.GET("/renewal", h.renewal)
 		group.POST("/renewal", h.saveRenewal)
 		group.POST("/renewal/start", h.startRenewal)
+		group.POST("/renewal/cancel", h.cancelRenewal)
+		group.POST("/renewal/test", h.testRenewal)
 	}
 }
 func (h *Handler) renewal(c *gin.Context) {
@@ -55,4 +57,29 @@ func (h *Handler) startRenewal(c *gin.Context) {
 		return
 	}
 	h.respond(c, 200, result, "/admin/renewal")
+}
+
+func (h *Handler) cancelRenewal(c *gin.Context) {
+	if err := h.monitor.Renewal().Cancel(c.Request.Context()); err != nil {
+		h.problem(c, err)
+		return
+	}
+	h.respond(c, 204, nil, "/admin/renewal")
+}
+func (h *Handler) testRenewal(c *gin.Context) {
+	result, err := h.monitor.Renewal().Test(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	if isAPI(c) {
+		c.JSON(200, result)
+		return
+	}
+	data, err := h.monitor.Renewal().Overview(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	h.render(c, 200, "renewal", gin.H{"Data": data, "Test": result.Detail, "TraceID": logging.TraceID(c.Request.Context())})
 }

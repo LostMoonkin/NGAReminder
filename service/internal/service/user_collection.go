@@ -96,7 +96,7 @@ func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure
 			}
 			found = true
 			if post.AuthorUID == watch.UID {
-				posts = append(posts, storedPost(post))
+				posts = append(posts, m.storedPost(post))
 			} else {
 				zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int64("tid", candidate.TID).Int64("expected_uid", watch.UID).Int64("author_uid", post.AuthorUID).Msg("Ignoring topic whose detail author differs from the watched user")
 			}
@@ -117,7 +117,7 @@ func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure
 				Int64("expected_uid", watch.UID).Int64("author_uid", post.AuthorUID).Msg("Ignoring reply whose detail author differs from the watched user")
 			continue
 		}
-		posts = append(posts, storedPost(post))
+		posts = append(posts, m.storedPost(post))
 	}
 	// 两份列表和所有详情成功后才一次提交；任何失败都保留原水位和基线。
 	watch.Title = strings.TrimSpace(profile.Username)
@@ -128,8 +128,18 @@ func (m *Monitoring) collectUser(ctx context.Context, credentials infrastructure
 	return m.finishSuccessfulRun(ctx, watch, run, 0, posts, nil)
 }
 
-func storedPost(post infrastructure.ParsedPost) repository.Post {
-	return repository.Post{TID: post.TID, Key: post.Key, PID: post.PID, Kind: post.Kind, Floor: post.Floor,
+func (m *Monitoring) storedPost(post infrastructure.ParsedPost) repository.Post {
+	thread := storedThread(post.Thread, "partial", 0, 0, 0)
+	raw := post.RawPayload
+	if !m.storeRaw {
+		raw = nil
+	}
+	return repository.Post{ResourceNames: post.ResourceNames, Thread: &thread, PageNumber: post.PageNumber, RawPayload: raw, TID: post.TID, Key: post.Key, PID: post.PID, Kind: post.Kind, Floor: post.Floor,
 		ParentKey: post.ParentKey, ParentFloor: post.ParentFloor, CommentToID: post.CommentToID, AuthorUID: post.AuthorUID,
 		Author: post.Author, Subject: post.Subject, Body: post.Body, PublishedAt: post.PublishedAt, SourceURL: post.SourceURL, Resources: post.Resources}
+}
+
+func storedThread(meta infrastructure.ThreadMetadata, coverage string, rows int64, pages, perPage int) repository.Thread {
+	return repository.Thread{TID: meta.TID, FID: int64(meta.FID), Title: meta.Title, ForumName: meta.ForumName,
+		AuthorUID: int64(meta.AuthorUID), AuthorName: meta.AuthorName, Coverage: coverage, RemoteRows: rows, RemoteTotalPages: pages, PerPage: perPage}
 }

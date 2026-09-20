@@ -26,7 +26,17 @@ func (n *number) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+type ThreadMetadata struct {
+	TID        int64
+	FID        number `json:"fid"`
+	Title      string `json:"tsubject"`
+	ForumName  string `json:"forum_name"`
+	AuthorUID  number `json:"tauthorid"`
+	AuthorName string `json:"tauthor"`
+}
+
 type ThreadPage struct {
+	Metadata   ThreadMetadata
 	Title      string
 	Page       int
 	TotalPages int
@@ -36,6 +46,10 @@ type ThreadPage struct {
 }
 
 type ParsedPost struct {
+	ResourceNames                                                       map[string]string
+	Thread                                                              ThreadMetadata
+	PageNumber                                                          int
+	RawPayload                                                          json.RawMessage
 	TID, PID, Floor, ParentFloor, AuthorUID                             int64
 	Key, Kind, ParentKey, CommentToID, Author, Subject, Body, SourceURL string
 	PublishedAt                                                         *time.Time
@@ -43,6 +57,7 @@ type ParsedPost struct {
 }
 
 type rawPost struct {
+	Raw         json.RawMessage `json:"-"`
 	TID         number          `json:"tid"`
 	PID         number          `json:"pid"`
 	Floor       *number         `json:"lou"`
@@ -57,19 +72,30 @@ type rawPost struct {
 	} `json:"author"`
 	Comments    []rawPost `json:"comments"`
 	Attachments []struct {
-		URL   string `json:"attachurl"`
-		Path  string `json:"path"`
-		Thumb string `json:"thumb"`
+		OriginalName string `json:"url_utf8_org_name"`
+		Name         string `json:"name"`
+		URL          string `json:"attachurl"`
+		Path         string `json:"path"`
+		Thumb        string `json:"thumb"`
 	} `json:"attches"`
+}
+
+func (p *rawPost) UnmarshalJSON(data []byte) error {
+	type fields rawPost
+	if err := json.Unmarshal(data, (*fields)(p)); err != nil {
+		return err
+	}
+	p.Raw = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPage, err error) {
 	var raw struct {
+		ThreadMetadata
 		Page         number    `json:"currentPage"`
 		Total        number    `json:"totalPage"`
 		PerPage      number    `json:"perPage"`
 		Rows         number    `json:"vrows"`
-		Title        string    `json:"tsubject"`
 		AttachPrefix string    `json:"attachPrefix"`
 		Posts        []rawPost `json:"result"`
 	}
@@ -79,7 +105,8 @@ func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPa
 	if int(raw.Page) != requestedPage || raw.Page < 1 || raw.Total < raw.Page || raw.PerPage < 1 || raw.Rows < 1 || len(raw.Posts) == 0 {
 		return result, logging.WithStack(errors.New("NGA thread page is empty or has inconsistent pagination"))
 	}
-	result = ThreadPage{Title: raw.Title, Page: int(raw.Page), TotalPages: int(raw.Total), PerPage: int(raw.PerPage), Rows: int64(raw.Rows)}
+	raw.ThreadMetadata.TID = tid
+	result = ThreadPage{Metadata: raw.ThreadMetadata, Title: raw.Title, Page: int(raw.Page), TotalPages: int(raw.Total), PerPage: int(raw.PerPage), Rows: int64(raw.Rows)}
 	for _, rawPost := range raw.Posts {
 		posts, parseErr := parsePost(rawPost, tid, nil, raw.AttachPrefix)
 		if parseErr != nil {
@@ -87,6 +114,10 @@ func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPa
 		}
 		if posts[0].Kind == "main" && posts[0].Subject == "" {
 			posts[0].Subject = raw.Title
+		}
+		for i := range posts {
+			posts[i].PageNumber = int(raw.Page)
+			posts[i].Thread = raw.ThreadMetadata
 		}
 		result.Posts = append(result.Posts, posts...)
 	}
@@ -98,7 +129,7 @@ func parsePost(raw rawPost, tid int64, parent *ParsedPost, prefix string) ([]Par
 	if int64(raw.TID) != tid || raw.Floor == nil || *raw.Floor < 0 || raw.Author.UID == nil {
 		return nil, logging.WithStack(errors.New("NGA post is missing its TID, floor, or author, or its TID differs from the request"))
 	}
-	p := ParsedPost{TID: tid, PID: int64(raw.PID), Floor: int64(*raw.Floor), AuthorUID: int64(*raw.Author.UID),
+	p := ParsedPost{RawPayload: raw.Raw, TID: tid, PID: int64(raw.PID), Floor: int64(*raw.Floor), AuthorUID: int64(*raw.Author.UID),
 		Author: raw.Author.Name, Subject: raw.Subject, Body: raw.Content, Kind: "reply", Key: "pid:" + fmt.Sprint(raw.PID), Resources: []string{}}
 	if parent != nil {
 		p.Kind, p.ParentKey, p.ParentFloor = "comment", parent.Key, parent.Floor
@@ -138,6 +169,16 @@ func parsePost(raw rawPost, tid int64, parent *ParsedPost, prefix string) ([]Par
 			path = attachment.Path
 		}
 		p.Resources = appendResource(p.Resources, path, prefix)
+		name := attachment.OriginalName
+		if name == "" {
+			name = attachment.Name
+		}
+		if resolved := appendResource(nil, path, prefix); name != "" && len(resolved) > 0 {
+			if p.ResourceNames == nil {
+				p.ResourceNames = map[string]string{}
+			}
+			p.ResourceNames[resolved[0]] = name
+		}
 		p.Resources = appendResource(p.Resources, attachment.Thumb, prefix)
 	}
 	for _, match := range resourceTag.FindAllStringSubmatch(p.Body, -1) {

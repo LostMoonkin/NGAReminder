@@ -170,7 +170,9 @@ func (n *Notifier) UploadImage(ctx context.Context, app AppCredentials, data []b
 	return *result.Data.ImageKey, nil
 }
 
-func ValidResourceURL(raw string) bool {
+func ValidResourceURL(raw string) bool { return validResourceURL(raw, false) }
+
+func validResourceURL(raw string, imageOnly bool) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" {
 		return false
@@ -179,12 +181,12 @@ func ValidResourceURL(raw string) bool {
 	case "img.nga.cn", "img.nga.178.com", "img4.nga.178.com":
 		return true
 	}
-	return false
+	return !imageOnly && (u.Hostname() == "img6.nga.cn" || u.Hostname() == "img7.nga.cn" || u.Hostname() == "img8.nga.cn")
 }
 func (n *Notifier) DownloadResource(ctx context.Context, source string, limit int64, imageOnly bool) (data []byte, mime string, err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.download_resource")
 	defer span.End(&err)
-	if !ValidResourceURL(source) {
+	if !validResourceURL(source, imageOnly) {
 		return nil, "", logging.WithStack(errors.New("resource URL is not on an approved NGA host"))
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", source, nil)
@@ -196,17 +198,23 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 		return nil, "", err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, "", logging.WithStack(fmt.Errorf("NGA resource returned HTTP %d", response.StatusCode))
+	}
+	if limit <= 0 || limit == int64(^uint64(0)>>1) || response.ContentLength > limit {
+		return nil, "", logging.WithStack(errors.New("NGA resource exceeds the size limit"))
 	}
 	data, err = io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, "", logging.Wrap(err, "read NGA resource")
 	}
-	if len(data) == 0 || int64(len(data)) > limit {
+	if int64(len(data)) > limit || imageOnly && len(data) == 0 {
 		return nil, "", logging.WithStack(errors.New("NGA resource is empty or exceeds the size limit"))
 	}
-	mime = http.DetectContentType(data)
+	mime = response.Header.Get("Content-Type")
+	if imageOnly || mime == "" {
+		mime = http.DetectContentType(data)
+	}
 	if imageOnly && !strings.HasPrefix(mime, "image/") {
 		return nil, "", logging.WithStack(errors.New("NGA resource is not a supported image"))
 	}

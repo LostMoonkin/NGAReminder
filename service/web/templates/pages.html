@@ -116,8 +116,8 @@ document.addEventListener('click', event => {
     </form></details>
   </section>
   <section class="card" id="saved-threads">
-    <h2>已保存主题</h2><p class="muted">删除监控后，已保存帖子仍可在这里浏览。</p>
-    {{range .Data.Threads}}<p><a href="/admin/threads/{{.TID}}">TID {{.TID}} {{.Title}}</a> · {{.Count}} 条</p>{{else}}<p>尚无帖子。</p>{{end}}
+    <h2>已保存主题</h2><p><a href="/admin/users">用户内容汇总</a></p><p class="muted">删除监控后，已保存帖子仍可在这里浏览。</p>
+    {{range .Data.Threads}}<p><a href="/admin/threads/{{.TID}}">TID {{.TID}} {{.Title}}</a> · {{.Count}} 条 · {{.ForumName}} · {{.AuthorName}} · {{if eq .Coverage "full"}}主题元数据{{else}}局部元数据{{end}} · {{when .LastSeenAt}}</p>{{else}}<p>尚无主题。</p>{{end}}
   </section>
   <section class="card">
     <h2>当前运行设置</h2>
@@ -126,6 +126,8 @@ document.addEventListener('click', event => {
       <dt>监听地址</dt><dd><code>{{.Settings.ListenAddress}}</code></dd>
       <dt>数据库</dt><dd><code>{{.Settings.DatabasePath}}</code></dd>
       <dt>资源目录</dt><dd><code>{{.Settings.AssetsPath}}</code></dd>
+      <dt>单资源下载上限</dt><dd>{{.Settings.MaxDownloadBytes}} 字节</dd>
+      <dt>保存原始帖子 JSON</dt><dd>{{if .Settings.StoreRawPayload}}开启{{else}}关闭{{end}}</dd>
       <dt>服务时区</dt><dd>{{.Settings.Timezone}}</dd>
       <dt>当前时间</dt><dd>{{.Settings.CurrentTime}}</dd>
       <dt>后台任务</dt><dd>{{if .Settings.BackgroundEnabled}}允许启动{{else}}关闭{{end}}</dd>
@@ -189,7 +191,7 @@ document.addEventListener('click', event => {
   {{range .Data.Posts}}{{if ne $tid .TID}}<h2>TID {{.TID}} {{.Subject}}</h2>{{$tid = .TID}}{{end}}<article>
     <p><strong>{{if eq .Kind "main"}}主楼{{else if eq .Kind "comment"}}{{.ParentFloor}} 楼下的评论{{else}}{{.Floor}} 楼{{end}} · {{.Author}}</strong> <span class="muted small">UID {{.AuthorUID}} · PID {{.PID}} · {{when .PublishedAt}}</span></p>
     {{if .Subject}}<p>{{.Subject}}</p>{{end}}<div class="post-body">{{rich .Body .Resources}}</div>
-    <p class="small"><a href="{{.SourceURL}}" target="_blank" rel="noreferrer">NGA 原帖</a>{{if .ParentKey}} · 父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}{{end}}</p>
+    <p class="small"><a href="{{.WebURL}}" target="_blank" rel="noreferrer">NGA 原帖</a>{{if .ParentKey}} · 父帖 {{.ParentKey}} · comment_to_id {{.CommentToID}}{{end}}</p>
     {{if .Resources}}<details><summary>资源地址（{{len .Resources}}）</summary>{{range .Resources}}<p class="small"><a href="{{.}}" target="_blank" rel="noreferrer">{{.}}</a></p>{{end}}</details>{{end}}
   </article>{{else}}<p>尚无保存内容；从现在开始的基线不会导入旧楼层。</p>{{end}}
   <nav class="actions">{{if .Previous}}<a class="button secondary" href="?page={{.Previous}}">上一页</a>{{end}}{{if .Next}}<a class="button secondary" href="?page={{.Next}}">下一页</a>{{end}}</nav>
@@ -235,3 +237,9 @@ document.addEventListener('click', event => {
 <label>历史页面并发数<input name="history_concurrency" type="number" min="1" max="16" value="{{if .}}{{.HistoryConcurrency}}{{else}}1{{end}}" required></label>
 <p class="small muted">1 表示串行，最多 16；仅全量初始化时生效。不同监控可同时运行，所有 NGA 请求共用 120 QPM 限流。</p>
 {{end}}
+
+{{define "users"}}<!doctype html><html lang="zh-CN"><head>{{template "head"}}</head><body><main>
+<h1>用户内容汇总</h1><p><a href="/admin">返回概览</a></p>
+<table><thead><tr><th>用户</th><th>已保存帖子</th><th>涉及主题</th><th>最新发布时间</th><th>监控</th></tr></thead><tbody>
+{{range .Users}}<tr><td><a href="/admin/users/{{.UID}}">{{if .Username}}{{.Username}}{{else}}UID {{.UID}}{{end}}</a></td><td>{{.PostCount}}</td><td>{{.ThreadCount}}</td><td>{{when .LastPublishedAt}}</td><td><a href="/admin/watches/{{.WatchID}}">查看监控</a></td></tr>{{else}}<tr><td colspan="5">暂无 UID 监控</td></tr>{{end}}
+</tbody></table><footer>关联 ID：{{.TraceID}}</footer></main></body></html>{{end}}

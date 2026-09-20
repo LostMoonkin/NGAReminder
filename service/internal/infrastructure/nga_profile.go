@@ -14,6 +14,8 @@ import (
 	"ngareminder/service/internal/logging"
 )
 
+var ErrNGAUserMissing = errors.New("NGA user does not exist")
+
 type UserProfile struct {
 	UID      int64
 	Username string
@@ -38,7 +40,7 @@ func parseUserProfile(body []byte, uid int64) (profile UserProfile, err error) {
 	_, after, ok := strings.Cut(string(decoded), "__UCPUSER")
 	start := strings.IndexByte(after, '{')
 	if !ok || start < 0 {
-		return profile, logging.WithStack(errors.New("NGA user profile is missing its user object"))
+		return profile, logging.Wrap(ErrNGAUserMissing, "NGA user profile is missing its user object")
 	}
 	var raw struct {
 		UID      number `json:"uid"`
@@ -49,7 +51,7 @@ func parseUserProfile(body []byte, uid int64) (profile UserProfile, err error) {
 		return profile, logging.Wrap(err, "decode NGA user profile object")
 	}
 	if int64(raw.UID) != uid || uid <= 0 {
-		return profile, logging.WithStack(errors.New("NGA user profile does not match the requested UID"))
+		return profile, logging.Wrap(ErrNGAUserMissing, "NGA user profile does not match the requested UID")
 	}
 	return UserProfile{UID: uid, Username: raw.Username}, nil
 }

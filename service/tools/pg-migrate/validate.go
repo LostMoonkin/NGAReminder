@@ -18,9 +18,18 @@ func (m *importer) validate() error {
 		return logging.WithStack(errors.New("SQLite integrity check failed"))
 	}
 	for name, query := range map[string]string{
-		"event posts":           "SELECT COUNT(*) FROM inbox_events e LEFT JOIN posts p ON p.id=e.post_id WHERE p.id IS NULL",
-		"event sources":         "SELECT COUNT(*) FROM event_watches w LEFT JOIN inbox_events e ON e.id=w.event_id WHERE e.id IS NULL",
-		"delivery events":       "SELECT COUNT(*) FROM deliveries d LEFT JOIN inbox_events e ON e.id=d.event_id WHERE e.id IS NULL",
+		"event posts":     "SELECT COUNT(*) FROM inbox_events e LEFT JOIN posts p ON p.id=e.post_id WHERE p.id IS NULL",
+		"event sources":   "SELECT COUNT(*) FROM event_watches w LEFT JOIN inbox_events e ON e.id=w.event_id WHERE e.id IS NULL",
+		"delivery events": "SELECT COUNT(*) FROM deliveries d LEFT JOIN inbox_events e ON e.id=d.event_id WHERE d.alert_id=0 AND e.id IS NULL",
+		"delivery alerts": "SELECT COUNT(*) FROM deliveries d LEFT JOIN system_alerts a ON a.id=d.alert_id WHERE d.alert_id<>0 AND (a.id IS NULL OR d.event_id<>0)",
+		"post provenance": `SELECT COUNT(*) FROM migration_source s JOIN posts p
+            ON p.tid=json_extract(s.data,'$.tid') AND p.key=CASE WHEN json_extract(s.data,'$.post_kind')='topic' THEN 'main' ELSE 'pid:'||json_extract(s.data,'$.pid') END
+            WHERE s.table_name='posts' AND (p.page_number<>json_extract(s.data,'$.page_number') OR COALESCE(CAST(p.raw_payload AS TEXT),'')<>json_extract(s.data,'$.raw_payload'))`,
+		"thread metadata": `SELECT COUNT(*) FROM migration_source s JOIN threads t ON t.tid=json_extract(s.data,'$.tid')
+            WHERE s.table_name='threads' AND (t.fid<>json_extract(s.data,'$.fid') OR t.title<>json_extract(s.data,'$.title') OR t.forum_name<>json_extract(s.data,'$.forum_name')
+            OR t.author_uid<>json_extract(s.data,'$.author_uid') OR t.author_name<>json_extract(s.data,'$.author_name') OR t.coverage<>json_extract(s.data,'$.coverage')
+            OR t.remote_rows<>json_extract(s.data,'$.remote_vrows') OR t.remote_total_pages<>json_extract(s.data,'$.remote_total_pages'))`,
+		"post threads":          "SELECT COUNT(*) FROM posts p LEFT JOIN threads t ON t.tid=p.tid WHERE t.tid IS NULL",
 		"delivery channels":     "SELECT COUNT(*) FROM deliveries d LEFT JOIN channels c ON c.id=d.channel_id WHERE c.id IS NULL",
 		"post observations":     "SELECT COUNT(*) FROM watch_posts w LEFT JOIN posts p ON p.id=w.post_id WHERE p.id IS NULL",
 		"comment parents":       "SELECT COUNT(*) FROM posts c LEFT JOIN posts p ON p.tid=c.tid AND p.key=c.parent_key WHERE c.kind='comment' AND p.id IS NULL",
@@ -50,14 +59,14 @@ func (m *importer) validate() error {
 			return sourceError("watch_targets", "id", "unmapped historical watch reference")
 		}
 	}
-	for _, table := range strings.Fields("accounts watches posts runs feishu_apps channels bot_settings bot_bindings bot_receipts renewal_settings renewal_requests resource_settings resources inbox_events event_watches deliveries watch_posts backfills floor_gaps") {
+	for _, table := range strings.Fields("accounts watches posts threads system_alerts runs feishu_apps channels bot_settings bot_bindings bot_receipts renewal_settings renewal_requests resource_settings resources inbox_events event_watches deliveries watch_posts backfills floor_gaps") {
 		var count int64
 		if err := m.db.Table(table).Count(&count).Error; err != nil {
 			return logging.WithStack(err)
 		}
 		m.report.Target[table] = count
 	}
-	for from, to := range map[string]string{"nga_accounts": "accounts", "posts": "posts", "assets": "resources", "notification_channels": "channels", "crawl_runs": "runs", "uid_reply_backfill_jobs": "backfills", "thread_floor_gaps": "floor_gaps", "nga_account_renewal_settings": "renewal_settings", "nga_login_sessions": "renewal_requests", "bot_inbound_events": "bot_receipts"} {
+	for from, to := range map[string]string{"threads": "threads", "system_alerts": "system_alerts", "nga_accounts": "accounts", "posts": "posts", "assets": "resources", "notification_channels": "channels", "crawl_runs": "runs", "uid_reply_backfill_jobs": "backfills", "thread_floor_gaps": "floor_gaps", "nga_account_renewal_settings": "renewal_settings", "nga_login_sessions": "renewal_requests", "bot_inbound_events": "bot_receipts"} {
 		if m.report.Source[from] != m.report.Target[to] {
 			return sourceError(from, "count", "source and target row counts differ")
 		}
@@ -68,7 +77,7 @@ func (m *importer) validate() error {
 	if m.report.Source["post_events"] != m.report.Target["inbox_events"]+m.report.Converted["events_merged_by_post"] {
 		return sourceError("post_events", "count", "unaccounted events")
 	}
-	if m.report.Source["notification_outbox"] != m.report.Target["deliveries"]+m.report.Converted["deliveries_merged_by_target"] {
+	if (m.report.Source["notification_outbox"] + m.report.Source["system_alert_outbox"]) != m.report.Target["deliveries"]+m.report.Converted["deliveries_merged_by_target"] {
 		return sourceError("notification_outbox", "count", "unaccounted deliveries")
 	}
 	used := map[string]bool{}
@@ -82,7 +91,7 @@ func (m *importer) validate() error {
 	}
 	sort.Strings(m.report.ArchivedOnly)
 	m.report.Notes = append(m.report.Notes,
-		"原线程表中的标题映射到帖子和监控；没有已存帖子的线程及论坛、覆盖率等旧字段只保留在快照。",
+		"全部主题元数据（含无帖子主题）、帖子页码/raw 和系统告警及投递映射到 Go 运行时；逐次投递响应仍完整保留在源快照。",
 		"已完成基线的 TID 监控保留水位，以快照时间屏蔽旧楼层中未曾保存的历史评论；已知缺口仍可在原截止时间前补采。",
 		"缺口沿用原发现时间、截止时间和尝试次数，后续重试按 Go 的时间表执行。",
 		"旧暂停原因明细、逐次投递响应、连接/租约/验证码上下文与旧错误正文保留在快照，运行时不恢复。")

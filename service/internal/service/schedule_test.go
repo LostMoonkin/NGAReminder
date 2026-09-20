@@ -85,3 +85,24 @@ func TestWeeklyScheduleBoundaries(t *testing.T) {
 		t.Fatal("invalid override interval accepted")
 	}
 }
+
+func TestNextRunStopsAtRuleBoundaries(t *testing.T) {
+	location, _ := time.LoadLocation("Asia/Shanghai")
+	monitor := Monitoring{location: location}
+	watch := repository.Watch{IntervalSeconds: 3600, IntervalRules: []repository.IntervalRule{
+		{TimeWindow: repository.TimeWindow{Weekdays: []int{1}, Start: "09:00", End: "10:00"}, IntervalSeconds: 30},
+		{TimeWindow: repository.TimeWindow{Weekdays: []int{1}, Start: "23:00", End: "02:00"}, IntervalSeconds: 3600},
+	}}
+	for _, tc := range []struct{ at, want string }{
+		{"2026-09-14 08:59:00", "2026-09-14 09:00:00"},
+		{"2026-09-14 09:00:00", "2026-09-14 09:00:30"},
+		{"2026-09-14 09:59:50", "2026-09-14 10:00:00"},
+		{"2026-09-15 01:30:00", "2026-09-15 02:00:00"},
+	} {
+		at, _ := time.ParseInLocation("2006-01-02 15:04:05", tc.at, location)
+		want, _ := time.ParseInLocation("2006-01-02 15:04:05", tc.want, location)
+		if next := monitor.nextRun(watch, at); next == nil || !next.Equal(want) {
+			t.Fatalf("next run at %s: %v, want %v", tc.at, next, want)
+		}
+	}
+}

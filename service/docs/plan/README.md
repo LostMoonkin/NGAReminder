@@ -30,6 +30,8 @@
 
 补充功能：[Spec11：帖子页面并发抓取](../spec/11-thread-page-concurrency.md)，已完成实现与自测。恢复单帖子全量页面并发，所有 NGA 请求共用 120 QPM，不限制不同 watch 的并发数量；覆盖原全局串行约定，无需拆分 Ticket。
 
+补充修复：[Spec12：Rust 行为对齐与迁移补全](../spec/12-rust-parity-fixes.md)，覆盖核验表中用户选定的 14 项；实现与自测已完成，迁移专项核验见 [数据迁移审查](rust-parity-migration-review.md)。
+
 实际切换顺序：**Rust server 停机 → PG 迁移 SQLite → 核验 → Go 服务上线**。Go 制品、迁移工具、部署配置和副本演练在正式停机前准备完成；阶段编号不是停机期间的开发顺序。
 
 ## 本轮的简化边界

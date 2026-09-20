@@ -21,6 +21,7 @@ import (
 
 // 所有请求仍经过真实 NGA client、Gin、service 和 SQLite；只替换远端 HTTP transport。
 type ngaFixture struct {
+	authFail   bool
 	mu         sync.Mutex
 	page1      map[string]any
 	page2      map[string]any
@@ -71,7 +72,7 @@ func (f *ngaFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.URL.Path == "/thread.php" {
-		if !strings.Contains(r.Header.Get("Cookie"), "ngaPassportCid=fixture-valid-secret") {
+		if f.authFail || !strings.Contains(r.Header.Get("Cookie"), "ngaPassportCid=fixture-valid-secret") {
 			return fixtureResponse(`{"code":2048,"msg":"必须登录"}`), nil
 		}
 		return fixtureResponse(`{"code":0,"result":{"__T":[],"__ROWS":null}}`), nil
@@ -84,6 +85,9 @@ func (f *ngaFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	page := r.Form.Get("page")
+	if f.authFail {
+		return fixtureResponse(`{"code":46}`), nil
+	}
 	if f.code != 0 && (f.failPage == 0 || page == fmt.Sprint(f.failPage)) {
 		if f.code == -1 {
 			return fixtureResponse("{"), nil

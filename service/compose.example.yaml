@@ -16,6 +16,8 @@ services:
       NGA_REMINDER_TIMEZONE: "Asia/Shanghai"
       NGA_REMINDER_NGA_USER_AGENT: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)"
       NGA_REMINDER_BACKGROUND_ENABLED: "true"
+      NGA_REMINDER_MAX_DOWNLOAD_BYTES: "10485760"
+      NGA_REMINDER_STORE_RAW_PAYLOAD: "false"
     volumes:
       - ./data:/app/data
     logging:

@@ -21,6 +21,7 @@ func (h *Handler) contentRoutes(router *gin.Engine) {
 			group.Use(h.authorizeAPI)
 		}
 		group.GET("/exports/:kind/:id", h.exportContent)
+		group.GET("/users", h.users)
 		group.GET("/resources", h.resources)
 		group.POST("/resources", h.saveResourceSettings)
 		group.POST("/resources/redownload", h.redownloadResources)
@@ -174,4 +175,17 @@ func (h *Handler) longResponse(c *gin.Context) bool {
 		return false
 	}
 	return true
+}
+
+func (h *Handler) users(c *gin.Context) {
+	users, err := h.monitor.Users(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	if isAPI(c) {
+		c.JSON(200, gin.H{"users": users})
+		return
+	}
+	h.render(c, 200, "users", gin.H{"Users": users, "TraceID": logging.TraceID(c.Request.Context())})
 }

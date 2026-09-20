@@ -68,9 +68,42 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 	}
 	// 阶段 02 的 TID 唯一索引会把所有 UID 监控的 tid=0 视为重复；原子升级为按类型的部分索引。
 	if err = db.Transaction(func(tx *gorm.DB) error {
+		// 旧索引只有 event/channel 两列；加入独立告警目标后原子重建。
+		if tx.Migrator().HasTable(&Delivery{}) && !tx.Migrator().HasColumn(&Delivery{}, "alert_id") {
+			if e := tx.Exec("DROP INDEX IF EXISTS delivery_target").Error; e != nil {
+				return e
+			}
+		}
+		seedSources := tx.Migrator().HasTable(&EventWatch{}) && !tx.Migrator().HasColumn(&EventWatch{}, "kind")
+		seedThreads := !tx.Migrator().HasTable(&Thread{})
 		seedObservations := !tx.Migrator().HasTable(&WatchPost{})
-		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}, &FeishuApp{}, &Channel{}, &InboxEvent{}, &EventWatch{}, &WatchPost{}, &Delivery{}, &BotSettings{}, &BotBinding{}, &BotReceipt{}, &RenewalSettings{}, &RenewalRequest{}, &ResourceSettings{}, &Resource{}, &Backfill{}, &FloorGap{}); e != nil {
+		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}, &Thread{}, &FeishuApp{}, &Channel{}, &InboxEvent{}, &EventWatch{}, &WatchPost{}, &Delivery{}, &SystemAlert{}, &BotSettings{}, &BotBinding{}, &BotReceipt{}, &RenewalSettings{}, &RenewalRequest{}, &ResourceSettings{}, &Resource{}, &Backfill{}, &FloorGap{}); e != nil {
 			return e
+		}
+		if seedSources {
+			if e := tx.Exec(`UPDATE event_watches SET kind = COALESCE((SELECT kind FROM watches w WHERE w.id = watch_id), '')`).Error; e != nil {
+				return e
+			}
+		}
+		if seedThreads {
+			// 只修复可由旧运行记录证明的 C02 误停；真实用户不存在、手动暂停及水位不变。
+			if e := tx.Exec(`UPDATE watches SET state = CASE WHEN EXISTS (SELECT 1 FROM accounts WHERE status='auth_paused') THEN 'auth_paused' ELSE 'ready' END
+                WHERE kind='uid' AND state='missing' AND EXISTS (SELECT 1 FROM runs r WHERE r.id=(SELECT MAX(id) FROM runs WHERE watch_id=watches.id)
+                AND r.status='missing' AND r.error='NGA 主题不存在，已停止自动采集')`).Error; e != nil {
+				return e
+			}
+			// 只恢复旧 Go 确实保存的信息；页码/raw 无从推导，保持未知。
+			if e := tx.Exec(`INSERT INTO threads (tid, title, author_uid, author_name, coverage, remote_rows, remote_total_pages, first_seen_at, last_seen_at)
+                SELECT p.tid, COALESCE(NULLIF(MAX(w.title), ''), NULLIF(MAX(CASE WHEN p.kind = 'main' THEN p.subject END), ''), MAX(p.subject), ''),
+                COALESCE(MAX(CASE WHEN p.kind = 'main' THEN p.author_uid END), 0), COALESCE(MAX(CASE WHEN p.kind = 'main' THEN p.author END), ''),
+                'partial', COALESCE(MAX(w.remote_rows), 0), COALESCE(MAX(w.remote_total_pages), 0), MIN(p.created_at), MAX(p.created_at) FROM posts p LEFT JOIN watches w ON w.kind = 'tid' AND w.tid = p.tid GROUP BY p.tid`).Error; e != nil {
+				return e
+			}
+			if e := tx.Exec(`INSERT INTO threads (tid, title, coverage, remote_rows, remote_total_pages, first_seen_at, last_seen_at)
+                SELECT w.tid, w.title, 'partial', w.remote_rows, w.remote_total_pages, w.created_at, w.updated_at FROM watches w
+                WHERE w.kind = 'tid' AND w.baseline_complete = 1 AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.tid = w.tid)`).Error; e != nil {
+				return e
+			}
 		}
 		if seedObservations {
 			if e := tx.Exec("INSERT INTO watch_posts (watch_id, post_id) SELECT w.id, p.id FROM watches w JOIN posts p ON p.tid = w.tid WHERE w.kind = 'tid'").Error; e != nil {

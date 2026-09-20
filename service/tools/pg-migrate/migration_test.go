@@ -83,7 +83,7 @@ func TestPostgreSQLMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"9007199254740993", "中文完整快照", "notification_deliveries"} {
+	for _, expected := range []string{"9007199254740993", "中文完整快照", "notification_deliveries", "system_alert_deliveries", "fixture_alert_error"} {
 		if !bytes.Contains(raw, []byte(expected)) {
 			t.Fatalf("snapshot omitted %s", expected)
 		}
@@ -115,6 +115,17 @@ func TestPostgreSQLMigration(t *testing.T) {
 	}
 	db := inspectDB(t, o.Output)
 	for query, want := range map[string]int64{
+		"SELECT COUNT(*) FROM threads": 2,
+		"SELECT COUNT(*) FROM threads WHERE tid=1002 AND title='仅有主题元数据' AND coverage='partial' AND remote_total_pages=7 AND remote_rows=131 AND fid=3001 AND forum_name='测试版块'": 1,
+		"SELECT COUNT(*) FROM posts WHERE pid=4001 AND page_number=3 AND json_extract(raw_payload,'$.unknown_reply.kept')=1":                                                     1,
+		"SELECT COUNT(*) FROM posts WHERE kind='comment' AND page_number=3 AND json_array_length(raw_payload,'$.unknown_comment')=2":                                             1,
+		"SELECT COUNT(*) FROM system_alerts":                                                                                    2,
+		"SELECT COUNT(*) FROM system_alerts WHERE resolved_at IS NOT NULL":                                                      1,
+		"SELECT COUNT(*) FROM deliveries WHERE alert_id>0 AND event_id=0":                                                       3,
+		"SELECT COUNT(*) FROM deliveries WHERE alert_id>0 AND status='sent' AND attempts=3":                                     1,
+		"SELECT COUNT(*) FROM deliveries WHERE alert_id>0 AND status='failed'":                                                  2,
+		"SELECT COUNT(*) FROM resources WHERE original_name='原附件.PNG'":                                                          1,
+		"SELECT COUNT(*) FROM event_watches WHERE kind='uid'":                                                                   1,
 		"SELECT COUNT(*) FROM posts WHERE pid=9007199254740993 AND author_uid=9007199254740993":                                 1,
 		"SELECT COUNT(*) FROM posts WHERE kind='comment' AND parent_key='pid:4001' AND parent_floor=1 AND comment_to_id='4001'": 1,
 		"SELECT COUNT(*) FROM inbox_events WHERE read=1":                                                                        1,
@@ -170,7 +181,7 @@ func TestPostgreSQLMigration(t *testing.T) {
 		t.Fatal("same snapshot produced different migration reports")
 	}
 	db2 := inspectDB(t, second.Output)
-	for _, table := range []string{"watches", "posts", "runs", "inbox_events", "event_watches", "deliveries", "watch_posts", "floor_gaps", "backfills", "resources", "renewal_requests", "bot_receipts"} {
+	for _, table := range []string{"threads", "system_alerts", "watches", "posts", "runs", "inbox_events", "event_watches", "deliveries", "watch_posts", "floor_gaps", "backfills", "resources", "renewal_requests", "bot_receipts"} {
 		var a, b []map[string]any
 		if e := db.Table(table).Order("rowid").Find(&a).Error; e != nil {
 			t.Fatal(e)

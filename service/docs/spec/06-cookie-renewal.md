@@ -1,5 +1,7 @@
 # 阶段 06：Cookie 续期
 
+后续行为补充以 [Spec12：Rust 行为对齐与迁移补全](12-rust-parity-fixes.md) 为准。
+
 ## 目标
 
 在 Cookie 失效后，通过飞书私聊中的确认和验证码交互恢复 NGA 登录。

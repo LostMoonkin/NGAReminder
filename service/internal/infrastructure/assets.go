@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"ngareminder/service/internal/logging"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,14 +37,38 @@ func (a *Assets) root() (*os.Root, error) {
 	return root, logging.Wrap(err, "open resource directory")
 }
 
-// 文件名来自内容摘要和经过检查的 MIME，不采用远端文件名。
-func (a *Assets) Save(ctx context.Context, data []byte, mime string) (name string, err error) {
+// 内容摘要作为文件名，仅采用清洗后的扩展名，远端路径不会进入本地目录。
+func (a *Assets) Save(ctx context.Context, data []byte, mime string, source ...string) (name string, err error) {
 	_, span := logging.Start(ctx, "infrastructure.save_asset")
 	defer span.End(&err)
-	ext := map[string]string{"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp", "application/pdf": ".pdf", "application/zip": ".zip", "application/x-rar-compressed": ".rar", "application/x-7z-compressed": ".7z"}[mime]
-	if ext == "" {
-		return "", logging.WithStack(errors.New("unsupported NGA resource content type"))
+	ext := ""
+	if len(source) > 0 {
+		if u, e := url.Parse(source[0]); e == nil {
+			filename := path.Base(u.Path)
+			if len(source) > 1 && source[1] != "" {
+				filename = source[1]
+			}
+			original := strings.TrimPrefix(path.Ext(filename), ".")
+			for _, c := range original {
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+					ext += string(c)
+				}
+				if len(ext) == 10 {
+					break
+				}
+			}
+			if original != "" && ext == "" {
+				ext = "bin"
+			}
+		}
 	}
+	if ext == "" {
+		ext = map[string]string{"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "audio/mpeg": "mp3", "video/mp4": "mp4"}[strings.TrimSpace(strings.Split(mime, ";")[0])]
+	}
+	if ext == "" {
+		ext = "bin"
+	}
+	ext = "." + strings.ToLower(ext)
 	sum := sha256.Sum256(data)
 	name = hex.EncodeToString(sum[:]) + ext
 	root, err := a.root()

@@ -26,6 +26,7 @@ type userFixture struct {
 	knownReplies                             bool
 	failReplies                              string
 	failPID                                  string
+	failCode                                 int
 	calls                                    []userRequest
 }
 
@@ -128,7 +129,11 @@ func (f *userFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("unexpected NGA endpoint")
 	}
 	if f.failPID != "" && call.pid == f.failPID {
-		return fixtureResponse(`{"code":51}`), nil
+		code := f.failCode
+		if code == 0 {
+			code = 51
+		}
+		return fixtureResponse(fmt.Sprintf(`{"code":%d}`, code)), nil
 	}
 	if call.pid != "" {
 		value := clone(f.reply)
@@ -287,7 +292,7 @@ func TestUserBaselineFailureAndAuthRecovery(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.BackgroundEnabled = true
 	f := userNGA(t)
-	router, store, _ := openAppWithTransport(t, cfg, io.Discard, f)
+	router, store, monitor := openAppWithTransport(t, cfg, io.Discard, f)
 	credentials := service.AccountInput{PassportUID: "2009", PassportCID: "fixture-valid-secret"}
 	expectStatus(t, send(t, router, "PUT", "/api/v1/nga-account", cfg.APIToken, credentials), 200)
 	response := send(t, router, "POST", "/api/v1/watches", cfg.APIToken, service.WatchInput{Kind: "uid", UID: 2001})
@@ -300,8 +305,20 @@ func TestUserBaselineFailureAndAuthRecovery(t *testing.T) {
 	f.mu.Unlock()
 	profileRun := runWatch(t, router, cfg.APIToken, 1)
 	profileWatch, _ := store.Watch(context.Background(), 1)
-	if profileRun.Status != "failed" || profileWatch.BaselineComplete || profileWatch.TopicCursor.ID != 0 || profileWatch.ReplyCursor.ID != 0 || profileWatch.Title != "" {
+	if profileRun.Status != "missing" || profileWatch.State != "missing" || profileWatch.BaselineComplete || profileWatch.TopicCursor.ID != 0 || profileWatch.ReplyCursor.ID != 0 || profileWatch.Title != "" {
 		t.Fatalf("missing profile established a UID baseline: %+v %+v", profileRun, profileWatch)
+	}
+	f.mu.Lock()
+	calls := len(f.calls)
+	f.mu.Unlock()
+	if err := monitor.Tick(context.Background(), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	afterCalls := len(f.calls)
+	f.mu.Unlock()
+	if calls != afterCalls {
+		t.Fatal("missing user was automatically retried")
 	}
 	f.mu.Lock()
 	f.profile = profile

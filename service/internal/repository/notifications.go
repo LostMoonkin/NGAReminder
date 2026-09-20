@@ -32,6 +32,7 @@ type InboxEvent struct {
 	Deliveries []Delivery   `json:"deliveries" gorm:"-"`
 }
 type EventWatch struct {
+	Kind    string `json:"kind"`
 	EventID int64  `json:"event_id" gorm:"primaryKey;autoIncrement:false"`
 	WatchID int64  `json:"watch_id" gorm:"primaryKey;autoIncrement:false"`
 	Label   string `json:"label"`
@@ -41,9 +42,10 @@ type WatchPost struct {
 	PostID  int64 `gorm:"primaryKey;autoIncrement:false"`
 }
 type Delivery struct {
+	AlertID     int64     `json:"alert_id,omitempty" gorm:"default:0;uniqueIndex:delivery_target"`
 	ID          int64     `json:"id"`
-	EventID     int64     `json:"event_id" gorm:"uniqueIndex:delivery_target"`
-	ChannelID   int64     `json:"channel_id" gorm:"uniqueIndex:delivery_target"`
+	EventID     int64     `json:"event_id" gorm:"default:0;uniqueIndex:delivery_target"`
+	ChannelID   int64     `json:"channel_id" gorm:"default:0;uniqueIndex:delivery_target"`
 	ChannelName string    `json:"channel_name"`
 	Status      string    `json:"status"`
 	Attempts    int       `json:"attempts"`
@@ -113,7 +115,7 @@ func (s *Store) MatchEvent(ctx context.Context, postID int64, watch Watch) (even
 	if err = s.db.WithContext(ctx).Where("post_id = ?", postID).First(&event).Error; err != nil {
 		return event, logging.Wrap(err, "read inbox event")
 	}
-	err = s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&EventWatch{event.ID, watch.ID, watch.Label}).Error
+	err = s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&EventWatch{EventID: event.ID, WatchID: watch.ID, Label: watch.Label, Kind: watch.Kind}).Error
 	return event, logging.Wrap(err, "record event source")
 }
 func (s *Store) Enqueue(ctx context.Context, eventID int64, channel Channel) (err error) {

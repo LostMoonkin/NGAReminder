@@ -314,13 +314,13 @@ func convert(ctx context.Context, o options) (err error) {
 	}
 	defer pool.Close()
 	m := &importer{ctx: ctx, db: db.WithContext(ctx), old: old, cipher: newCipher, ids: map[string]map[string]int64{}, o: o}
-	m.report = report{Source: map[string]int64{}, Target: map[string]int64{}, Converted: map[string]int64{}, Runtime: map[string]string{"NGA_REMINDER_TIMEZONE": o.Timezone, "NGA_REMINDER_BACKGROUND_ENABLED": "false"}, Notes: []string{"完整源数据及未映射字段保留在 PG JSONL 快照；SQLite 仅保留 Go 使用的业务数据。", "assets 文件未读取、复制、重命名或删除；上线后挂载原目录，并用资源扫描核对缺失文件。", "旧 assets.max_download_bytes 不在数据库中；Go 运行时资源下载上限为 20 MiB。"}}
+	m.report = report{Source: map[string]int64{}, Target: map[string]int64{}, Converted: map[string]int64{}, Runtime: map[string]string{"NGA_REMINDER_TIMEZONE": o.Timezone, "NGA_REMINDER_BACKGROUND_ENABLED": "false"}, Notes: []string{"完整源数据及未映射字段保留在 PG JSONL 快照；SQLite 仅保留 Go 使用的业务数据。", "assets 文件未读取、复制、重命名或删除；上线后挂载原目录，并用资源扫描核对缺失文件。", "旧 assets.max_download_bytes 与 persistence.store_raw_payload 不在数据库中；请按旧部署配置设置 NGA_REMINDER_MAX_DOWNLOAD_BYTES（默认 10 MiB）和 NGA_REMINDER_STORE_RAW_PAYLOAD（默认 false）。"}}
 	err = m.db.Transaction(func(tx *gorm.DB) error {
 		m.db = tx
 		if e = m.load(o.Source); e != nil {
 			return e
 		}
-		for _, table := range []string{"watch_targets", "posts", "notification_channels", "crawl_runs", "post_events", "bot_bindings", "uid_reply_backfill_jobs", "notification_outbox"} {
+		for _, table := range []string{"watch_targets", "posts", "notification_channels", "crawl_runs", "post_events", "bot_bindings", "uid_reply_backfill_jobs", "notification_outbox", "system_alerts", "system_alert_outbox"} {
 			m.ids[table] = map[string]int64{}
 			if e = m.walk(table, func(r row) error {
 				id := r.text("id")
@@ -328,6 +328,9 @@ func convert(ctx context.Context, o options) (err error) {
 					return sourceError(table, "id", "missing or duplicate ID")
 				}
 				m.ids[table][id] = int64(len(m.ids[table]) + 1)
+				if table == "system_alert_outbox" {
+					m.ids[table][id] += int64(len(m.ids["notification_outbox"]))
+				}
 				return nil
 			}); e != nil {
 				return e
@@ -337,7 +340,7 @@ func convert(ctx context.Context, o options) (err error) {
 			name string
 			run  func() error
 		}{
-			{"accounts", m.accounts}, {"integrations", m.channels}, {"bot", m.bot}, {"watches", m.watches}, {"content", m.content}, {"events", m.events}, {"history", m.history}, {"renewal", m.renewal}, {"validation", m.validate},
+			{"accounts", m.accounts}, {"integrations", m.channels}, {"bot", m.bot}, {"watches", m.watches}, {"content", m.content}, {"events", m.events}, {"alerts", m.alerts}, {"history", m.history}, {"renewal", m.renewal}, {"validation", m.validate},
 		} {
 			zerolog.Ctx(ctx).Info().Str("stage", stage.name).Msg("Migration stage started")
 			if e = stage.run(); e != nil {
@@ -488,11 +491,11 @@ func (m *importer) load(path string) error {
 
 const requiredSchema = `
 nga_accounts id passport_uid_encrypted passport_cid_encrypted cookie_encrypted status encryption_version last_auth_checked_at
-threads tid title author_uid
-posts id tid pid floor_number post_kind parent_post_id author_uid author_name subject content_raw published_at_unix raw_payload first_seen_at
+threads tid fid title forum_name author_uid author_name coverage remote_total_pages remote_vrows first_seen_at last_seen_at
+posts id tid pid floor_number post_kind parent_post_id author_uid author_name subject content_raw published_at_unix page_number raw_payload first_seen_at
 watch_targets id target_type target_id target_name enabled pause_reason status baseline_completed interval_seconds schedule_json no_fetch_periods_json next_run_at deleted_at created_at updated_at
 thread_watch_options watch_id history_mode history_parallel_enabled history_parallelism
-watch_cursors watch_id last_floor
+watch_cursors watch_id last_floor remote_vrows remote_total_pages
 user_watch_cursors watch_id newest_topic_at_unix newest_reply_at_unix newest_topic_tid newest_reply_pid
 crawl_runs id watch_id status baseline sync_mode trigger_kind pages_requested posts_inserted started_at completed_at error_kind
 platform_integrations id platform credentials_encrypted bot_enabled delivery_enabled enabled
@@ -501,13 +504,15 @@ bot_bindings id integration_id actor_id conversation_id conversation_type role e
 bot_inbound_events id integration_id platform_message_id status received_at
 post_events id post_id event_type read_at occurred_at
 post_event_watch_matches post_event_id watch_id
+system_alerts id alert_key title body url resolved_at created_at updated_at
+system_alert_outbox id alert_id channel_id status attempt_count next_attempt_at created_at delivered_at
 notification_outbox id post_event_id channel_id status attempt_count next_attempt_at created_at delivered_at
 watch_notification_authors watch_id author_uid
 watch_notification_channels watch_id channel_id
-assets id source_url mime_type size_bytes local_relative_path download_status
+assets id source_url original_name mime_type size_bytes local_relative_path download_status
 post_assets post_id asset_id appearance_order
 nga_account_renewal_settings account_id enabled login_name_encrypted password_encrypted bot_binding_id credential_status
 nga_login_sessions id account_id bot_binding_id status created_at expires_at
-thread_floor_gaps watch_id floor_number retry_count first_detected_at expires_at status
+thread_floor_gaps watch_id floor_number page_hint retry_count first_detected_at expires_at status
 uid_reply_backfill_jobs id watch_id uid start_at_unix end_at_unix status pages_requested candidates_processed posts_inserted completed_at error_kind
 `

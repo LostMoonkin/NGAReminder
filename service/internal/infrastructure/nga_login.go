@@ -67,7 +67,8 @@ func (n *NGA) PrepareLogin(ctx context.Context) (challenge *LoginChallenge, imag
 	if len(raw) == 0 || len(raw) > 16_384 {
 		return nil, nil, loginError("protocol_changed")
 	}
-	block, _ := pem.Decode(raw)
+	normalized := strings.NewReplacer("\\n\\\r\n", "\n", "\\n\\\n", "\n", "\\n", "\n", "\r", "").Replace(string(raw))
+	block, _ := pem.Decode([]byte(normalized))
 	if block == nil {
 		return nil, nil, loginError("protocol_changed")
 	}

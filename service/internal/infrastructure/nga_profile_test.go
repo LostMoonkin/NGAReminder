@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -44,13 +45,13 @@ func TestUserProfileRejectsMissingOrMismatchedUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, body := range []string{
+	for i, body := range []string{
 		string(missing),
 		`var __UCPUSER = {"uid":2002,"username":"wrong user"};`,
 		`var __UCPUSER = {"username":"missing uid"};`,
 		`var __UCPUSER = {"uid":2001,`,
 	} {
-		if _, err := parseUserProfile([]byte(body), 2001); err == nil {
+		if _, err := parseUserProfile([]byte(body), 2001); err == nil || errors.Is(err, ErrNGAUserMissing) != (i < 3) {
 			t.Error("invalid user profile accepted")
 		}
 	}

@@ -10,14 +10,18 @@ import (
 	"ngareminder/service/internal/infrastructure"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/repository"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Renewal struct {
-	monitor   *Monitoring
-	work      sync.Mutex
-	challenge *infrastructure.LoginChallenge
+	operationMu           sync.Mutex
+	operationID, cancelID string
+	operationCancel       context.CancelFunc
+	monitor               *Monitoring
+	work                  sync.Mutex
+	challenge             *infrastructure.LoginChallenge
 }
 type RenewalInput struct {
 	Enabled   bool   `json:"enabled" form:"enabled"`
@@ -50,6 +54,12 @@ func (r *Renewal) clear() {
 func (r *Renewal) Close() { r.work.Lock(); defer r.work.Unlock(); r.clear() }
 func (r *Renewal) finish(ctx context.Context, v *repository.RenewalRequest, status, message string) (err error) {
 	r.clear()
+	r.operationMu.Lock()
+	cancelled := r.cancelID == v.ID
+	r.operationMu.Unlock()
+	if cancelled {
+		status, message = "cancelled", "已从管理端取消续期"
+	}
 	v.Status, v.Error, v.Expected = status, message, nil
 	write, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer done()
@@ -220,7 +230,9 @@ func (r *Renewal) Start(ctx context.Context) (v repository.RenewalRequest, err e
 		return v, err
 	}
 	zerolog.Ctx(ctx).Info().Int("account_id", 1).Str("request_id", v.ID).Msg("Renewal confirmation requested")
-	err = r.send(ctx, address, "text", map[string]string{"text": fmt.Sprintf("请确认 NGA Cookie 续期，十分钟内有效。\n/login confirm %s\n取消：/login cancel %s", v.ID, v.ID)}, "renewal-"+v.ID)
+	task, done := r.operation(ctx, v.ID)
+	defer done()
+	err = r.send(task, address, "text", map[string]string{"text": fmt.Sprintf("请确认 NGA Cookie 续期，十分钟内有效。\n/login confirm %s\n取消：/login cancel %s", v.ID, v.ID)}, "renewal-"+v.ID)
 	if err != nil {
 		err = errors.Join(err, r.finish(ctx, &v, "failed", "续期确认发送失败，请检查飞书配置后重新发起"))
 	}
@@ -281,7 +293,9 @@ func (r *Renewal) Command(ctx context.Context, cmd BotCommand) (reply string, er
 		return "未知续期操作，发送 /help 查看用法", nil
 	}
 	// 交互期限覆盖网络调用；不会在十分钟后提交或保存候选凭据。
-	task, cancel := context.WithDeadline(ctx, v.ExpiresAt)
+	operation, done := r.operation(ctx, v.ID)
+	defer done()
+	task, cancel := context.WithDeadline(operation, v.ExpiresAt)
 	defer cancel()
 	stop := context.AfterFunc(r.monitor.ctx, cancel)
 	defer stop()
@@ -399,6 +413,9 @@ func (r *Renewal) Command(ctx context.Context, cmd BotCommand) (reply string, er
 			if e := tx.SaveAccount(ctx, &account); e != nil {
 				return e
 			}
+			if e := tx.ResolveAuthAlert(ctx); e != nil {
+				return e
+			}
 			if e := tx.SetAuthPaused(ctx, false); e != nil {
 				return e
 			}
@@ -423,4 +440,114 @@ func (m *Monitoring) authRenewal(ctx context.Context) {
 	if err != nil {
 		logging.Error(ctx, err, "Start authentication renewal failed", zerolog.ErrorLevel)
 	}
+}
+
+// 取消可中断持锁的外部请求，随后等待该交互收尾；候选 Cookie 的事务使用同一个可取消 context。
+func (r *Renewal) operation(ctx context.Context, id string) (context.Context, func()) {
+	task, cancel := context.WithCancel(ctx)
+	r.operationMu.Lock()
+	r.operationID, r.operationCancel = id, cancel
+	if r.cancelID == id {
+		cancel()
+	}
+	r.operationMu.Unlock()
+	return task, func() {
+		cancel()
+		r.operationMu.Lock()
+		r.operationID, r.operationCancel = "", nil
+		r.operationMu.Unlock()
+	}
+}
+
+func (r *Renewal) Cancel(ctx context.Context) (err error) {
+	ctx, span := logging.Start(ctx, "service.cancel_renewal")
+	defer span.End(&err)
+	account, err := r.monitor.store.Account(ctx)
+	if err != nil {
+		return err
+	}
+	if len(account.Cookie) == 0 {
+		return InvalidInput("请先配置 NGA 账号")
+	}
+	active, err := r.monitor.store.LatestRenewal(ctx)
+	if err != nil || !renewalActive(active.Status) {
+		return err
+	}
+	r.operationMu.Lock()
+	r.cancelID = active.ID
+	if r.operationID == active.ID && r.operationCancel != nil {
+		r.operationCancel()
+	}
+	r.operationMu.Unlock()
+	r.work.Lock()
+	defer r.work.Unlock()
+	current, err := r.monitor.store.LatestRenewal(ctx)
+	if err != nil {
+		return err
+	}
+	if current.ID != active.ID || current.Status == "success" {
+		return nil
+	}
+	return r.finish(ctx, &current, "cancelled", "已从管理端取消续期")
+}
+
+type RenewalTestResult struct {
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+func (r *Renewal) Test(ctx context.Context) (result RenewalTestResult, err error) {
+	ctx, span := logging.Start(ctx, "service.test_renewal")
+	defer span.End(&err)
+	if !r.monitor.enabled {
+		return result, logging.WithStack(ErrBackgroundDisabled)
+	}
+	account, err := r.monitor.store.Account(ctx)
+	if err != nil {
+		return result, err
+	}
+	if len(account.Cookie) == 0 {
+		return result, InvalidInput("请先配置 NGA 账号")
+	}
+	settings, err := r.monitor.store.RenewalSettings(ctx)
+	if err != nil {
+		return result, err
+	}
+	if len(settings.Secret) == 0 {
+		return result, InvalidInput("请先保存续期登录名和密码")
+	}
+	raw, err := r.monitor.cipher.Open(ctx, "renewal-secret-v1", settings.Secret)
+	if err != nil {
+		return result, err
+	}
+	var secret renewalSecret
+	if err = json.Unmarshal(raw, &secret); err != nil {
+		return result, logging.Wrap(err, "decode renewal credentials")
+	}
+	if strings.TrimSpace(secret.Name) == "" || secret.Password == "" {
+		return result, InvalidInput("请先保存有效的续期登录名和密码")
+	}
+	bot, err := r.monitor.store.BotSettings(ctx)
+	if err != nil {
+		return result, err
+	}
+	if !bot.Enabled {
+		return result, InvalidInput("请先启用飞书 Bot")
+	}
+	if _, err = r.monitor.bot.BindingAddress(ctx, settings.BindingID); err != nil {
+		return result, InvalidInput("续期管理员绑定已失效，请重新选择")
+	}
+	if _, err = r.monitor.notifications.AppCredentials(ctx); err != nil {
+		return result, err
+	}
+	task, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(r.monitor.ctx, cancel)
+	defer stop()
+	challenge, _, err := r.monitor.nga.PrepareLogin(task)
+	if err != nil {
+		return result, err
+	}
+	challenge.Close()
+	return RenewalTestResult{OK: true, Detail: "协议正常（RSA 公钥与验证码可用）"}, nil
 }

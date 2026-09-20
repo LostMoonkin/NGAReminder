@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/rs/zerolog"
 	"io/fs"
+	"ngareminder/service/internal/config"
 	"ngareminder/service/internal/infrastructure"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/repository"
@@ -14,9 +15,10 @@ import (
 )
 
 type Resources struct {
-	monitor *Monitoring
-	files   *infrastructure.Assets
-	work    sync.Mutex
+	maxDownloadBytes int64
+	monitor          *Monitoring
+	files            *infrastructure.Assets
+	work             sync.Mutex
 }
 type ResourceScan struct {
 	Settings        repository.ResourceSettings `json:"settings"`
@@ -51,9 +53,13 @@ func (r *Resources) download(ctx context.Context, source string) (err error) {
 			return e
 		}
 	}
-	data, mime, downloadErr := r.monitor.notifications.sender.DownloadResource(ctx, source, 20*1024*1024, false)
+	limit := r.maxDownloadBytes
+	if limit == 0 {
+		limit = config.DefaultMaxDownloadBytes
+	}
+	data, mime, downloadErr := r.monitor.notifications.sender.DownloadResource(ctx, source, limit, false)
 	if downloadErr == nil {
-		item.Path, downloadErr = r.files.Save(ctx, data, mime)
+		item.Path, downloadErr = r.files.Save(ctx, data, mime, source, item.OriginalName)
 	}
 	if downloadErr == nil {
 		item.MIME, item.Size, item.Error = mime, int64(len(data)), ""

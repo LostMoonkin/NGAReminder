@@ -87,10 +87,11 @@ func preparePG(t *testing.T) (*pgx.Conn, string, time.Time) {
 	earlier := now.Add(-time.Hour)
 	exec(`INSERT INTO nga_accounts(id,label,passport_uid_encrypted,passport_cid_encrypted,cookie_encrypted,status,last_auth_checked_at,created_at,updated_at) VALUES('account','fixture',$1,$2,$3,'valid',$4,$5,$5)`, encryptedFixture(t, "2001", ""), encryptedFixture(t, "fake-cid-secret", ""), encryptedFixture(t, "ngaPassportUid=2001; ngaPassportCid=fake-cid-secret; extra=fake-extra-cookie", ""), now, earlier)
 	exec(`INSERT INTO threads(tid,fid,title,forum_name,author_uid,author_name,first_seen_at,last_seen_at) VALUES(1001,3001,'迁移测试主题','测试版块',2001,'测试作者',$1,$1),(1002,3001,'仅有主题元数据','测试版块',2001,'测试作者',$1,$1)`, earlier)
+	exec(`UPDATE threads SET coverage='partial', remote_total_pages=7, remote_vrows=131 WHERE tid=1002`)
 	exec(`INSERT INTO posts(id,tid,pid,floor_number,post_kind,parent_post_id,author_uid,author_name,subject,content_raw,published_at_unix,page_number,raw_payload,first_seen_at) VALUES
 	 ('topic',1001,NULL,0,'topic',NULL,2001,'测试作者','迁移测试主题','[b]完整中文正文[/b][img]https://img.nga.cn/fixture.png[/img]',1767225600,1,'{}',$1),
-	 ('reply',1001,4001,1,'reply',NULL,2002,'回复作者','','已有回复',1767225660,1,'{}',$1),
-	 ('comment',1001,5001,NULL,'comment','reply',2003,'评论作者','','已有评论',1767225670,1,'{"comment_to_id":4001}',$1),
+	 ('reply',1001,4001,1,'reply',NULL,2002,'回复作者','','已有回复',1767225660,3,'{"unknown_reply":{"kept":true}}',$1),
+	 ('comment',1001,5001,NULL,'comment','reply',2003,'评论作者','','已有评论',1767225670,3,'{"comment_to_id":4001,"unknown_comment":[1,2]}',$1),
 	 ('wide-id',1001,9007199254740993,2,'reply',NULL,9007199254740993,'大整数作者','','64 位整数',NULL,1,'{}',$1)`, earlier)
 	for i, id := range []string{"tid", "uid", "manual-paused", "auth-paused", "deleted"} {
 		kind, target := "thread", int64(1001+i)
@@ -131,8 +132,17 @@ func preparePG(t *testing.T) (*pgx.Conn, string, time.Time) {
 	exec(`INSERT INTO post_events(id,post_id,event_type,read_at,occurred_at) VALUES('read','reply','new_reply',$1,$1),('unread','comment','new_reply',NULL,$1)`, earlier)
 	exec(`INSERT INTO post_event_watch_matches(post_event_id,watch_id) VALUES('read','tid'),('read','uid'),('unread','deleted')`)
 	exec(`INSERT INTO notification_outbox(id,post_event_id,channel_id,status,attempt_count,delivered_at,created_at,next_attempt_at) VALUES('sent','read','bark','delivered',2,$1,$1,$1),('pending','unread','feishu','sending',1,NULL,$1,$1)`, earlier)
+	exec(`INSERT INTO system_alerts(id,alert_key,title,body,url,created_at,updated_at,resolved_at) VALUES
+        ('auth-alert','nga_credentials_invalid','Cookie 失效','更新 Cookie','/admin',$1,$1,NULL),
+        ('resolved-alert','fixture_resolved','旧已恢复告警','已恢复','/admin',$1,$1,$1)`, earlier)
+	exec(`INSERT INTO system_alert_outbox(id,alert_id,channel_id,status,attempt_count,created_at,next_attempt_at,delivered_at) VALUES
+        ('alert-sent','auth-alert','bark','delivered',3,$1,$1,$1),
+        ('alert-pending','auth-alert','feishu','pending',0,$1,$1,NULL),
+        ('alert-old','resolved-alert','feishu','dead',5,$1,$1,NULL)`, earlier)
+	exec(`INSERT INTO system_alert_deliveries(id,outbox_id,attempt,success,error_kind) VALUES('alert-log','alert-old',5,0,'fixture_alert_error')`)
 	exec(`INSERT INTO notification_deliveries(id,outbox_id,attempt,success,response_summary) VALUES('delivery-log','sent',2,1,'preserved legacy response')`)
 	exec(`INSERT INTO assets(id,source_url,mime_type,size_bytes,local_relative_path,download_status,first_seen_at) VALUES('local','https://img.nga.cn/fixture.png','image/png',12,$1,'ready',$2),('missing','https://img.nga.cn/missing.png','image/png',12,'ff/missing.png','ready',$2),('remote','https://img.nga.cn/remote.png',NULL,NULL,NULL,'remote_only',$2)`, "ab/"+strings.Repeat("a", 64)+".png", earlier)
+	exec(`UPDATE assets SET original_name='原附件.PNG' WHERE id='local'`)
 	exec(`INSERT INTO post_assets(post_id,asset_id,appearance_order) VALUES('topic','local',0),('topic','missing',1),('reply','remote',0)`)
 	exec(`INSERT INTO nga_account_renewal_settings(account_id,enabled,login_name_encrypted,password_encrypted,bot_binding_id) VALUES('account',1,$1,$2,'owner')`, encryptedFixture(t, "fake-login-name", "nga_account:account:renewal_login:v2"), encryptedFixture(t, "fake-login-password", "nga_account:account:renewal_password:v2"))
 	exec(`INSERT INTO nga_login_sessions(id,account_id,bot_binding_id,integration_id,actor_id,conversation_id,trigger_kind,status,protocol_context_encrypted,created_at,expires_at) VALUES('login','account','owner','feishu','fake-owner','fake-private-chat','manual','awaiting_captcha',$1,$2,$3)`, []byte("discarded-protocol-context"), earlier, now.Add(time.Hour))

@@ -252,3 +252,9 @@ func (m *Monitoring) RemoveExport(ctx context.Context, file *os.File) (err error
 	defer span.End(&err)
 	return m.resources.files.RemoveTemp(ctx, file)
 }
+
+func (m *Monitoring) Users(ctx context.Context) (items []repository.UserSummary, err error) {
+	ctx, span := logging.Start(ctx, "service.user_summary")
+	defer span.End(&err)
+	return m.store.Users(ctx)
+}

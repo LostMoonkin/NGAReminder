@@ -199,7 +199,11 @@ func (m *importer) events() error {
 		if label == "" {
 			label = watch.text("target_type") + ":" + string(watch.data["target_id"])
 		}
-		return m.exec("INSERT OR IGNORE INTO event_watches(event_id,watch_id,label) VALUES(?,?,?)", m.id("post_events", r.text("post_event_id")), m.id("watch_targets", r.text("watch_id")), label)
+		kind := "tid"
+		if watch.text("target_type") == "user" {
+			kind = "uid"
+		}
+		return m.exec("INSERT OR IGNORE INTO event_watches(event_id,watch_id,label,kind) VALUES(?,?,?,?)", m.id("post_events", r.text("post_event_id")), m.id("watch_targets", r.text("watch_id")), label, kind)
 	}); err != nil {
 		return err
 	}
@@ -251,4 +255,31 @@ func historicalError(r row, field string) string {
 		return ""
 	}
 	return "旧服务记录了错误，详情保留在 PG 快照"
+}
+
+func (m *importer) alerts() error {
+	if err := m.walk("system_alerts", func(r row) error {
+		return m.write(&repository.SystemAlert{ID: m.id(r.table, r.text("id")), Key: r.text("alert_key"), Title: r.text("title"), Body: r.text("body"), URL: r.text("url"), CreatedAt: r.at("created_at"), UpdatedAt: r.at("updated_at"), ResolvedAt: r.timestamp("resolved_at")})
+	}); err != nil {
+		return err
+	}
+	return m.walk("system_alert_outbox", func(r row) error {
+		channel := m.one("notification_channels", "id", r.text("channel_id"))
+		v := repository.Delivery{ID: m.id(r.table, r.text("id")), AlertID: m.id("system_alerts", r.text("alert_id")), ChannelID: m.id("notification_channels", r.text("channel_id")), ChannelName: channel.text("label"), Attempts: int(r.number("attempt_count")), NextAttempt: r.at("next_attempt_at"), UpdatedAt: r.at("created_at"), TraceID: "migration:" + r.text("id")}
+		switch r.text("status") {
+		case "delivered":
+			v.Status = "sent"
+			if at := r.timestamp("delivered_at"); at != nil {
+				v.UpdatedAt = *at
+			}
+		case "pending", "sending":
+			v.Status, v.Error = "failed", "迁移时未确认发送成功，请核对后手动重试"
+			m.report.Converted["alert_deliveries_require_manual_retry"]++
+		case "failed", "dead":
+			v.Status, v.Error = "failed", "旧服务告警投递失败，详情保留在 PG 快照；可手动重试"
+		default:
+			return sourceError(r.table, "status", "unsupported alert notification status")
+		}
+		return m.write(&v)
+	})
 }

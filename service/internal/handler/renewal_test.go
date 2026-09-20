@@ -23,6 +23,8 @@ import (
 )
 
 type loginFixture struct {
+	blockPhase string
+	entered    chan struct{}
 	*botFixture
 	key                               *rsa.PrivateKey
 	prepared, submitted, checks       int
@@ -68,11 +70,15 @@ func (f *loginFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			}
 			return fixtureResponse(f.response), nil
 		case "/nuke/account_copy.html":
+			if f.blockPhase == "prepare" {
+				return f.waitCancelled(r)
+			}
 			if !strings.Contains(r.Header.Get("Cookie"), "login_session=fixture") {
 				return nil, errors.New("missing independent login cookie jar")
 			}
 			key, _ := x509.MarshalPKIXPublicKey(&f.key.PublicKey)
-			return fixtureResponse(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: key}))), nil
+			encoded := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: key}))
+			return fixtureResponse("var publicKey = \"" + strings.ReplaceAll(encoded, "\n", "\\n\\\r\n") + "\";"), nil
 		case "/login_check_code.php":
 			var data bytes.Buffer
 			_ = png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1)))
@@ -85,6 +91,9 @@ func (f *loginFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			}
 			if strings.Contains(r.Header.Get("Cookie"), "fixture-new-cookie") {
 				f.checks++
+				if f.blockPhase == "validate" {
+					return f.waitCancelled(r)
+				}
 				if f.checkFail {
 					return fixtureResponse(`{"code":46}`), nil
 				}
@@ -284,4 +293,12 @@ func TestRenewalFailuresKeepOldCookie(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *loginFixture) waitCancelled(r *http.Request) (*http.Response, error) {
+	close(f.entered)
+	f.mu.Unlock()
+	<-r.Context().Done()
+	f.mu.Lock()
+	return nil, r.Context().Err()
 }

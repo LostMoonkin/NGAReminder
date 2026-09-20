@@ -39,11 +39,12 @@ type ResourceSettings struct {
 	DownloadEnabled bool `json:"download_enabled"`
 }
 type Resource struct {
-	URL   string `json:"url" gorm:"primaryKey"`
-	Path  string `json:"path"`
-	MIME  string `json:"mime"`
-	Size  int64  `json:"size"`
-	Error string `json:"error"`
+	OriginalName string `json:"original_name"`
+	URL          string `json:"url" gorm:"primaryKey"`
+	Path         string `json:"path"`
+	MIME         string `json:"mime"`
+	Size         int64  `json:"size"`
+	Error        string `json:"error"`
 }
 
 func (s *Store) ResourceSettings(ctx context.Context) (v ResourceSettings, err error) {

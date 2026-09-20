@@ -152,9 +152,10 @@ func (n *NGA) PostByPID(ctx context.Context, credentials Credentials, tid, pid i
 
 func parsePostByPID(body []byte, tid, pid int64) (post ParsedPost, err error) {
 	var raw struct {
+		ThreadMetadata
+		Page   number    `json:"currentPage"`
 		Posts  []rawPost `json:"result"`
 		Prefix string    `json:"attachPrefix"`
-		Title  string    `json:"tsubject"`
 	}
 	if err = json.Unmarshal(body, &raw); err != nil {
 		return post, logging.Wrap(err, "decode NGA reply detail")
@@ -168,6 +169,9 @@ func parsePostByPID(body []byte, tid, pid int64) (post ParsedPost, err error) {
 		return post, err
 	}
 	post = posts[0]
+	raw.ThreadMetadata.TID = tid
+	post.Thread = raw.ThreadMetadata
+	post.PageNumber = int(raw.Page)
 	// 按 PID 查询时 lou=0 不代表主楼；身份由请求确定，不能覆盖主题或其他回复。
 	post.Kind, post.Key = "reply", fmt.Sprintf("pid:%d", pid)
 	post.SourceURL = fmt.Sprintf("%s/read.php?tid=%d&pid=%d", ngaBaseURL, tid, pid)

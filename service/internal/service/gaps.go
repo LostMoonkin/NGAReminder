@@ -195,7 +195,7 @@ func (m *Monitoring) collectGapPages(ctx context.Context, credentials infrastruc
 				floor = post.ParentFloor
 			}
 			if _, ok := gaps[floor]; ok {
-				posts = append(posts, storedPost(post))
+				posts = append(posts, m.storedPost(post))
 			}
 		}
 		next := *run

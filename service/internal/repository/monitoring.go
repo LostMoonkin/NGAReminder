@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -92,29 +93,27 @@ type Run struct {
 }
 
 type Post struct {
-	ID          int64      `json:"id"`
-	TID         int64      `json:"tid" gorm:"column:tid;uniqueIndex:post_key;index"`
-	Key         string     `json:"key" gorm:"uniqueIndex:post_key"`
-	PID         int64      `json:"pid" gorm:"column:pid"`
-	Kind        string     `json:"kind"`
-	Floor       int64      `json:"floor"`
-	ParentKey   string     `json:"parent_key"`
-	ParentFloor int64      `json:"parent_floor"`
-	CommentToID string     `json:"comment_to_id"`
-	AuthorUID   int64      `json:"author_uid"`
-	Author      string     `json:"author"`
-	Subject     string     `json:"subject"`
-	Body        string     `json:"body"`
-	PublishedAt *time.Time `json:"published_at"`
-	SourceURL   string     `json:"source_url"`
-	Resources   []string   `json:"resources" gorm:"serializer:json"`
-	CreatedAt   time.Time  `json:"created_at"`
-}
-
-type ThreadSummary struct {
-	TID   int64  `json:"tid" gorm:"column:tid"`
-	Title string `json:"title"`
-	Count int64  `json:"count"`
+	ResourceNames map[string]string `json:"-" gorm:"-"`
+	PageNumber    int               `json:"page_number"`
+	RawPayload    json.RawMessage   `json:"raw_payload,omitempty" gorm:"type:text"`
+	Thread        *Thread           `json:"-" gorm:"-"`
+	ID            int64             `json:"id"`
+	TID           int64             `json:"tid" gorm:"column:tid;uniqueIndex:post_key;index"`
+	Key           string            `json:"key" gorm:"uniqueIndex:post_key"`
+	PID           int64             `json:"pid" gorm:"column:pid"`
+	Kind          string            `json:"kind"`
+	Floor         int64             `json:"floor"`
+	ParentKey     string            `json:"parent_key"`
+	ParentFloor   int64             `json:"parent_floor"`
+	CommentToID   string            `json:"comment_to_id"`
+	AuthorUID     int64             `json:"author_uid"`
+	Author        string            `json:"author"`
+	Subject       string            `json:"subject"`
+	Body          string            `json:"body"`
+	PublishedAt   *time.Time        `json:"published_at"`
+	SourceURL     string            `json:"source_url"`
+	Resources     []string          `json:"resources" gorm:"serializer:json"`
+	CreatedAt     time.Time         `json:"created_at"`
 }
 
 // 事务范围由 service 决定，回调内的具体读写共用 SQLite 连接。
@@ -225,6 +224,28 @@ func (s *Store) InterruptRuns(ctx context.Context) (err error) {
 func (s *Store) InsertPosts(ctx context.Context, posts []Post) (saved int64, err error) {
 	ctx, span := logging.Start(ctx, "repository.insert_posts")
 	defer span.End(&err)
+	seen := map[int64]bool{}
+	for _, p := range posts {
+		for url, name := range p.ResourceNames {
+			item := Resource{URL: url, OriginalName: name}
+			if e := s.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "url"}}, DoUpdates: clause.Assignments(map[string]any{"original_name": gorm.Expr("COALESCE(NULLIF(original_name,''), excluded.original_name)")})}).Create(&item).Error; e != nil {
+				return 0, logging.Wrap(e, "save resource original name")
+			}
+		}
+		if seen[p.TID] {
+			continue
+		}
+		seen[p.TID] = true
+		t := Thread{TID: p.TID, Coverage: "partial", LastSeenAt: time.Now().UTC()}
+		if p.Thread != nil && p.Thread.TID > 0 {
+			t = *p.Thread
+		} else if p.Kind == "main" {
+			t.Title, t.AuthorUID, t.AuthorName = p.Subject, p.AuthorUID, p.Author
+		}
+		if e := s.UpsertThread(ctx, t); e != nil {
+			return 0, e
+		}
+	}
 	if len(posts) == 0 {
 		return 0, nil
 	}
@@ -242,12 +263,4 @@ func (s *Store) Posts(ctx context.Context, tid int64, page int) (posts []Post, t
 	posts = []Post{}
 	err = query.Order("CASE WHEN kind = 'comment' THEN parent_floor ELSE floor END, CASE WHEN kind = 'comment' THEN 1 ELSE 0 END, published_at, id").Offset((page - 1) * 50).Limit(50).Find(&posts).Error
 	return posts, total, logging.Wrap(err, "read posts")
-}
-
-func (s *Store) Threads(ctx context.Context) (threads []ThreadSummary, err error) {
-	ctx, span := logging.Start(ctx, "repository.threads")
-	defer span.End(&err)
-	threads = []ThreadSummary{}
-	err = s.db.WithContext(ctx).Model(&Post{}).Select("tid, MAX(CASE WHEN kind = 'main' THEN subject ELSE '' END) AS title, COUNT(*) AS count").Group("tid").Order("MAX(id) DESC").Scan(&threads).Error
-	return threads, logging.Wrap(err, "read saved threads")
 }
