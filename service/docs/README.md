@@ -18,6 +18,8 @@ Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实�
 
 管理台采用已选定的 B 方案：顶部导航与监控状态看板，见 [UI 重设计 Spec15](spec/15-admin-ui.md)。运行概览为 `/admin`；监控在 `/admin/watches`，内容在 `/admin/library`，收件箱在 `/admin/inbox`，通知渠道在 `/admin/channels`，账号与运行配置归入 `/admin/settings`。原有监控详情、正文、续期、Bot、资源及导出路由保留。
 
+TID/UID 内容的秒级闭区间导出与统一导出悬浮窗见 [Spec16](spec/16-time-ranged-content-export.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
@@ -391,7 +393,7 @@ Markdown 按 [Spec13](spec/13-markdown-rendering.md) 复刻 ngapost2md 的渲染
 | --- | --- |
 | `GET /api/v1/users` | `users` 汇总：`watch_id`、`uid`、`username`、`post_count`、`thread_count`、`last_published_at` |
 | `GET /api/v1/users/:uid/posts?page=1` | 目标用户的已保存内容及分页信息 |
-| `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`，下载已有内容 |
+| `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`；可选 `start_at`、`end_at` 按 `published_at` 秒级闭区间筛选，可只传单边。API 使用 RFC 3339，管理页本地时间按配置时区解释；时间参数均为空时下载全部已有内容 |
 | `GET /api/v1/resources` | 只读资源扫描及下载设置 |
 | `POST /api/v1/resources` | `{"download_enabled":true}`，修改下载开关 |
 | `POST /api/v1/resources/redownload` | 下载缺失项，返回成功数；失败项保留错误并写日志 |

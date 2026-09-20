@@ -65,8 +65,12 @@ func (h *Handler) exportContent(c *gin.Context) {
 	if !ok {
 		return
 	}
-	format := c.DefaultQuery("format", "markdown")
-	file, err := h.monitor.Export(c.Request.Context(), c.Param("kind"), id, format)
+	input := service.ExportInput{
+		Format:  c.DefaultQuery("format", "markdown"),
+		StartAt: c.Query("start_at"),
+		EndAt:   c.Query("end_at"),
+	}
+	file, err := h.monitor.Export(c.Request.Context(), c.Param("kind"), id, input)
 	if err != nil {
 		h.problem(c, err)
 		return
@@ -77,7 +81,7 @@ func (h *Handler) exportContent(c *gin.Context) {
 		}
 	}()
 	extension, mime := "md", "text/markdown; charset=utf-8"
-	if format == "zip" {
+	if input.Format == "zip" {
 		extension, mime = "zip", "application/zip"
 	}
 	c.Header("Content-Type", mime)

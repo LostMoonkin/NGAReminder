@@ -199,6 +199,15 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 15px; background:
 dialog { width: min(540px, calc(100% - 30px)); max-height: 90dvh; overflow: auto; padding: 25px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); box-shadow: 0 20px 75px #22311b33; }
 dialog::backdrop { background: #23351e55; backdrop-filter: blur(3px); }
 .dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 18px; }
+.option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.option { display: flex; align-items: center; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: #fafbf7; }
+.option input { flex-shrink: 0; }
+.export-period { margin: 22px 0; padding: 17px; border-radius: 7px; background: #f4f6ee; }
+.export-period .grid { gap: 14px; }
+.export-period label { margin-bottom: 7px; }
+.export-period p { margin-top: 7px; }
+.no-js-only > form { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.js .no-js-only { display: none; }
 .js-only { display: none; }
 .js .js-only { display: flex; }
 @media (max-width: 1200px) {
@@ -264,6 +273,7 @@ dialog::backdrop { background: #23351e55; backdrop-filter: blur(3px); }
   .reader .card { padding: 19px; }
   .channel-card { margin-bottom: 0; }
   .form-actions { flex-wrap: wrap; }
+  .option-grid { grid-template-columns: 1fr; }
   .pagination { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }

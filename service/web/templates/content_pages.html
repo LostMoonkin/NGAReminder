@@ -23,8 +23,26 @@
 {{define "posts"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main" class="reader">
 <header class="page-heading"><div><a class="back-link" href="{{if .Data.UID}}/admin/users{{else}}/admin/library{{end}}">← 内容库</a><h1>{{if .Data.UID}}UID {{.Data.UID}}{{else}}TID {{.Data.TID}}{{end}} · 已保存帖子</h1><p class="muted">共 {{.Data.Total}} 条 · 第 {{.Data.Page}} 页</p></div>
-<div class="actions"><form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><button class="secondary" name="format" value="markdown">{{template "icon" "download"}}下载 Markdown</button></form><form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><button name="format" value="zip">{{template "icon" "download"}}导出 ZIP</button></form></div></header>
+<div class="actions"><button type="button" class="js-only" data-open-export>{{template "icon" "download"}}导出内容</button></div></header>
 <div class="notice neutral">{{template "icon" "library"}}<p>{{if .Data.UID}}仅展示该用户已保存的内容，按主题分组。{{else}}正在阅读本地保存内容。{{end}}导出不会额外抓取正文，ZIP 包含已下载的相关资源。</p></div>
+<dialog id="export-dialog" data-export-dialog aria-labelledby="export-title">
+<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}" data-export-form>
+<div class="dialog-header"><div><p class="eyebrow">EXPORT CONTENT</p><h2 id="export-title">导出内容</h2></div><button type="button" class="icon-button" data-close-export aria-label="关闭">{{template "icon" "close"}}</button></div>
+<fieldset><legend>导出范围</legend><div class="option-grid">
+<label class="option"><input type="radio" name="export_range" value="all" checked data-export-range>全量导出</label>
+<label class="option"><input type="radio" name="export_range" value="period" data-export-range>指定时间段</label>
+</div></fieldset>
+<fieldset class="export-period" data-export-period disabled><legend>时间段</legend><div class="grid"><label>开始时间<input type="datetime-local" name="start_at" step="1" disabled></label><label>结束时间<input type="datetime-local" name="end_at" step="1" disabled></label></div><p class="small muted">精确到秒，首尾均包含；按配置时区 {{.Data.Timezone}} 解释。</p></fieldset>
+<fieldset><legend>导出格式</legend><div class="option-grid">
+<label class="option"><input type="radio" name="format" value="markdown" checked>Markdown</label>
+<label class="option"><input type="radio" name="format" value="zip">ZIP（包含已下载资源）</label>
+</div></fieldset>
+<div class="form-actions"><button type="button" class="secondary" data-close-export>取消</button><button type="submit">{{template "icon" "download"}}开始导出</button></div>
+</form></dialog>
+<details class="card no-js-only" id="export-options"><summary>导出内容</summary><p class="small muted">时间范围精确到秒、首尾均包含，并按配置时区 {{.Data.Timezone}} 解释。</p>
+<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}全量导出</button></form>
+<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><div class="grid"><label>开始时间<input type="datetime-local" name="start_at" step="1" required></label><label>结束时间<input type="datetime-local" name="end_at" step="1" required></label></div><label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}按时段导出</button></form>
+</details>
 <section class="card">
 {{$tid := 0}}
 {{range .Data.Posts}}{{if ne $tid .TID}}<h2>TID {{.TID}} {{.Subject}}</h2>{{$tid = .TID}}{{end}}<article class="post">

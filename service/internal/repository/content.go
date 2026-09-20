@@ -3,11 +3,16 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
+
 	"gorm.io/gorm"
 	"ngareminder/service/internal/logging"
 )
 
-type ContentFilter struct{ TID, UID int64 }
+type ContentFilter struct {
+	TID, UID       int64
+	StartAt, EndAt *time.Time
+}
 
 func (s *Store) contentQuery(ctx context.Context, f ContentFilter) *gorm.DB {
 	q := s.db.WithContext(ctx).Model(&Post{})
@@ -16,6 +21,12 @@ func (s *Store) contentQuery(ctx context.Context, f ContentFilter) *gorm.DB {
 	}
 	if f.UID > 0 {
 		q = q.Where("author_uid = ?", f.UID)
+	}
+	if f.StartAt != nil {
+		q = q.Where("published_at >= ?", *f.StartAt)
+	}
+	if f.EndAt != nil {
+		q = q.Where("published_at <= ?", *f.EndAt)
 	}
 	return q
 }

@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http/httptest"
+	"net/url"
 	"ngareminder/service/internal/infrastructure"
 	"ngareminder/service/internal/repository"
+	"ngareminder/service/internal/service"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,10 +106,10 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	// 中断生成与中断发送均清理临时文件。
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err = m.Export(cancelled, "users", 2001, "zip"); err == nil {
+	if _, err = m.Export(cancelled, "users", 2001, service.ExportInput{Format: "zip"}); err == nil {
 		t.Fatal("cancelled export succeeded")
 	}
-	file, err := m.Export(ctx, "users", 2001, "zip")
+	file, err := m.Export(ctx, "users", 2001, service.ExportInput{Format: "zip"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +171,127 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	expectStatus(t, request(t, router, "GET", "/admin/resources", ""), 200)
 	if !strings.Contains(logs.String(), "Resource download failed") && !strings.Contains(logs.String(), "Missing resource download failed") {
 		t.Fatal("resource failures were not logged")
+	}
+}
+
+func TestContentExportTimeRange(t *testing.T) {
+	cfg := testConfig(t)
+	router, store, _ := openAppWithTransport(t, cfg, io.Discard, exportNoNetwork{t})
+	ctx := context.Background()
+	at := func(value string) *time.Time {
+		t.Helper()
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &parsed
+	}
+	posts := []repository.Post{
+		{TID: 1001, Key: "pid:1", PID: 1, Kind: "reply", Floor: 1, AuthorUID: 2001, Author: "writer", Body: "before-range", PublishedAt: at("2026-09-20T00:59:59Z")},
+		{TID: 1001, Key: "pid:2", PID: 2, Kind: "reply", Floor: 2, AuthorUID: 2001, Author: "writer", Body: "start-boundary", PublishedAt: at("2026-09-20T01:00:00Z")},
+		{TID: 1001, Key: "pid:3", PID: 3, Kind: "reply", Floor: 3, AuthorUID: 2001, Author: "writer", Body: "middle-range", PublishedAt: at("2026-09-20T01:00:01Z")},
+		{TID: 1001, Key: "pid:4", PID: 4, Kind: "reply", Floor: 4, AuthorUID: 2001, Author: "writer", Body: "end-boundary", PublishedAt: at("2026-09-20T01:00:02Z")},
+		{TID: 1001, Key: "pid:5", PID: 5, Kind: "reply", Floor: 5, AuthorUID: 2001, Author: "writer", Body: "after-range", PublishedAt: at("2026-09-20T01:00:03Z")},
+		{TID: 1001, Key: "pid:6", PID: 6, Kind: "reply", Floor: 6, AuthorUID: 2001, Author: "writer", Body: "unknown-time"},
+		{TID: 1001, Key: "pid:7", PID: 7, Kind: "reply", Floor: 7, AuthorUID: 9000, Author: "other", Body: "other-author", PublishedAt: at("2026-09-20T01:00:01Z")},
+	}
+	if _, err := store.InsertPosts(ctx, posts); err != nil {
+		t.Fatal(err)
+	}
+
+	export := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		response := send(t, router, "GET", path, cfg.APIToken, nil)
+		expectStatus(t, response, 200)
+		return response
+	}
+	query := url.Values{"format": {"markdown"}, "start_at": {"2026-09-20T01:00:00Z"}, "end_at": {"2026-09-20T01:00:02Z"}}
+	uid := export("/api/v1/exports/users/2001?" + query.Encode()).Body.String()
+	for _, included := range []string{"start-boundary", "middle-range", "end-boundary"} {
+		if !strings.Contains(uid, included) {
+			t.Error("closed time range omitted", included)
+		}
+	}
+	for _, excluded := range []string{"before-range", "after-range", "unknown-time", "other-author"} {
+		if strings.Contains(uid, excluded) {
+			t.Error("UID time range included", excluded)
+		}
+	}
+
+	localQuery := url.Values{"format": {"markdown"}, "start_at": {"2026-09-20T09:00:00"}, "end_at": {"2026-09-20T09:00:02"}}
+	if local := export("/api/v1/exports/users/2001?" + localQuery.Encode()).Body.String(); local != uid {
+		t.Fatal("configured timezone range differed from equivalent RFC3339 range")
+	}
+	minuteQuery := url.Values{"format": {"markdown"}, "start_at": {"2026-09-20T09:00"}, "end_at": {"2026-09-20T09:00"}}
+	minute := export("/api/v1/exports/users/2001?" + minuteQuery.Encode()).Body.String()
+	if !strings.Contains(minute, "start-boundary") || strings.Contains(minute, "middle-range") {
+		t.Fatal("normalized datetime-local minute value did not mean second zero")
+	}
+
+	query.Set("format", "zip")
+	response := export("/api/v1/exports/threads/1001?" + query.Encode())
+	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zipped string
+	for _, entry := range archive.File {
+		if entry.Name != "content.md" {
+			continue
+		}
+		reader, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		raw, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatal(readErr, closeErr)
+		}
+		zipped = string(raw)
+	}
+	if !strings.Contains(zipped, "other-author") || strings.Contains(zipped, "before-range") || strings.Contains(zipped, "unknown-time") {
+		t.Fatal("TID ZIP did not apply the closed time range")
+	}
+
+	oneSided := url.Values{"format": {"markdown"}, "start_at": {"2026-09-20T01:00:02Z"}}
+	result := export("/api/v1/exports/users/2001?" + oneSided.Encode()).Body.String()
+	if !strings.Contains(result, "end-boundary") || !strings.Contains(result, "after-range") || strings.Contains(result, "middle-range") || strings.Contains(result, "unknown-time") {
+		t.Fatal("one-sided start range was not inclusive")
+	}
+	full := export("/api/v1/exports/users/2001?format=markdown").Body.String()
+	if !strings.Contains(full, "before-range") || !strings.Contains(full, "unknown-time") {
+		t.Fatal("empty range parameters changed full export")
+	}
+
+	for _, path := range []string{
+		"/api/v1/exports/users/2001?format=markdown&start_at=invalid",
+		"/api/v1/exports/users/2001?format=markdown&start_at=2026-09-20T01%3A00%3A00.5Z",
+		"/api/v1/exports/users/2001?format=markdown&start_at=2026-09-20T01%3A00%3A00.000Z",
+		"/api/v1/exports/users/2001?format=markdown&start_at=2026-09-20T01%3A00%3A02Z&end_at=2026-09-20T01%3A00%3A00Z",
+		"/api/v1/exports/users/2001?format=markdown&start_at=2099-09-20T01%3A00%3A00Z",
+	} {
+		expectStatus(t, send(t, router, "GET", path, cfg.APIToken, nil), 400)
+	}
+	files, err := os.ReadDir(cfg.AssetsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range files {
+		if strings.HasPrefix(entry.Name(), ".export-") {
+			t.Fatal("failed time range export left a temporary file")
+		}
+	}
+
+	page := request(t, router, "GET", "/admin/threads/1001", "")
+	expectStatus(t, page, 200)
+	for _, marker := range []string{"data-open-export", "data-export-dialog", `type="datetime-local"`, "Asia/Shanghai", "首尾均包含", "no-js-only"} {
+		if !strings.Contains(page.Body.String(), marker) {
+			t.Error("export UI missing", marker)
+		}
+	}
+	if strings.Contains(page.Body.String(), "下载 Markdown") || strings.Contains(page.Body.String(), "导出 ZIP") {
+		t.Fatal("content page retained separate export buttons")
 	}
 }
 

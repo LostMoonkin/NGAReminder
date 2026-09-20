@@ -453,7 +453,7 @@ func verifyGoRead(t *testing.T, path string, r report, dir string) {
 			t.Fatal("Chinese post body was lost")
 		}
 	}
-	file, err := monitor.Export(ctx, "threads", 1001, "zip")
+	file, err := monitor.Export(ctx, "threads", 1001, service.ExportInput{Format: "zip"})
 	if err != nil {
 		t.Fatal(err)
 	}

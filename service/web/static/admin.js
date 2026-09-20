@@ -110,6 +110,39 @@ one('[data-confirm-submit]', confirmation)?.addEventListener('click', () => {
   else form.requestSubmit();
 });
 document.querySelectorAll('[data-close-confirm]').forEach(b => b.addEventListener('click', () => confirmation.close()));
+
+const exportDialog = one('[data-export-dialog]');
+if (exportDialog) {
+  const form = one('[data-export-form]', exportDialog);
+  const period = one('[data-export-period]', form);
+  const times = [...period.querySelectorAll('input')];
+  const syncExportRange = () => {
+    const ranged = one('[data-export-range]:checked', form)?.value === 'period';
+    period.disabled = !ranged;
+    times.forEach(input => {
+      input.disabled = !ranged;
+      input.required = ranged;
+      input.setCustomValidity('');
+    });
+    if (ranged && exportDialog.open) times[0].focus();
+  };
+  document.querySelectorAll('[data-open-export]').forEach(button => button.addEventListener('click', () => {
+    exportDialog.showModal();
+    syncExportRange();
+  }));
+  form.querySelectorAll('[data-export-range]').forEach(input => input.addEventListener('change', syncExportRange));
+  form.addEventListener('submit', event => {
+    if (!period.disabled && times[0].value > times[1].value) {
+      event.preventDefault();
+      times[1].setCustomValidity('结束时间不能早于开始时间');
+      times[1].reportValidity();
+    }
+  });
+  times.forEach(input => input.addEventListener('input', () => times.forEach(item => item.setCustomValidity(''))));
+  exportDialog.querySelectorAll('[data-close-export]').forEach(button => button.addEventListener('click', () => exportDialog.close()));
+  syncExportRange();
+}
+
 window.addEventListener('pageshow', event => {
   if (event.persisted) location.reload();
 });

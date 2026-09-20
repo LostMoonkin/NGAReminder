@@ -12,16 +12,24 @@ import (
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/repository"
 	"os"
+	"strings"
 	"time"
 )
 
 type SavedContent struct {
-	TID   int64             `json:"tid"`
-	UID   int64             `json:"uid"`
-	Posts []repository.Post `json:"posts"`
-	Page  int               `json:"page"`
-	Total int64             `json:"total"`
-	Runs  []repository.Run  `json:"runs"`
+	TID      int64             `json:"tid"`
+	UID      int64             `json:"uid"`
+	Posts    []repository.Post `json:"posts"`
+	Page     int               `json:"page"`
+	Total    int64             `json:"total"`
+	Runs     []repository.Run  `json:"runs"`
+	Timezone string            `json:"-"`
+}
+
+type ExportInput struct {
+	Format  string
+	StartAt string
+	EndAt   string
 }
 
 func contentFilter(kind string, id int64) (repository.ContentFilter, error) {
@@ -46,7 +54,7 @@ func (m *Monitoring) Content(ctx context.Context, kind string, id int64, page in
 	if page < 1 {
 		return v, InvalidInput("页码必须为正整数")
 	}
-	v.TID, v.UID, v.Page = filter.TID, filter.UID, page
+	v.TID, v.UID, v.Page, v.Timezone = filter.TID, filter.UID, page, m.location.String()
 	var maxID int64
 	v.Total, maxID, err = m.store.ContentStats(ctx, filter)
 	if err != nil {
@@ -62,14 +70,54 @@ func (m *Monitoring) Content(ctx context.Context, kind string, id int64, page in
 	return
 }
 
+func (m *Monitoring) exportFilter(kind string, id int64, input ExportInput) (repository.ContentFilter, error) {
+	filter, err := contentFilter(kind, id)
+	if err != nil {
+		return filter, err
+	}
+	filter.StartAt, err = m.parseExportTime(input.StartAt, "开始时间")
+	if err != nil {
+		return filter, err
+	}
+	filter.EndAt, err = m.parseExportTime(input.EndAt, "结束时间")
+	if err != nil {
+		return filter, err
+	}
+	if filter.StartAt != nil && filter.EndAt != nil && filter.StartAt.After(*filter.EndAt) {
+		return filter, InvalidInput("开始时间不能晚于结束时间")
+	}
+	return filter, nil
+}
+
+func (m *Monitoring) parseExportTime(raw, label string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	hasSubsecond := len(raw) > len("2006-01-02") && strings.ContainsAny(raw[len("2006-01-02"):], ".,")
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		parsed, err = time.ParseInLocation("2006-01-02T15:04:05", raw, m.location)
+	}
+	if err != nil {
+		parsed, err = time.ParseInLocation("2006-01-02T15:04", raw, m.location)
+	}
+	if err != nil || hasSubsecond || parsed.Nanosecond() != 0 {
+		return nil, InvalidInput(label + "必须精确到秒，可使用 RFC3339 或 YYYY-MM-DDTHH:mm:ss")
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
 // 导出只持有一批正文及一个资源文件；临时文件由 HTTP 入口在发送完成/取消后清理。
-func (m *Monitoring) Export(ctx context.Context, kind string, id int64, format string) (file *os.File, err error) {
+func (m *Monitoring) Export(ctx context.Context, kind string, id int64, input ExportInput) (file *os.File, err error) {
 	ctx, span := logging.Start(ctx, "service.export_content")
 	defer span.End(&err)
-	filter, err := contentFilter(kind, id)
+	filter, err := m.exportFilter(kind, id, input)
 	if err != nil {
 		return nil, err
 	}
+	format := input.Format
 	if format != "markdown" && format != "zip" {
 		return nil, InvalidInput("导出格式为 markdown 或 zip")
 	}
@@ -198,7 +246,14 @@ func (m *Monitoring) Export(ctx context.Context, kind string, id int64, format s
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return file, logging.Wrap(err, "rewind export file")
 	}
-	zerolog.Ctx(ctx).Info().Str("kind", kind).Int64("target_id", id).Str("format", format).Int64("posts", total).Int("assets", len(assets)).Msg("Content export ready")
+	log := zerolog.Ctx(ctx).Info().Str("kind", kind).Int64("target_id", id).Str("format", format).Int64("posts", total).Int("assets", len(assets))
+	if filter.StartAt != nil {
+		log = log.Time("start_at", *filter.StartAt)
+	}
+	if filter.EndAt != nil {
+		log = log.Time("end_at", *filter.EndAt)
+	}
+	log.Msg("Content export ready")
 	success = true
 	return file, nil
 }
