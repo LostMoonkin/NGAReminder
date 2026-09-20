@@ -19,8 +19,8 @@ func TestGapAttemptScheduleAndBaseline(t *testing.T) {
 		t.Fatal("recovery exceeded its deadline")
 	}
 	watch := repository.Watch{ID: 1, CursorFloor: 100, BaselineComplete: true}
-	gaps := newFloorGaps(watch, map[int64]bool{102: true, 104: true}, 104, start)
-	if len(gaps) != 2 || gaps[0].Floor != 101 || gaps[1].Floor != 103 {
+	gaps := newFloorGaps(watch, map[int64]int{102: 6, 104: 7}, 104, start)
+	if len(gaps) != 2 || gaps[0].Floor != 101 || gaps[1].Floor != 103 || gaps[0].PageHint != 6 || gaps[1].PageHint != 7 {
 		t.Fatal("incorrect incremental floor gap range", gaps)
 	}
 	watch.BaselineComplete = false

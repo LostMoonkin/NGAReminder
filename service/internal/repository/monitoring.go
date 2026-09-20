@@ -36,6 +36,9 @@ type Watch struct {
 	State              string `json:"state"`
 	BaselineComplete   bool   `json:"baseline_complete"`
 	CursorFloor        int64  `json:"cursor_floor"`
+	// 仅在整轮成功后提交；旧库为 0 时只从已有水位补查尾部，不重新扫描历史。
+	RemoteRows       int64 `json:"remote_rows" gorm:"default:0"`
+	RemoteTotalPages int   `json:"remote_total_pages" gorm:"default:0"`
 	// From-now 的原始边界独立于持续前移的游标；重跑不能把未保存内容误当成历史。
 	HistoryFloor    int64          `json:"history_floor"`
 	HistoryBefore   *time.Time     `json:"history_before"`

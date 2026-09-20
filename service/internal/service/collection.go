@@ -67,6 +67,7 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 		run.Status, run.FinishedAt, run.Error = "skipped_no_fetch", &finished, "当前处于免拉取时段"
 		watch.NextRunAt = until
 	}
+	var recovery []repository.FloorGap
 	err = m.store.Transaction(ctx, func(ctx context.Context, tx *repository.Store) error {
 		// 其他监控可能刚发现认证失效，事务内再次核对，不能用旧快照清除暂停。
 		current, e := tx.Account(ctx)
@@ -77,7 +78,8 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 			return logging.WithStack(infrastructure.ErrNGAAuth)
 		}
 		if watch.Kind == "tid" && run.Status == "running" {
-			if e := advanceGapAttempts(ctx, tx, watch.ID, now); e != nil {
+			recovery, e = advanceGapAttempts(ctx, tx, watch.ID, now)
+			if e != nil {
 				return e
 			}
 		}
@@ -121,17 +123,17 @@ func (m *Monitoring) startRunLocked(ctx context.Context, watch repository.Watch,
 			return
 		}
 		if source == "gap_recovery" {
-			runErr = m.collectGaps(taskCtx, credentials, &watch, &run)
+			runErr = m.collectGaps(taskCtx, credentials, &watch, &run, recovery)
 		} else if watch.Kind == "uid" {
 			runErr = m.collectUser(taskCtx, credentials, &watch, &run)
 		} else {
-			runErr = m.collect(taskCtx, credentials, &watch, &run)
+			runErr = m.collect(taskCtx, credentials, &watch, &run, recovery)
 		}
 	}(run)
 	return run, true, nil
 }
 
-func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Credentials, watch *repository.Watch, run *repository.Run) error {
+func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Credentials, watch *repository.Watch, run *repository.Run, recovery []repository.FloorGap) error {
 	first, err := m.nga.ThreadPage(ctx, credentials, watch.TID, 1)
 	if err != nil {
 		return err
@@ -141,7 +143,7 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 	if err != nil {
 		return err
 	}
-	seen := map[int64]bool{}
+	seen := map[int64]int{}
 	maxFloor := watch.CursorFloor
 	if !watch.BaselineComplete && watch.InitMode == "from_now" {
 		last := first
@@ -160,32 +162,42 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		}
 		now := time.Now().UTC()
 		watch.HistoryFloor, watch.HistoryBefore = maxFloor, &now
+		watch.RemoteRows, watch.RemoteTotalPages = first.Rows, first.TotalPages
 		return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil, nil)
 	}
-	// 全量初始化按配置分批并发读，仍按页序提交；增量逐页读取以发现旧楼层的新评论。
-	// 页数固定为首个响应的快照；采集期间继续增长的尾页留到下一轮，避免追赶不停。
+	// 增量先检查首屏元数据，仅有增长或旧库尚无快照时，从水位所在页读取尾部。
+	// 不为发现旧楼新评论扫描历史；页数仍固定为首屏快照，不追赶本轮新增长的尾页。
+	startPage, lastPage := 2, first.TotalPages
+	if watch.BaselineComplete {
+		startPage = max(2, threadFloorPage(watch.CursorFloor, first))
+		if watch.RemoteRows > 0 && watch.RemoteTotalPages > 0 && first.Rows <= watch.RemoteRows && first.TotalPages <= watch.RemoteTotalPages {
+			lastPage = 1
+		}
+	}
 	concurrency := 1
 	if !watch.BaselineComplete && watch.InitMode == "full" {
 		concurrency = max(1, min(watch.HistoryConcurrency, 16))
 	}
 	zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("total_pages", first.TotalPages).
-		Int("page_concurrency", concurrency).Int("qpm", 120).Msg("Collecting thread pages")
+		Int("start_page", startPage).Int("last_page", lastPage).Int("page_concurrency", concurrency).Int("qpm", 120).Msg("Collecting thread pages")
 	var batch []infrastructure.ThreadPage
-	for page := 1; page <= first.TotalPages; page++ {
+	fetched := map[int]bool{}
+	for page := 1; page <= lastPage; {
 		result := first
 		if page > 1 {
-			if (page-2)%concurrency == 0 {
-				batch, err = m.nga.ThreadPages(ctx, credentials, watch.TID, page, min(page+concurrency-1, first.TotalPages))
+			if (page-startPage)%concurrency == 0 {
+				batch, err = m.nga.ThreadPages(ctx, credentials, watch.TID, page, min(page+concurrency-1, lastPage))
 				if err != nil {
 					return err
 				}
 			}
-			result = batch[(page-2)%concurrency]
+			result = batch[(page-startPage)%concurrency]
 		}
+		fetched[page] = true
 		posts := []repository.Post{}
 		for _, post := range result.Posts {
-			if post.Kind != "comment" {
-				seen[post.Floor] = true
+			if watch.BaselineComplete && post.Kind != "comment" && post.Floor > watch.CursorFloor {
+				seen[post.Floor] = page
 			}
 			if post.Kind != "comment" && post.Floor > maxFloor {
 				maxFloor = post.Floor
@@ -226,8 +238,21 @@ func (m *Monitoring) collect(ctx context.Context, credentials infrastructure.Cre
 		m.resources.Collect(ctx, posts)
 		zerolog.Ctx(ctx).Info().Int64("watch_id", watch.ID).Int("page", page).Int("total_pages", first.TotalPages).
 			Int64("saved", run.Saved).Msg("Thread page saved; cursor will advance after the entire run completes")
+		if page == 1 {
+			page = startPage
+		} else {
+			page++
+		}
 	}
+	if err := m.collectGapPages(ctx, credentials, watch, run, gaps, recovery, first, fetched); err != nil {
+		return err
+	}
+	watch.RemoteRows, watch.RemoteTotalPages = first.Rows, first.TotalPages
 	return m.finishSuccessfulRun(ctx, watch, run, maxFloor, nil, newFloorGaps(*watch, seen, maxFloor, time.Now()))
+}
+
+func threadFloorPage(floor int64, first infrastructure.ThreadPage) int {
+	return int(min(max(floor, 0)/int64(first.PerPage), int64(first.TotalPages-1))) + 1
 }
 
 func (m *Monitoring) finishSuccessfulRun(ctx context.Context, watch *repository.Watch, run *repository.Run, maxFloor int64, posts []repository.Post, newGaps []repository.FloorGap) error {

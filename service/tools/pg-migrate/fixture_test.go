@@ -115,7 +115,7 @@ func preparePG(t *testing.T) (*pgx.Conn, string, time.Time) {
 				mode = "incremental"
 			}
 			exec("INSERT INTO thread_watch_options(watch_id,history_mode) VALUES($1,$2)", id, mode)
-			exec("INSERT INTO watch_cursors(watch_id,last_floor) VALUES($1,3)", id)
+			exec("INSERT INTO watch_cursors(watch_id,last_floor,remote_vrows,remote_total_pages) VALUES($1,3,4,1)", id)
 		} else {
 			exec("INSERT INTO user_watch_cursors(watch_id,newest_topic_at_unix,newest_topic_tid,newest_reply_at_unix,newest_reply_pid) VALUES($1,1767225600,1001,1767225660,4001)", id)
 		}

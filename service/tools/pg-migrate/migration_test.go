@@ -138,7 +138,7 @@ func TestPostgreSQLMigration(t *testing.T) {
 	if err = db.First(&watch, r.IDs["watch_targets"]["tid"]).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !watch.BaselineComplete || watch.CursorFloor != 3 || watch.HistoryBefore == nil || !watch.HistoryBefore.Equal(r.SnapshotAt) {
+	if !watch.BaselineComplete || watch.CursorFloor != 3 || watch.RemoteRows != 4 || watch.RemoteTotalPages != 1 || watch.HistoryBefore == nil || !watch.HistoryBefore.Equal(r.SnapshotAt) {
 		t.Fatal("TID baseline or cutoff changed")
 	}
 	if !reflect.DeepEqual(watch.IntervalRules[0].Weekdays, []int{6, 7}) || watch.IntervalRules[0].End != "00:00" || watch.NoFetchPeriods[0].Weekdays[0] != 7 {
@@ -155,7 +155,7 @@ func TestPostgreSQLMigration(t *testing.T) {
 	if err = db.Where("watch_id=? AND floor=3", r.IDs["watch_targets"]["tid"]).First(&gap).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !gap.FirstSeen.Equal(cutover) || !gap.Deadline.Equal(cutover.Add(120*time.Second)) {
+	if gap.PageHint != 1 || !gap.FirstSeen.Equal(cutover) || !gap.Deadline.Equal(cutover.Add(120*time.Second)) {
 		t.Fatal("floor gap deadline was extended")
 	}
 	// 使用当前 Go 入口解密、浏览、导出；原 assets 由部署继续挂载，工具没有文件参数。

@@ -30,6 +30,8 @@ type ThreadPage struct {
 	Title      string
 	Page       int
 	TotalPages int
+	PerPage    int
+	Rows       int64
 	Posts      []ParsedPost
 }
 
@@ -77,7 +79,7 @@ func parseThreadPage(body []byte, tid int64, requestedPage int) (result ThreadPa
 	if int(raw.Page) != requestedPage || raw.Page < 1 || raw.Total < raw.Page || raw.PerPage < 1 || raw.Rows < 1 || len(raw.Posts) == 0 {
 		return result, logging.WithStack(errors.New("NGA thread page is empty or has inconsistent pagination"))
 	}
-	result = ThreadPage{Title: raw.Title, Page: int(raw.Page), TotalPages: int(raw.Total)}
+	result = ThreadPage{Title: raw.Title, Page: int(raw.Page), TotalPages: int(raw.Total), PerPage: int(raw.PerPage), Rows: int64(raw.Rows)}
 	for _, rawPost := range raw.Posts {
 		posts, parseErr := parsePost(rawPost, tid, nil, raw.AttachPrefix)
 		if parseErr != nil {

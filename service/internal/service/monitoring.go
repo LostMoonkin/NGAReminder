@@ -378,6 +378,7 @@ func (m *Monitoring) SaveWatch(ctx context.Context, id int64, input WatchInput) 
 
 func resetBaseline(watch *repository.Watch) {
 	watch.TopicCursor, watch.ReplyCursor = repository.UserCursor{}, repository.UserCursor{}
+	watch.RemoteRows, watch.RemoteTotalPages = 0, 0
 	watch.BaselineComplete, watch.CursorFloor, watch.HistoryFloor, watch.HistoryBefore, watch.State = false, 0, -1, nil, "ready"
 }
 

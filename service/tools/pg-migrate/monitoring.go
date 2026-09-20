@@ -105,6 +105,8 @@ func (m *importer) watches() error {
 			}
 			cursor := m.one("watch_cursors", "watch_id", r.text("id"))
 			v.CursorFloor = cursor.number("last_floor")
+			v.RemoteRows = cursor.number("remote_vrows")
+			v.RemoteTotalPages = int(cursor.number("remote_total_pages"))
 			if v.CursorFloor < -1 || (v.BaselineComplete && v.CursorFloor < 0) {
 				return sourceError(cursor.table, "last_floor", "invalid committed floor")
 			}
@@ -246,7 +248,7 @@ func (m *importer) history() error {
 		return err
 	}
 	return m.walk("thread_floor_gaps", func(r row) error {
-		v := repository.FloorGap{WatchID: m.id("watch_targets", r.text("watch_id")), Floor: r.number("floor_number"), Status: r.text("status"), FirstSeen: r.at("first_detected_at"), Deadline: r.at("expires_at"), NextAttempt: int(r.number("retry_count"))}
+		v := repository.FloorGap{WatchID: m.id("watch_targets", r.text("watch_id")), Floor: r.number("floor_number"), PageHint: int(r.number("page_hint")), Status: r.text("status"), FirstSeen: r.at("first_detected_at"), Deadline: r.at("expires_at"), NextAttempt: int(r.number("retry_count"))}
 		if v.Floor <= 0 || v.NextAttempt < 0 || v.Deadline.Before(v.FirstSeen) {
 			return sourceError(r.table, "floor_number", "invalid floor gap state")
 		}

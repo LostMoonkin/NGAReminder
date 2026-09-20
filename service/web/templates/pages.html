@@ -103,6 +103,7 @@ document.addEventListener('click', event => {
       <label>初始化模式<select name="init_mode"><option value="full">保存全部可访问历史</option><option value="from_now">从现在开始</option></select></label>
       {{template "history-concurrency"}}
       <p class="small muted">首次运行建立静默基线。从现在开始以首次运行成功时的水位为界，不导入旧楼层。</p>
+      <p class="small muted">增量仅检查首页和新增内容所在的尾部页面，不重拉全部历史；旧楼新评论只在本轮访问到的页面中采集。</p>
       {{template "schedule"}}
       <button>创建 TID 监控</button>
     </form></details>

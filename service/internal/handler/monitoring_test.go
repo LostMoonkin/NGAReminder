@@ -99,6 +99,7 @@ func (f *ngaFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	var copy map[string]any
 	_ = json.Unmarshal(b, &copy)
 	if f.newPosts {
+		copy["vrows"] = copy["vrows"].(float64) + 2
 		if page == "2" {
 			post := map[string]any{"tid": 1001, "pid": 4004, "lou": 9, "postdatetimestamp": 1767225900, "content": "New reply", "author": map[string]any{"uid": 2005, "username": "fixture user"}}
 			copy["result"] = append(copy["result"].([]any), post)

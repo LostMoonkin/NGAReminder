@@ -25,6 +25,7 @@ type Backfill struct {
 type FloorGap struct {
 	WatchID     int64     `json:"watch_id" gorm:"primaryKey"`
 	Floor       int64     `json:"floor" gorm:"primaryKey"`
+	PageHint    int       `json:"page_hint" gorm:"default:0"`
 	Status      string    `json:"status"`
 	FirstSeen   time.Time `json:"first_seen"`
 	Deadline    time.Time `json:"deadline"`
