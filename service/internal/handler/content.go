@@ -25,6 +25,7 @@ func (h *Handler) contentRoutes(router *gin.Engine) {
 		group.GET("/resources", h.resources)
 		group.POST("/resources", h.saveResourceSettings)
 		group.POST("/resources/redownload", h.redownloadResources)
+		group.POST("/resources/ignore", h.ignoreResources)
 		group.POST("/resources/cleanup", h.cleanupResources)
 		group.GET("/assets/*name", h.asset)
 	}
@@ -131,12 +132,44 @@ func (h *Handler) redownloadResources(c *gin.Context) {
 	if !h.longResponse(c) {
 		return
 	}
-	count, err := h.monitor.Resources().Redownload(c.Request.Context())
+	urls, ok := h.resourceSelection(c)
+	if !ok {
+		return
+	}
+	count, err := h.monitor.Resources().Redownload(c.Request.Context(), urls)
 	if err != nil {
 		h.problem(c, err)
 		return
 	}
 	h.respond(c, 200, gin.H{"downloaded": count}, "/admin/resources")
+}
+func (h *Handler) ignoreResources(c *gin.Context) {
+	urls, ok := h.resourceSelection(c)
+	if !ok {
+		return
+	}
+	count, err := h.monitor.Resources().Ignore(c.Request.Context(), urls)
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	h.respond(c, 200, gin.H{"ignored": count}, "/admin/resources")
+}
+func (h *Handler) resourceSelection(c *gin.Context) ([]string, bool) {
+	var input struct {
+		URLs []string `json:"urls" form:"urls"`
+	}
+	var err error
+	if isAPI(c) {
+		err = c.ShouldBindJSON(&input)
+	} else {
+		err = c.ShouldBind(&input)
+	}
+	if err != nil {
+		h.problem(c, service.InvalidInput("资源选择格式无效"))
+		return nil, false
+	}
+	return input.URLs, true
 }
 func (h *Handler) cleanupResources(c *gin.Context) {
 	var input struct {

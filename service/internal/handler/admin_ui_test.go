@@ -11,6 +11,23 @@ import (
 	"ngareminder/service/internal/repository"
 )
 
+func TestFormatBytes(t *testing.T) {
+	for value, want := range map[int64]string{
+		0:           "0 B",
+		1023:        "1023 B",
+		1024:        "1 KiB",
+		1536:        "1.5 KiB",
+		63751016:    "60.8 MiB",
+		104857600:   "100 MiB",
+		432515319:   "412.5 MiB",
+		10737418240: "10 GiB",
+	} {
+		if got := formatBytes(value); got != want {
+			t.Errorf("formatBytes(%d) = %q, want %q", value, got, want)
+		}
+	}
+}
+
 func TestInboxFiltersBeforePaginationAndPreservesReturnContext(t *testing.T) {
 	router, store := openApp(t, testConfig(t), io.Discard)
 	ctx := context.Background()

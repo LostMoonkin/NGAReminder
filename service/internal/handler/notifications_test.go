@@ -26,6 +26,7 @@ type noticeFixture struct {
 	message                      string
 	imageUploadOK                bool
 	imageDownloads, imageUploads int
+	resourceDownloads            map[string]int
 }
 
 func noticeResponse(body string) *http.Response {
@@ -64,6 +65,10 @@ func (f *noticeFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		return noticeResponse(`{"code":0,"data":{"message_id":"fixture"}}`), nil
 	case r.URL.Host == "img.nga.cn":
 		f.imageDownloads++
+		if f.resourceDownloads == nil {
+			f.resourceDownloads = map[string]int{}
+		}
+		f.resourceDownloads[r.URL.String()]++
 		if r.URL.Path == "/image.png" {
 			var data bytes.Buffer
 			_ = png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1)))

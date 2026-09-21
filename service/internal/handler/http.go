@@ -25,7 +25,7 @@ type Handler struct {
 }
 
 func New(admin *service.Admin, monitor *service.Monitoring, log *logging.Logger) (*gin.Engine, error) {
-	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "watchTitle": watchTitle, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(web.Templates, "templates/*.html")
+	templates, err := template.New("pages").Funcs(template.FuncMap{"when": admin.FormatTime, "bytesize": formatBytes, "status": statusText, "weekdays": weekdayList, "intlist": intList, "containsID": containsID, "watchTitle": watchTitle, "summary": content.Summary, "rich": content.HTMLWithResources}).ParseFS(web.Templates, "templates/*.html")
 	if err != nil {
 		return nil, logging.Wrap(err, "load admin templates")
 	}

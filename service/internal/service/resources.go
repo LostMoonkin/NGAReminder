@@ -25,6 +25,8 @@ type ResourceScan struct {
 	DatabaseBytes   int64                       `json:"database_bytes"`
 	AssetsBytes     int64                       `json:"assets_bytes"`
 	AssetsCount     int64                       `json:"assets_count"`
+	NotFoundCount   int64                       `json:"not_found_count"`
+	IgnoredCount    int64                       `json:"ignored_count"`
 	Settings        repository.ResourceSettings `json:"settings"`
 	Missing         []repository.Resource       `json:"missing"`
 	Unreferenced    []repository.Resource       `json:"unreferenced"`
@@ -57,6 +59,9 @@ func (r *Resources) download(ctx context.Context, source string) (err error) {
 			return e
 		}
 	}
+	if item.Ignored || item.HTTPStatus == 404 {
+		return nil
+	}
 	limit := r.maxDownloadBytes
 	if limit == 0 {
 		limit = config.DefaultMaxDownloadBytes
@@ -66,8 +71,13 @@ func (r *Resources) download(ctx context.Context, source string) (err error) {
 		item.Path, downloadErr = r.files.Save(ctx, data, mime, source, item.OriginalName)
 	}
 	if downloadErr == nil {
-		item.MIME, item.Size, item.Error = mime, int64(len(data)), ""
+		item.MIME, item.Size, item.HTTPStatus, item.Error = mime, int64(len(data)), 0, ""
 	} else {
+		item.HTTPStatus = 0
+		var responseErr *infrastructure.ResourceHTTPError
+		if errors.As(downloadErr, &responseErr) {
+			item.HTTPStatus = responseErr.StatusCode
+		}
 		item.Error = FailureMessage(downloadErr)
 	}
 	write, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -161,7 +171,14 @@ func (r *Resources) scan(ctx context.Context) (v ResourceScan, err error) {
 		item := byURL[url]
 		item.URL = url
 		if item.Path == "" || !exists[item.Path] {
-			v.Missing = append(v.Missing, item)
+			switch {
+			case item.Ignored:
+				v.IgnoredCount++
+			case item.HTTPStatus == 404:
+				v.NotFoundCount++
+			default:
+				v.Missing = append(v.Missing, item)
+			}
 		}
 	}
 	return v, nil
@@ -178,7 +195,29 @@ func (r *Resources) Scan(ctx context.Context) (v ResourceScan, err error) {
 	v.DatabaseBytes, err = infrastructure.SQLiteDiskUsage(ctx, r.databasePath)
 	return v, err
 }
-func (r *Resources) Redownload(ctx context.Context) (count int, err error) {
+func selectedMissing(scan ResourceScan, urls []string) ([]string, error) {
+	if len(urls) == 0 {
+		return nil, InvalidInput("请至少选择一项缺失资源")
+	}
+	available := make(map[string]bool, len(scan.Missing))
+	for _, item := range scan.Missing {
+		available[item.URL] = true
+	}
+	selected := make([]string, 0, len(urls))
+	seen := make(map[string]bool, len(urls))
+	for _, url := range urls {
+		if !available[url] {
+			return nil, InvalidInput("所选资源已不再可处理，请刷新后重试")
+		}
+		if !seen[url] {
+			seen[url] = true
+			selected = append(selected, url)
+		}
+	}
+	return selected, nil
+}
+
+func (r *Resources) Redownload(ctx context.Context, urls []string) (count int, err error) {
 	ctx, span := logging.Start(ctx, "service.redownload_missing_resources")
 	defer span.End(&err)
 	ctx, cancel := context.WithCancel(ctx)
@@ -194,11 +233,15 @@ func (r *Resources) Redownload(ctx context.Context) (count int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	selected, err := selectedMissing(scan, urls)
+	if err != nil {
+		return 0, err
+	}
 	if !scan.Settings.DownloadEnabled {
 		return 0, InvalidInput("请先启用资源下载")
 	}
-	for _, item := range scan.Missing {
-		if e := r.download(ctx, item.URL); e != nil {
+	for _, url := range selected {
+		if e := r.download(ctx, url); e != nil {
 			logging.Error(ctx, e, "Missing resource download failed", zerolog.WarnLevel)
 		} else {
 			count++
@@ -207,7 +250,27 @@ func (r *Resources) Redownload(ctx context.Context) (count int, err error) {
 			return count, logging.WithStack(ctx.Err())
 		}
 	}
+	zerolog.Ctx(ctx).Info().Int("selected", len(selected)).Int("downloaded", count).Msg("Selected resource downloads completed")
 	return count, nil
+}
+func (r *Resources) Ignore(ctx context.Context, urls []string) (count int, err error) {
+	ctx, span := logging.Start(ctx, "service.ignore_resources")
+	defer span.End(&err)
+	r.work.Lock()
+	defer r.work.Unlock()
+	scan, err := r.scan(ctx)
+	if err != nil {
+		return 0, err
+	}
+	selected, err := selectedMissing(scan, urls)
+	if err != nil {
+		return 0, err
+	}
+	if err = r.monitor.store.IgnoreResources(ctx, selected); err != nil {
+		return 0, err
+	}
+	zerolog.Ctx(ctx).Info().Int("ignored", len(selected)).Msg("Selected resources ignored")
+	return len(selected), nil
 }
 func (r *Resources) Cleanup(ctx context.Context, confirmed bool) (count int, err error) {
 	ctx, span := logging.Start(ctx, "service.cleanup_resources")

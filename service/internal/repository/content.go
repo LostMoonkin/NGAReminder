@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"ngareminder/service/internal/logging"
 )
 
@@ -70,6 +71,8 @@ type Resource struct {
 	Path         string `json:"path"`
 	MIME         string `json:"mime"`
 	Size         int64  `json:"size"`
+	HTTPStatus   int    `json:"http_status"`
+	Ignored      bool   `json:"ignored"`
 	Error        string `json:"error"`
 }
 
@@ -107,6 +110,19 @@ func (s *Store) SaveResource(ctx context.Context, v *Resource) (err error) {
 	ctx, span := logging.Start(ctx, "repository.save_resource")
 	defer span.End(&err)
 	return logging.Wrap(s.db.WithContext(ctx).Save(v).Error, "save resource metadata")
+}
+func (s *Store) IgnoreResources(ctx context.Context, urls []string) (err error) {
+	ctx, span := logging.Start(ctx, "repository.ignore_resources")
+	defer span.End(&err)
+	items := make([]Resource, len(urls))
+	for i, url := range urls {
+		items[i] = Resource{URL: url, Ignored: true}
+	}
+	err = s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "url"}},
+		DoUpdates: clause.Assignments(map[string]any{"ignored": true}),
+	}).CreateInBatches(&items, 200).Error
+	return logging.Wrap(err, "ignore resource metadata")
 }
 func (s *Store) ResourceReferences(ctx context.Context) (urls []string, err error) {
 	ctx, span := logging.Start(ctx, "repository.resource_references")

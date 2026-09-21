@@ -3,6 +3,8 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"ngareminder/service/internal/repository"
@@ -45,6 +47,28 @@ func adminPageMeta(name string) pageMeta {
 type watchColumn struct {
 	Key, Title string
 	Watches    []repository.Watch
+}
+
+func formatBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	amount := float64(value)
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	unit := 0
+	for amount >= 1024 && unit < len(units)-1 {
+		amount /= 1024
+		unit++
+	}
+	precision := 1
+	if amount < 10 {
+		precision = 2
+	}
+	text := strconv.FormatFloat(amount, 'f', precision, 64)
+	if strings.Contains(text, ".") {
+		text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	}
+	return text + " " + units[unit]
 }
 
 func watchGroup(w repository.Watch) string {

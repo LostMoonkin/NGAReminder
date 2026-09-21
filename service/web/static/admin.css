@@ -143,6 +143,14 @@ dd:last-child, dt:nth-last-child(2) { border-bottom: 0; }
 details { margin-top: 18px; }
 summary { cursor: pointer; color: #64775b; font-size: 12px; }
 details[open] > summary { margin-bottom: 16px; }
+.resource-actions { margin-bottom: 12px; }
+.resource-list { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; }
+.resource-option { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 11px 13px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.resource-option:last-child { border-bottom: 0; }
+.resource-option:hover { background: #f7f9f3; }
+.resource-option input { flex: 0 0 auto; margin-top: 4px; }
+.resource-option span { min-width: 0; }
+.resource-option small { display: block; margin-top: 3px; color: var(--muted); }
 .danger-zone { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 25px; }
 .danger-zone > summary { color: var(--red); }
 .rule-row { padding: 18px; margin: 15px 0; border-radius: 7px; background: #f4f6ee; }

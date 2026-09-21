@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -75,6 +76,12 @@ func TestResourceParity(t *testing.T) {
 	before := calls
 	if _, _, err := sender.DownloadResource(ctx, "https://img6.nga.cn/file.png", 32, true); err == nil || calls != before {
 		t.Fatal("Feishu host policy was broadened")
+	}
+	status = http.StatusNotFound
+	_, _, statusErr := sender.DownloadResource(ctx, "https://img.nga.cn/missing", 32, false)
+	var responseErr *ResourceHTTPError
+	if !errors.As(statusErr, &responseErr) || responseErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("resource HTTP status was not preserved: %v", statusErr)
 	}
 	for _, tc := range []struct{ mime, source, want string }{
 		{"audio/mpeg", "https://img.nga.cn/", ".mp3"}, {"video/mp4", "https://img.nga.cn/", ".mp4"}, {"application/octet-stream", "https://img.nga.cn/", ".bin"},

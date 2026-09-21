@@ -42,6 +42,29 @@ document.querySelectorAll('[data-filter-group]').forEach(group => {
   apply();
 });
 
+document.querySelectorAll('[data-resource-selection]').forEach(group => {
+  const boxes = [...group.querySelectorAll('input[name="urls"]')];
+  const actions = [...group.querySelectorAll('[data-require-selection]')];
+  const sync = () => {
+    const selected = boxes.some(box => box.checked);
+    actions.forEach(button => {
+      button.disabled = button.dataset.unavailable === 'true' || !selected;
+    });
+  };
+  one('[data-select-all]', group)?.addEventListener('click', () => {
+    boxes.forEach(box => { box.checked = true; });
+    dirty = true;
+    sync();
+  });
+  one('[data-invert-selection]', group)?.addEventListener('click', () => {
+    boxes.forEach(box => { box.checked = !box.checked; });
+    dirty = true;
+    sync();
+  });
+  boxes.forEach(box => box.addEventListener('change', sync));
+  sync();
+});
+
 document.querySelectorAll('[data-tabs]').forEach(container => {
   const nav = one('[data-tab-nav]', container);
   const links = [...nav.querySelectorAll('a')];

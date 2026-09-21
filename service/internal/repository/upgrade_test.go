@@ -211,7 +211,7 @@ func TestUpgradeParityPreservesExistingGoData(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 模拟本次修复前的实际 Go 表形状，保留原业务行。
-	for _, statement := range []string{"DROP TABLE threads", "DROP TABLE system_alerts", "ALTER TABLE posts DROP COLUMN page_number", "ALTER TABLE posts DROP COLUMN raw_payload", "DROP INDEX delivery_target", "ALTER TABLE deliveries DROP COLUMN alert_id", "CREATE UNIQUE INDEX delivery_target ON deliveries(event_id,channel_id)", "ALTER TABLE event_watches DROP COLUMN kind", "ALTER TABLE resources DROP COLUMN original_name"} {
+	for _, statement := range []string{"DROP TABLE threads", "DROP TABLE system_alerts", "ALTER TABLE posts DROP COLUMN page_number", "ALTER TABLE posts DROP COLUMN raw_payload", "DROP INDEX delivery_target", "ALTER TABLE deliveries DROP COLUMN alert_id", "CREATE UNIQUE INDEX delivery_target ON deliveries(event_id,channel_id)", "ALTER TABLE event_watches DROP COLUMN kind", "ALTER TABLE resources DROP COLUMN original_name", "ALTER TABLE resources DROP COLUMN http_status", "ALTER TABLE resources DROP COLUMN ignored"} {
 		if _, err = db.Exec(statement); err != nil {
 			t.Fatal(statement, err)
 		}

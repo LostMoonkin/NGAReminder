@@ -34,6 +34,12 @@ type ChannelTarget struct {
 type Notice struct {
 	Title, Text, URL string
 }
+type ResourceHTTPError struct{ StatusCode int }
+
+func (e *ResourceHTTPError) Error() string {
+	return fmt.Sprintf("NGA resource returned HTTP %d", e.StatusCode)
+}
+
 type Notifier struct {
 	http         *http.Client
 	resourceHTTP *http.Client
@@ -256,7 +262,7 @@ func (n *Notifier) DownloadResource(ctx context.Context, source string, limit in
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, "", logging.WithStack(fmt.Errorf("NGA resource returned HTTP %d", response.StatusCode))
+		return nil, "", logging.WithStack(&ResourceHTTPError{StatusCode: response.StatusCode})
 	}
 	if limit <= 0 || limit == int64(^uint64(0)>>1) || response.ContentLength > limit {
 		return nil, "", logging.WithStack(errors.New("NGA resource exceeds the size limit"))

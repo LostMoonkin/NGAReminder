@@ -29,6 +29,7 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	ctx := context.Background()
 	imageURL := "https://img.nga.cn/image.png"
 	missingURL := "https://img.nga.cn/missing.png"
+	ignoredURL := "https://img.nga.cn/ignored.png"
 	now := time.Now().UTC()
 	posts := []repository.Post{}
 	for i := 0; i < 215; i++ {
@@ -39,7 +40,7 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 		if i == 214 {
 			uid = 9000
 		}
-		posts = append(posts, repository.Post{TID: tid, Key: fmt.Sprintf("pid:%d", 4000+i), PID: int64(4000 + i), Kind: "reply", Floor: int64(i), AuthorUID: uid, Author: "fixture author", Body: fmt.Sprintf("[b]entry-%03d[/b] [quote]quoted[/quote][code]<script>fixture</script>[/code][img]%s[/img]", i, imageURL), PublishedAt: &now, SourceURL: fmt.Sprintf("https://bbs.nga.cn/read.php?tid=%d&pid=%d", tid, 4000+i), Resources: []string{imageURL, missingURL}})
+		posts = append(posts, repository.Post{TID: tid, Key: fmt.Sprintf("pid:%d", 4000+i), PID: int64(4000 + i), Kind: "reply", Floor: int64(i), AuthorUID: uid, Author: "fixture author", Body: fmt.Sprintf("[b]entry-%03d[/b] [quote]quoted[/quote][code]<script>fixture</script>[/code][img]%s[/img]", i, imageURL), PublishedAt: &now, SourceURL: fmt.Sprintf("https://bbs.nga.cn/read.php?tid=%d&pid=%d", tid, 4000+i), Resources: []string{imageURL, missingURL, ignoredURL}})
 	}
 	if _, err := store.InsertPosts(ctx, posts); err != nil {
 		t.Fatal(err)
@@ -47,10 +48,15 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	// 下载关闭时仍能完整导出；读取不会访问 NGA。
 	m.Resources().Collect(ctx, posts[:1])
 	scan, err := m.Resources().Scan(ctx)
-	if err != nil || len(scan.Missing) != 2 {
+	if err != nil || len(scan.Missing) != 3 {
 		t.Fatal("missing remote resources were not visible", err)
 	}
-	response := send(t, router, "GET", "/api/v1/users/2001/posts?page=2", cfg.APIToken, nil)
+	response := request(t, router, "GET", "/admin/resources", "")
+	expectStatus(t, response, 200)
+	if !strings.Contains(response.Body.String(), "data-select-all") || !strings.Contains(response.Body.String(), "data-invert-selection") || !strings.Contains(response.Body.String(), "KiB") {
+		t.Fatal("resource page is missing readable sizes or selection controls")
+	}
+	response = send(t, router, "GET", "/api/v1/users/2001/posts?page=2", cfg.APIToken, nil)
 	expectStatus(t, response, 200)
 	if !strings.Contains(response.Body.String(), "entry-050") || strings.Contains(response.Body.String(), "entry-214") {
 		t.Fatal("UID pagination included wrong content")
@@ -71,11 +77,42 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 		t.Fatal("Markdown order was unstable")
 	}
 	expectStatus(t, send(t, router, "POST", "/api/v1/resources", cfg.APIToken, map[string]bool{"download_enabled": true}), 200)
-	expectStatus(t, send(t, router, "POST", "/api/v1/resources/redownload", cfg.APIToken, nil), 200)
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/redownload", cfg.APIToken, nil), 400)
+	expectStatus(t, send(t, router, "POST", "/admin/resources/ignore", "", url.Values{}), 400)
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/redownload", cfg.APIToken, map[string][]string{"urls": {"https://img.nga.cn/unreferenced.png"}}), 400)
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/redownload", cfg.APIToken, map[string][]string{"urls": {imageURL}}), 200)
 	resource, err := store.Resource(ctx, imageURL)
 	if err != nil || resource.Path == "" {
 		t.Fatal("supported image did not download", err)
 	}
+	pending, err := store.Resource(ctx, missingURL)
+	if err != nil || pending.HTTPStatus != 0 || pending.Path != "" {
+		t.Fatal("unselected resource was downloaded", pending, err)
+	}
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/ignore", cfg.APIToken, map[string][]string{"urls": {ignoredURL}}), 200)
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/redownload", cfg.APIToken, map[string][]string{"urls": {missingURL}}), 200)
+	notFound, err := store.Resource(ctx, missingURL)
+	if err != nil || notFound.HTTPStatus != 404 || notFound.Ignored {
+		t.Fatal("resource 404 was not recorded", notFound, err)
+	}
+	ignored, err := store.Resource(ctx, ignoredURL)
+	if err != nil || !ignored.Ignored || ignored.HTTPStatus != 0 {
+		t.Fatal("ignored resource was not recorded", ignored, err)
+	}
+	scan, err = m.Resources().Scan(ctx)
+	if err != nil || len(scan.Missing) != 0 || scan.NotFoundCount != 1 || scan.IgnoredCount != 1 {
+		t.Fatal("404 and ignored resources were not reduced to counts", scan, err)
+	}
+	f.mu.Lock()
+	beforeSkipped := map[string]int{missingURL: f.resourceDownloads[missingURL], ignoredURL: f.resourceDownloads[ignoredURL]}
+	f.mu.Unlock()
+	m.Resources().Collect(ctx, posts[:1])
+	f.mu.Lock()
+	if f.resourceDownloads[missingURL] != beforeSkipped[missingURL] || f.resourceDownloads[ignoredURL] != beforeSkipped[ignoredURL] {
+		f.mu.Unlock()
+		t.Fatal("404 or ignored resource was downloaded again")
+	}
+	f.mu.Unlock()
 	response = send(t, router, "GET", "/api/v1/exports/users/2001?format=zip", cfg.APIToken, nil)
 	expectStatus(t, response, 200)
 	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
@@ -142,7 +179,7 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan, err = m.Resources().Scan(ctx)
-	if err != nil || len(scan.Files) != 2 || len(scan.Temporary) != 1 {
+	if err != nil || len(scan.Files) != 2 || len(scan.Temporary) != 1 || scan.NotFoundCount != 1 || scan.IgnoredCount != 1 {
 		t.Fatal("read-only scan did not classify files", err, scan)
 	}
 	referencedInfo, err := os.Stat(referenced)
@@ -162,11 +199,14 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 		DatabaseBytes int64 `json:"database_bytes"`
 		AssetsBytes   int64 `json:"assets_bytes"`
 		AssetsCount   int64 `json:"assets_count"`
+		NotFoundCount int64 `json:"not_found_count"`
+		IgnoredCount  int64 `json:"ignored_count"`
+		Missing       []any `json:"missing"`
 	}
 	if err = json.Unmarshal(response.Body.Bytes(), &usage); err != nil {
 		t.Fatal(err)
 	}
-	if usage.DatabaseBytes != scan.DatabaseBytes || usage.AssetsBytes != expectedAssetsBytes || usage.AssetsCount != 4 {
+	if usage.DatabaseBytes != scan.DatabaseBytes || usage.AssetsBytes != expectedAssetsBytes || usage.AssetsCount != 4 || usage.NotFoundCount != 1 || usage.IgnoredCount != 1 || len(usage.Missing) != 0 {
 		t.Fatalf("resource API returned incorrect storage usage: %+v", usage)
 	}
 	if _, err = os.Stat(filepath.Join(cfg.AssetsPath, "orphan.bin")); err != nil {
@@ -187,7 +227,7 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	if err = os.Remove(referenced); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Resources().Redownload(ctx); err != nil {
+	if _, err = m.Resources().Redownload(ctx, []string{imageURL}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = os.Stat(referenced); err != nil {
@@ -195,7 +235,7 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	}
 	response = request(t, router, "GET", "/admin/resources", "")
 	expectStatus(t, response, 200)
-	if !strings.Contains(response.Body.String(), "SQLite 占用") || !strings.Contains(response.Body.String(), "assets 共 2 个文件") {
+	if !strings.Contains(response.Body.String(), "SQLite 占用") || !strings.Contains(response.Body.String(), "assets 共 2 个文件") || !strings.Contains(response.Body.String(), "已确认 404 1 项") || !strings.Contains(response.Body.String(), "已忽略 1 项") || strings.Contains(response.Body.String(), " 字节") {
 		t.Fatal("resource page is missing storage usage")
 	}
 	if !strings.Contains(logs.String(), "Resource download failed") && !strings.Contains(logs.String(), "Missing resource download failed") {
