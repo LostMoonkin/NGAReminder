@@ -71,7 +71,7 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	monitor = &Monitoring{storeRaw: cfg.StoreRawPayload, notifications: notices, store: store, nga: nga, cipher: cipher, log: log, enabled: cfg.BackgroundEnabled, ctx: lifeCtx, cancel: cancel, location: location}
 	monitor.bot = &Bot{monitor: monitor}
 	monitor.renewal = &Renewal{monitor: monitor}
-	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}, maxDownloadBytes: cfg.MaxDownloadBytes}
+	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}, databasePath: cfg.DatabasePath, maxDownloadBytes: cfg.MaxDownloadBytes}
 	if err = store.InterruptRenewals(initCtx); err != nil {
 		cancel()
 		return nil, err

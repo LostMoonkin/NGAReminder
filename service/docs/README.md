@@ -22,6 +22,8 @@ TID/UID 内容的秒级闭区间导出与统一导出悬浮窗见 [Spec16](spec/
 
 服务端全量测试的 30 秒预算与 fixture 时序约束见 [Spec17](spec/17-test-runtime.md)。
 
+资源维护页的 SQLite 与 assets 磁盘占用统计见 [Spec18](spec/18-resource-storage-usage.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
@@ -389,14 +391,14 @@ Markdown 按 [Spec13](spec/13-markdown-rendering.md) 复刻 ngapost2md 的渲染
 
 `/admin/resources` 管理下载开关及维护。默认关闭下载，仅保留资源地址；开启后采集在正文提交后下载，单个失败不会回滚正文、水位或通知。也可重新下载已有内容缺失的资源。下载仅允许 HTTPS 的 `img.nga.cn`、`img.nga.178.com`、`img4.nga.178.com`、`img6.nga.cn`、`img7.nga.cn`、`img8.nga.cn`，禁止跳转、自定义端口和 userinfo。接受成功 2xx，不限制附件 MIME，支持音视频、7z 和未知二进制；按 `max_download_bytes` 检查声明长度及实际字节数，默认 10 MiB。文件名使用内容 SHA-256，扩展名优先取附件原文件名（其次 URL），清洗为最多 10 位 ASCII 字母数字；未知类型用 `.bin`。二进制不写入 SQLite。飞书图片上传仍单独限制前三个域名。
 
-资源页的扫描只读，显示缺失/未下载、无引用元数据、无引用普通文件和临时文件。勾选确认再清理时重新扫描，只删除超过 24 小时且没有正文引用的普通文件和临时文件；保护同内容共享文件，不跟随文件或目录符号链接，不删除正文。资源下载期间清理会等待；有采集或账号操作时返回忙碌提示。元数据保留，便于定位和显式重新下载。
+资源页的扫描只读，每次打开时统计 SQLite 主库、WAL 与 SHM 的逻辑大小，并统计 assets 中的普通文件总数与逻辑大小；符号链接不计入。同时显示缺失/未下载、无引用元数据、无引用普通文件和临时文件。勾选确认再清理时重新扫描，只删除超过 24 小时且没有正文引用的普通文件和临时文件；保护同内容共享文件，不跟随文件或目录符号链接，不删除正文。资源下载期间清理会等待；有采集或账号操作时返回忙碌提示。元数据保留，便于定位和显式重新下载。
 
 | API（Bearer token） | 行为 |
 | --- | --- |
 | `GET /api/v1/users` | `users` 汇总：`watch_id`、`uid`、`username`、`post_count`、`thread_count`、`last_published_at` |
 | `GET /api/v1/users/:uid/posts?page=1` | 目标用户的已保存内容及分页信息 |
 | `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`；可选 `start_at`、`end_at` 按 `published_at` 秒级闭区间筛选，可只传单边。API 使用 RFC 3339，管理页本地时间按配置时区解释；时间参数均为空时下载全部已有内容 |
-| `GET /api/v1/resources` | 只读资源扫描及下载设置 |
+| `GET /api/v1/resources` | 只读资源扫描及下载设置；`database_bytes`、`assets_bytes`、`assets_count` 返回当次统计 |
 | `POST /api/v1/resources` | `{"download_enabled":true}`，修改下载开关 |
 | `POST /api/v1/resources/redownload` | 下载缺失项，返回成功数；失败项保留错误并写日志 |
 | `POST /api/v1/resources/cleanup` | `{"confirm":true}`，重新扫描并清理符合条件的旧文件 |

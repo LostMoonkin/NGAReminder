@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -144,6 +145,30 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	if err != nil || len(scan.Files) != 2 || len(scan.Temporary) != 1 {
 		t.Fatal("read-only scan did not classify files", err, scan)
 	}
+	referencedInfo, err := os.Stat(referenced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedAssetsBytes := referencedInfo.Size() + 3*int64(len("fixture"))
+	if scan.AssetsBytes != expectedAssetsBytes || scan.AssetsCount != 4 {
+		t.Fatalf("asset usage = %d bytes across %d files, want %d bytes across 4 files", scan.AssetsBytes, scan.AssetsCount, expectedAssetsBytes)
+	}
+	if scan.DatabaseBytes <= 0 {
+		t.Fatalf("database usage = %d, want a positive size", scan.DatabaseBytes)
+	}
+	response = send(t, router, "GET", "/api/v1/resources", cfg.APIToken, nil)
+	expectStatus(t, response, 200)
+	var usage struct {
+		DatabaseBytes int64 `json:"database_bytes"`
+		AssetsBytes   int64 `json:"assets_bytes"`
+		AssetsCount   int64 `json:"assets_count"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage.DatabaseBytes != scan.DatabaseBytes || usage.AssetsBytes != expectedAssetsBytes || usage.AssetsCount != 4 {
+		t.Fatalf("resource API returned incorrect storage usage: %+v", usage)
+	}
 	if _, err = os.Stat(filepath.Join(cfg.AssetsPath, "orphan.bin")); err != nil {
 		t.Fatal("scan modified a file")
 	}
@@ -168,7 +193,11 @@ func TestContentExportAndResourceMaintenance(t *testing.T) {
 	if _, err = os.Stat(referenced); err != nil {
 		t.Fatal("missing resource was not restored")
 	}
-	expectStatus(t, request(t, router, "GET", "/admin/resources", ""), 200)
+	response = request(t, router, "GET", "/admin/resources", "")
+	expectStatus(t, response, 200)
+	if !strings.Contains(response.Body.String(), "SQLite 占用") || !strings.Contains(response.Body.String(), "assets 共 2 个文件") {
+		t.Fatal("resource page is missing storage usage")
+	}
 	if !strings.Contains(logs.String(), "Resource download failed") && !strings.Contains(logs.String(), "Missing resource download failed") {
 		t.Fatal("resource failures were not logged")
 	}

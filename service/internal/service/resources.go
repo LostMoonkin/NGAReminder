@@ -16,11 +16,15 @@ import (
 
 type Resources struct {
 	maxDownloadBytes int64
+	databasePath     string
 	monitor          *Monitoring
 	files            *infrastructure.Assets
 	work             sync.Mutex
 }
 type ResourceScan struct {
+	DatabaseBytes   int64                       `json:"database_bytes"`
+	AssetsBytes     int64                       `json:"assets_bytes"`
+	AssetsCount     int64                       `json:"assets_count"`
 	Settings        repository.ResourceSettings `json:"settings"`
 	Missing         []repository.Resource       `json:"missing"`
 	Unreferenced    []repository.Resource       `json:"unreferenced"`
@@ -141,6 +145,8 @@ func (r *Resources) scan(ctx context.Context) (v ResourceScan, err error) {
 	}
 	exists := map[string]bool{}
 	for _, file := range files {
+		v.AssetsBytes += file.Size
+		v.AssetsCount++
 		exists[file.Path] = true
 		if v.ReferencedFiles[file.Path] {
 			continue
@@ -165,7 +171,12 @@ func (r *Resources) Scan(ctx context.Context) (v ResourceScan, err error) {
 	defer span.End(&err)
 	r.work.Lock()
 	defer r.work.Unlock()
-	return r.scan(ctx)
+	v, err = r.scan(ctx)
+	if err != nil {
+		return v, err
+	}
+	v.DatabaseBytes, err = infrastructure.SQLiteDiskUsage(ctx, r.databasePath)
+	return v, err
 }
 func (r *Resources) Redownload(ctx context.Context) (count int, err error) {
 	ctx, span := logging.Start(ctx, "service.redownload_missing_resources")
