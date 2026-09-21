@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog"
 	"ngareminder/service/internal/logging"
@@ -54,9 +53,9 @@ func (n *NGA) userRequest(ctx context.Context, credentials Credentials, uid stri
 		if errors.Is(err, ErrNGASearchUnavailable) && replies && page > 1 {
 			return nil, err
 		}
-		limit, delay := 10, 3*time.Second
+		limit, delay := 10, n.busyRetryDelay
 		if errors.Is(err, ErrNGASearchUnavailable) {
-			limit, delay = 3, 2*time.Second
+			limit, delay = 3, n.searchRetryDelay
 		}
 		if err == nil || (!errors.Is(err, ErrNGABusy) && !errors.Is(err, ErrNGASearchUnavailable)) || attempt >= limit {
 			return body, err

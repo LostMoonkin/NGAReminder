@@ -27,23 +27,29 @@ var (
 const ngaBaseURL = "https://bbs.nga.cn"
 
 type NGA struct {
-	http        *http.Client
-	userAgent   string
-	gate        chan struct{}
-	lastRequest time.Time
-	interval    time.Duration
+	http             *http.Client
+	userAgent        string
+	gate             chan struct{}
+	lastRequest      time.Time
+	interval         time.Duration
+	busyRetryDelay   time.Duration
+	searchRetryDelay time.Duration
 }
 
-// transport 只用于隔离外部协议的 fixture 验证；生产使用有超时的标准 HTTP Client。
+// transport 只用于隔离外部协议的 fixture 验证，因此不消耗生产限流和重试的墙钟时间；
+// 生产使用有超时的标准 HTTP Client，并保持 120 QPM 与既有重试间隔。
 func NewNGA(userAgent string, transport http.RoundTripper) *NGA {
+	var interval, busyRetryDelay, searchRetryDelay time.Duration
 	if transport == nil {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		// 沿用旧服务对 NGA/CDN 复用连接后误报认证失效的处理。
 		t.DisableKeepAlives = true
 		transport = t
+		interval, busyRetryDelay, searchRetryDelay = 500*time.Millisecond, 3*time.Second, 2*time.Second
 	}
 	n := &NGA{http: &http.Client{Transport: transport, Timeout: 15 * time.Second},
-		userAgent: userAgent, interval: 500 * time.Millisecond, gate: make(chan struct{}, 1)}
+		userAgent: userAgent, interval: interval, busyRetryDelay: busyRetryDelay,
+		searchRetryDelay: searchRetryDelay, gate: make(chan struct{}, 1)}
 	n.http.CheckRedirect = n.followRedirect
 	return n
 }

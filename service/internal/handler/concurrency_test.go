@@ -22,7 +22,9 @@ type concurrentNGA struct {
 	started      chan string
 	block        map[string]<-chan struct{}
 	failPage     int
-	slow         bool
+	pageBlock    chan struct{}
+	releaseAt    int
+	waitingPages int
 }
 
 func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -43,7 +45,16 @@ func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	f.active[target]++
 	f.peak[target] = max(f.peak[target], f.active[target])
-	block, fail, slow := f.block[target], f.failPage, f.slow
+	block, fail, pageBlock := f.block[target], f.failPage, f.pageBlock
+	if page <= 1 || page == fail {
+		pageBlock = nil
+	} else if pageBlock != nil && f.releaseAt > 0 {
+		f.waitingPages++
+		if f.waitingPages == f.releaseAt {
+			close(pageBlock)
+			f.releaseAt = 0
+		}
+	}
 	f.mu.Unlock()
 	defer func() { f.mu.Lock(); f.active[target]--; f.mu.Unlock() }()
 	if f.started != nil {
@@ -65,11 +76,9 @@ func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
 	if page == fail {
 		return fixtureResponse(`{"code":46}`), nil
 	}
-	if slow && page > 1 {
-		timer := time.NewTimer(750 * time.Millisecond)
-		defer timer.Stop()
+	if pageBlock != nil {
 		select {
-		case <-timer.C:
+		case <-pageBlock:
 		case <-r.Context().Done():
 			return nil, r.Context().Err()
 		}
@@ -89,7 +98,7 @@ func (f *concurrentNGA) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestHistoryConcurrencyConfigurationAndCollection(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.BackgroundEnabled = true
-	f := &concurrentNGA{slow: true}
+	f := &concurrentNGA{pageBlock: make(chan struct{}), releaseAt: 2}
 	router, store, monitor := openAppWithTransport(t, cfg, io.Discard, f)
 	expectStatus(t, send(t, router, "PUT", "/api/v1/nga-account", cfg.APIToken, service.AccountInput{PassportUID: "2001", PassportCID: "fixture-valid-secret"}), 200)
 	form := url.Values{"kind": {"tid"}, "tid": {"1001"}, "init_mode": {"full"}, "history_concurrency": {"2"}}
@@ -132,6 +141,9 @@ func TestHistoryConcurrencyConfigurationAndCollection(t *testing.T) {
 	expectStatus(t, send(t, router, "POST", "/api/v1/watches/1/reset", cfg.APIToken, map[string]string{"init_mode": "full"}), 200)
 	f.mu.Lock()
 	f.peak["1001"] = 0
+	f.pageBlock = make(chan struct{})
+	f.releaseAt = 1
+	f.waitingPages = 0
 	f.mu.Unlock()
 	run = runWatch(t, router, cfg.APIToken, 1)
 	f.mu.Lock()
@@ -224,7 +236,7 @@ func TestParallelPageFailureAndShutdown(t *testing.T) {
 		t.Run(fmt.Sprintf("shutdown_%t", stop), func(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.BackgroundEnabled = true
-			f := &concurrentNGA{slow: true}
+			f := &concurrentNGA{pageBlock: make(chan struct{})}
 			router, store, monitor := openAppWithTransport(t, cfg, io.Discard, f)
 			expectStatus(t, send(t, router, "PUT", "/api/v1/nga-account", cfg.APIToken, service.AccountInput{PassportUID: "2001", PassportCID: "fixture-valid-secret"}), 200)
 			three := 3
@@ -263,7 +275,7 @@ func TestParallelPageFailureAndShutdown(t *testing.T) {
 				t.Error("page requests leaked after stop")
 			}
 			f.failPage = 0
-			f.slow = false
+			f.pageBlock = nil
 			f.started = nil
 			f.mu.Unlock()
 			if err := store.Close(context.Background()); err != nil {

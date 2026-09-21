@@ -18,6 +18,7 @@ import (
 	"ngareminder/service/internal/repository"
 	"ngareminder/service/internal/service"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,9 +34,13 @@ type loginFixture struct {
 	notices                           []string
 }
 
+var loginFixtureKey = sync.OnceValues(func() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
+})
+
 func newLoginFixture(t *testing.T) *loginFixture {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := loginFixtureKey()
 	if err != nil {
 		t.Fatal(err)
 	}

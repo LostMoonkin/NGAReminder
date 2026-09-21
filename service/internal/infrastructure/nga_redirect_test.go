@@ -163,6 +163,7 @@ func TestNGARedirectUsesRateLimit(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":0}`))}, nil
 		}))
+		n.interval = 500 * time.Millisecond
 		defer n.Close()
 		if _, err := n.request(context.Background(), http.MethodGet, "/fixture", "", ""); err != nil {
 			t.Fatal(err)

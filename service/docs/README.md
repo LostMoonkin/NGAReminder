@@ -20,6 +20,8 @@ Markdown 渲染的替换需求见 [Spec13](spec/13-markdown-rendering.md)，实�
 
 TID/UID 内容的秒级闭区间导出与统一导出悬浮窗见 [Spec16](spec/16-time-ranged-content-export.md)。
 
+服务端全量测试的 30 秒预算与 fixture 时序约束见 [Spec17](spec/17-test-runtime.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
@@ -116,7 +118,7 @@ docker compose up -d --build
 | Actions 页面手动运行 | 对所选分支或标签执行相同检查并发布；分支使用分支名标签 |
 | PR 修改服务端或 workflow | 运行 Go 检查及 Docker 构建，不登录或推送 GHCR |
 
-发布前执行 `gofmt` 检查、`go build ./...`、`go vet ./...` 和 `go test ./...`；Go 版本读取 `service/go.mod`，设置 `CGO_ENABLED=0`。镜像包含来源与提交信息，使用 BuildKit 缓存，并生成 provenance 与 SBOM。`latest` 仅由正式版本标签更新；扩展的 `vX.Y.Z-standalone` 标签不会触发服务端发布。
+发布前执行 `gofmt` 检查、`go build ./...`、`go vet ./...` 和 `go test -count=1 -timeout=30s ./...`；Go 版本读取 `service/go.mod`，设置 `CGO_ENABLED=0`。镜像包含来源与提交信息，使用 BuildKit 缓存，并生成 provenance 与 SBOM。`latest` 仅由正式版本标签更新；扩展的 `vX.Y.Z-standalone` 标签不会触发服务端发布。
 
 认证使用 GitHub 自动提供的 `GITHUB_TOKEN`，发布 job 具有 `packages: write` 权限，无需另配 GHCR 密码。已有同名 package 需允许当前仓库通过 Actions 写入；首次发布的 package 默认私有，如需匿名拉取，在 GitHub Packages 中将其可见性改为 Public。权限和可见性详见 [GitHub Container registry 文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
 

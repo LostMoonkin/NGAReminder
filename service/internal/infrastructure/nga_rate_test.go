@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func TestNGAProductionTimingDefaults(t *testing.T) {
+	n := NewNGA("fixture", nil)
+	defer n.Close()
+	if n.interval != 500*time.Millisecond || n.busyRetryDelay != 3*time.Second || n.searchRetryDelay != 2*time.Second {
+		t.Fatalf("production NGA timing changed: interval=%s busy_retry=%s search_retry=%s", n.interval, n.busyRetryDelay, n.searchRetryDelay)
+	}
+	fixture := NewNGA("fixture", roundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") }))
+	defer fixture.Close()
+	if fixture.interval != 0 || fixture.busyRetryDelay != 0 || fixture.searchRetryDelay != 0 {
+		t.Fatalf("fixture NGA uses wall-clock timing: interval=%s busy_retry=%s search_retry=%s", fixture.interval, fixture.busyRetryDelay, fixture.searchRetryDelay)
+	}
+}
+
 func TestNGARateLimitAllowsOverlappingResponses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var mu sync.Mutex
@@ -27,6 +40,7 @@ func TestNGARateLimitAllowsOverlappingResponses(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"code":0}`)), Header: make(http.Header)}, nil
 		}))
+		n.interval = 500 * time.Millisecond
 		defer n.Close()
 		var workers sync.WaitGroup
 		for range 121 {
@@ -57,6 +71,7 @@ func TestNGARateWaitCancellation(t *testing.T) {
 			calls++
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"code":0}`)), Header: make(http.Header)}, nil
 		}))
+		n.interval = 500 * time.Millisecond
 		defer n.Close()
 		if _, err := n.request(context.Background(), "GET", "/fixture", "", ""); err != nil {
 			t.Fatal(err)

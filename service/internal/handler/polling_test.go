@@ -62,8 +62,11 @@ func TestIdlePollingDoesNotLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs.Reset()
-	monitor.StartScheduler()
-	time.Sleep(4200 * time.Millisecond)
+	for _, poll := range []func(context.Context, time.Time) error{monitor.Tick, monitor.Notifications().Deliver, monitor.Renewal().Expire} {
+		if err := poll(ctx, now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	monitor.Close()
 	for _, event := range events(t, logs.Bytes()) {
 		if event["operation"] != "service.stop_monitoring" {
