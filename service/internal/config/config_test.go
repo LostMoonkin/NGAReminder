@@ -21,6 +21,7 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 		"encryption_key": base64.StdEncoding.EncodeToString(make([]byte, 32)),
 		"timezone":       "UTC", "background_enabled": true,
 		"store_raw_payload": false, "max_download_bytes": 1234,
+		"async_export_threshold": 500, "export_retention_days": 3,
 		"listen_address": "127.0.0.1:0", "unused_setting": true,
 	})
 	if err != nil {
@@ -33,13 +34,18 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 	t.Setenv("NGA_REMINDER_BACKGROUND_ENABLED", "false")
 	t.Setenv("NGA_REMINDER_STORE_RAW_PAYLOAD", "true")
 	t.Setenv("NGA_REMINDER_MAX_DOWNLOAD_BYTES", "2048")
+	t.Setenv("NGA_REMINDER_ASYNC_EXPORT_THRESHOLD", "2500")
+	t.Setenv("NGA_REMINDER_EXPORT_RETENTION_DAYS", "14")
 	ctx := logging.New(io.Discard).WithContext(context.Background())
 	cfg, err := Load(ctx, filename)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.StoreRawPayload || cfg.MaxDownloadBytes != 2048 {
-		t.Fatal("raw/asset configuration precedence failed")
+	if !cfg.StoreRawPayload || cfg.MaxDownloadBytes != 2048 || cfg.AsyncExportThreshold != 2500 || cfg.ExportRetentionDays != 14 {
+		t.Fatal("raw/asset/export configuration precedence failed")
+	}
+	if cfg.Public().AsyncExportThreshold != 2500 || cfg.Public().ExportRetentionDays != 14 {
+		t.Fatal("public export settings did not reflect loaded values")
 	}
 	if cfg.Timezone != "Asia/Shanghai" || cfg.BackgroundEnabled || cfg.DatabasePath != filepath.Join(dir, "data/nga-reminder.db") {
 		t.Fatal("incorrect environment override or relative path resolution")
@@ -62,6 +68,10 @@ func TestFileEnvironmentPrecedenceAndValidation(t *testing.T) {
 		{"NGA_REMINDER_TIMEZONE", "Not/A_Real_Zone", "timezone"},
 		{"NGA_REMINDER_MAX_DOWNLOAD_BYTES", "0", "max_download_bytes"},
 		{"NGA_REMINDER_MAX_DOWNLOAD_BYTES", "invalid", "MAX_DOWNLOAD_BYTES"},
+		{"NGA_REMINDER_ASYNC_EXPORT_THRESHOLD", "0", "async_export_threshold"},
+		{"NGA_REMINDER_ASYNC_EXPORT_THRESHOLD", "invalid", "ASYNC_EXPORT_THRESHOLD"},
+		{"NGA_REMINDER_EXPORT_RETENTION_DAYS", "0", "export_retention_days"},
+		{"NGA_REMINDER_EXPORT_RETENTION_DAYS", "invalid", "EXPORT_RETENTION_DAYS"},
 		{"NGA_REMINDER_STORE_RAW_PAYLOAD", "invalid", "STORE_RAW_PAYLOAD"},
 		{"NGA_REMINDER_LOGS_PATH", "", "logs_path"},
 	} {

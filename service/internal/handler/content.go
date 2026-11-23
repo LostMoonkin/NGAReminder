@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"ngareminder/service/internal/logging"
+	"ngareminder/service/internal/repository"
 	"ngareminder/service/internal/service"
 	"strconv"
 	"strings"
@@ -15,6 +16,12 @@ import (
 func (h *Handler) contentRoutes(router *gin.Engine) {
 	router.GET("/admin/users/:uid", h.userContent)
 	router.GET("/api/v1/users/:uid/posts", h.authorizeAPI, h.userContent)
+	router.GET("/admin/exports", h.exportTasks)
+	router.GET("/admin/exports/tasks/:id/download", h.downloadExportTask)
+	api := router.Group("/api/v1", h.authorizeAPI)
+	api.GET("/export-tasks", h.exportTasks)
+	api.GET("/export-tasks/:id", h.exportTask)
+	api.GET("/export-tasks/:id/download", h.downloadExportTask)
 	for _, prefix := range []string{"/admin", "/api/v1"} {
 		group := router.Group(prefix)
 		if prefix == "/api/v1" {
@@ -56,7 +63,24 @@ func (h *Handler) userContent(c *gin.Context) {
 	if int64(page)*50 < data.Total {
 		next = page + 1
 	}
-	h.render(c, 200, "posts", gin.H{"Data": data, "Previous": previous, "Next": next, "TraceID": logging.TraceID(c.Request.Context())})
+	h.render(c, 200, "posts", gin.H{
+		"Data":           data,
+		"Previous":       previous,
+		"Next":           next,
+		"AsyncThreshold": h.monitor.Exports().Threshold(),
+		"RetentionDays":  h.monitor.Exports().RetentionDays(),
+		"TraceID":        logging.TraceID(c.Request.Context()),
+	})
+}
+func exportContentMIME(format string) string {
+	if format == "zip" {
+		return "application/zip"
+	}
+	return "text/markdown; charset=utf-8"
+}
+func attachExportTaskURLs(task *repository.ExportTask) {
+	task.StatusURL = fmt.Sprintf("/api/v1/export-tasks/%d", task.ID)
+	task.DownloadURL = fmt.Sprintf("/api/v1/export-tasks/%d/download", task.ID)
 }
 func (h *Handler) exportContent(c *gin.Context) {
 	if !h.longResponse(c) {
@@ -66,30 +90,108 @@ func (h *Handler) exportContent(c *gin.Context) {
 	if !ok {
 		return
 	}
+	uids := append([]string{}, c.QueryArray("uids")...)
+	uids = append(uids, c.QueryArray("author_uids")...)
 	input := service.ExportInput{
-		Format:  c.DefaultQuery("format", "markdown"),
-		StartAt: c.Query("start_at"),
-		EndAt:   c.Query("end_at"),
+		Format:     c.DefaultQuery("format", "markdown"),
+		StartAt:    c.Query("start_at"),
+		EndAt:      c.Query("end_at"),
+		AuthorUIDs: uids,
 	}
-	file, err := h.monitor.Export(c.Request.Context(), c.Param("kind"), id, input)
+	result, err := h.monitor.StartExport(c.Request.Context(), c.Param("kind"), id, input)
 	if err != nil {
 		h.problem(c, err)
 		return
 	}
+	if result.Task != nil {
+		attachExportTaskURLs(result.Task)
+		if isAPI(c) {
+			c.Header("Location", result.Task.StatusURL)
+			c.JSON(http.StatusAccepted, result.Task)
+			return
+		}
+		c.Redirect(http.StatusSeeOther, fmt.Sprintf("/admin/exports?created=%d", result.Task.ID))
+		return
+	}
 	defer func() {
-		if e := h.monitor.RemoveExport(c.Request.Context(), file); e != nil {
+		if e := h.monitor.RemoveExport(c.Request.Context(), result.File); e != nil {
 			_ = c.Error(e)
 		}
 	}()
-	extension, mime := "md", "text/markdown; charset=utf-8"
-	if input.Format == "zip" {
-		extension, mime = "zip", "application/zip"
-	}
-	c.Header("Content-Type", mime)
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d.%s"`, c.Param("kind"), id, extension))
-	if err = h.monitor.SendExport(c.Request.Context(), c.Writer, file); err != nil {
+	c.Header("Content-Type", exportContentMIME(result.Format))
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, result.Filename))
+	if err = h.monitor.SendExport(c.Request.Context(), c.Writer, result.File); err != nil {
 		_ = c.Error(err)
 	}
+}
+func (h *Handler) exportTasks(c *gin.Context) {
+	tasks, err := h.monitor.Exports().List(c.Request.Context())
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	for i := range tasks {
+		attachExportTaskURLs(&tasks[i])
+	}
+	if isAPI(c) {
+		c.JSON(http.StatusOK, gin.H{
+			"tasks":                  tasks,
+			"async_export_threshold": h.monitor.Exports().Threshold(),
+			"export_retention_days":  h.monitor.Exports().RetentionDays(),
+		})
+		return
+	}
+	createdID, _ := strconv.ParseInt(c.Query("created"), 10, 64)
+	if createdID < 0 {
+		createdID = 0
+	}
+	hasActive := false
+	for _, task := range tasks {
+		if task.Status == "queued" || task.Status == "running" {
+			hasActive = true
+			break
+		}
+	}
+	h.render(c, http.StatusOK, "exports", gin.H{
+		"Tasks":          tasks,
+		"CreatedID":      createdID,
+		"HasActive":      hasActive,
+		"AsyncThreshold": h.monitor.Exports().Threshold(),
+		"RetentionDays":  h.monitor.Exports().RetentionDays(),
+		"TraceID":        logging.TraceID(c.Request.Context()),
+	})
+}
+func (h *Handler) exportTask(c *gin.Context) {
+	id, ok := h.id(c, "id")
+	if !ok {
+		return
+	}
+	task, err := h.monitor.Exports().Task(c.Request.Context(), id)
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	attachExportTaskURLs(&task)
+	c.JSON(http.StatusOK, task)
+}
+func (h *Handler) downloadExportTask(c *gin.Context) {
+	if !h.longResponse(c) {
+		return
+	}
+	id, ok := h.id(c, "id")
+	if !ok {
+		return
+	}
+	task, file, info, err := h.monitor.Exports().OpenDownload(c.Request.Context(), id)
+	if err != nil {
+		h.problem(c, err)
+		return
+	}
+	defer file.Close()
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Type", exportContentMIME(task.Format))
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, task.DownloadName))
+	http.ServeContent(c.Writer, c.Request, task.DownloadName, info.ModTime(), file)
 }
 func (h *Handler) resources(c *gin.Context) {
 	data, err := h.monitor.Resources().Scan(c.Request.Context())

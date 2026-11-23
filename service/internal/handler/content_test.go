@@ -405,3 +405,345 @@ func TestCollectionRetainsContentOnResourceFailure(t *testing.T) {
 		t.Fatal("resource failure prevented baseline completion", err)
 	}
 }
+
+func TestContentExportUIDFilter(t *testing.T) {
+	cfg := testConfig(t)
+	router, store, _ := openAppWithTransport(t, cfg, io.Discard, exportNoNetwork{t})
+	ctx := context.Background()
+	at := func(value string) *time.Time {
+		t.Helper()
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &parsed
+	}
+	// 写入本地资源文件，避免测试依赖网络，同时验证 ZIP 只打包命中作者引用的资源。
+	assets := infrastructure.Assets{Path: cfg.AssetsPath}
+	mainAsset, err := assets.Save(ctx, []byte("main-image-bytes"), "image/png", "https://img.nga.cn/main.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAsset, err := assets.Save(ctx, []byte("other-image-bytes"), "image/png", "https://img.nga.cn/other.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentAsset, err := assets.Save(ctx, []byte("comment-image-bytes"), "image/png", "https://img.nga.cn/comment.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range []repository.Resource{
+		{URL: "https://img.nga.cn/main.png", Path: mainAsset, MIME: "image/png", Size: 16},
+		{URL: "https://img.nga.cn/other.png", Path: otherAsset, MIME: "image/png", Size: 17},
+		{URL: "https://img.nga.cn/comment.png", Path: commentAsset, MIME: "image/png", Size: 19},
+	} {
+		if err = store.SaveResource(ctx, &res); err != nil {
+			t.Fatal(err)
+		}
+	}
+	posts := []repository.Post{
+		{TID: 1001, Key: "main", PID: 10, Kind: "main", Floor: 0, AuthorUID: 2001, Author: "op", Subject: "长帖标题", Body: "main-body [img]https://img.nga.cn/main.png[/img]", PublishedAt: at("2026-09-20T01:00:00Z"), SourceURL: "https://bbs.nga.cn/read.php?tid=1001", Resources: []string{"https://img.nga.cn/main.png"}},
+		{TID: 1001, Key: "pid:20", PID: 20, Kind: "reply", Floor: 1, AuthorUID: 9000, Author: "other", Body: "excluded-body [img]https://img.nga.cn/other.png[/img]", PublishedAt: at("2026-09-20T01:00:01Z"), SourceURL: "https://bbs.nga.cn/read.php?tid=1001&pid=20", Resources: []string{"https://img.nga.cn/other.png"}},
+		{TID: 1001, Key: "pid:21", PID: 21, Kind: "reply", Floor: 2, AuthorUID: 2001, Author: "op", Body: "[quote][pid=20,1001,1]Reply[/pid] <b>Post by [uid=9000]other[/uid] (2026-09-20 09:00):</b>quoted-excluded[/quote]\n[quote][pid=10,1001,1]Reply[/pid] <b>Post by [uid=2001]op[/uid] (2026-09-20 09:00):</b>quoted-main[/quote]\nreply-by-2001", PublishedAt: at("2026-09-20T01:00:02Z"), SourceURL: "https://bbs.nga.cn/read.php?tid=1001&pid=21"},
+		{TID: 1001, Key: "pid:22", PID: 22, Kind: "comment", Floor: 0, ParentKey: "pid:20", ParentFloor: 1, AuthorUID: 2002, Author: "commenter", Body: "[quote][pid=21,1001,1]Reply[/pid] <b>Post by [uid=2001]op[/uid] (2026-09-20 09:00):</b>quoted-included[/quote]\ncomment-by-2002 [img]https://img.nga.cn/comment.png[/img]", PublishedAt: at("2026-09-20T01:00:03Z"), SourceURL: "https://bbs.nga.cn/read.php?tid=1001&pid=22", Resources: []string{"https://img.nga.cn/comment.png"}},
+		{TID: 1001, Key: "pid:23", PID: 23, Kind: "reply", Floor: 3, AuthorUID: 2002, Author: "commenter", Body: "later-by-2002", PublishedAt: at("2026-09-20T02:00:00Z"), SourceURL: "https://bbs.nga.cn/read.php?tid=1001&pid=23"},
+	}
+	if _, err = store.InsertPosts(ctx, posts); err != nil {
+		t.Fatal(err)
+	}
+
+	// 未传 uids 保持原有全量行为。
+	full := send(t, router, "GET", "/api/v1/exports/threads/1001?format=markdown", cfg.APIToken, nil)
+	expectStatus(t, full, 200)
+	if !strings.Contains(full.Body.String(), "excluded-body") || !strings.Contains(full.Body.String(), "comment-by-2002") {
+		t.Fatal("full thread export without UID filter omitted expected posts")
+	}
+
+	// 支持多分隔符、重复值与重复查询参数，排序保持原有楼层/楼中楼顺序。
+	filteredQuery := url.Values{"format": {"markdown"}, "uids": {"2002， 2001,2002", "2001"}}
+	filtered := send(t, router, "GET", "/api/v1/exports/threads/1001?"+filteredQuery.Encode(), cfg.APIToken, nil)
+	expectStatus(t, filtered, 200)
+	md := filtered.Body.String()
+	for _, included := range []string{"main-body", "reply-by-2001", "comment-by-2002", "later-by-2002"} {
+		if !strings.Contains(md, included) {
+			t.Errorf("UID filtered Markdown omitted %q", included)
+		}
+	}
+	if strings.Contains(md, "excluded-body") {
+		t.Fatal("UID filtered Markdown included excluded author")
+	}
+	if !(strings.Index(md, "main-body") < strings.Index(md, "comment-by-2002") && strings.Index(md, "comment-by-2002") < strings.Index(md, "reply-by-2001") && strings.Index(md, "reply-by-2001") < strings.Index(md, "later-by-2002")) {
+		t.Fatal("UID filtered export changed original floor/comment ordering")
+	}
+	// 引用被过滤掉作者的帖子回退到原帖链接；引用命中作者的帖子保留文内锚点。
+	if strings.Contains(md, "[jump](#tid1001-pid20)") || !strings.Contains(md, "[jump](https://bbs.nga.cn/read.php?tid=1001&pid=20)") {
+		t.Fatalf("reference to excluded post did not fall back to NGA URL: %s", md)
+	}
+	if !strings.Contains(md, "[jump](#tid1001-pid21)") || !strings.Contains(md, "[jump](#tid1001-pid10)") {
+		t.Fatalf("reference to included post lost internal anchor: %s", md)
+	}
+
+	// UID 过滤与时段筛选组合取交集，且 ZIP 只打包命中帖子的资源并在 metadata.json 记录 author_uids。
+	zipQuery := url.Values{"format": {"zip"}, "uids": {"2001,2002"}, "start_at": {"2026-09-20T01:00:00Z"}, "end_at": {"2026-09-20T01:00:03Z"}}
+	zipResp := send(t, router, "GET", "/api/v1/exports/threads/1001?"+zipQuery.Encode(), cfg.APIToken, nil)
+	expectStatus(t, zipResp, 200)
+	archive, err := zip.NewReader(bytes.NewReader(zipResp.Body.Bytes()), int64(zipResp.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string][]byte{}
+	for _, entry := range archive.File {
+		r, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		raw, readErr := io.ReadAll(r)
+		_ = r.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		entries[entry.Name] = raw
+	}
+	if _, ok := entries["assets/"+mainAsset]; !ok {
+		t.Fatal("ZIP omitted included main asset")
+	}
+	if _, ok := entries["assets/"+commentAsset]; !ok {
+		t.Fatal("ZIP omitted included comment asset")
+	}
+	if _, ok := entries["assets/"+otherAsset]; ok {
+		t.Fatal("ZIP packed asset belonging to excluded author")
+	}
+	if bytes.Contains(entries["content.md"], []byte("later-by-2002")) || bytes.Contains(entries["content.md"], []byte("excluded-body")) {
+		t.Fatal("ZIP did not intersect UID filter and time range")
+	}
+	var meta struct {
+		PostCount  int64   `json:"post_count"`
+		AuthorUIDs []int64 `json:"author_uids"`
+	}
+	if err = json.Unmarshal(entries["metadata.json"], &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.PostCount != 3 || len(meta.AuthorUIDs) != 2 || meta.AuthorUIDs[0] != 2001 || meta.AuthorUIDs[1] != 2002 {
+		t.Fatalf("unexpected ZIP metadata: %+v", meta)
+	}
+
+	// 参数校验：非法 UID、空结果、以及对 UID 导出传 UID 过滤均返回 400。
+	for _, badPath := range []string{
+		"/api/v1/exports/threads/1001?format=markdown&uids=abc",
+		"/api/v1/exports/threads/1001?format=markdown&uids=0",
+		"/api/v1/exports/threads/1001?format=markdown&uids=-1",
+		"/api/v1/exports/threads/1001?format=markdown&uids=,",
+		"/api/v1/exports/threads/1001?format=markdown&uids=2001,bad",
+		"/api/v1/exports/threads/1001?format=markdown&uids=777777",
+		"/api/v1/exports/users/2001?format=markdown&uids=2001",
+	} {
+		expectStatus(t, send(t, router, "GET", badPath, cfg.APIToken, nil), 400)
+	}
+	// UID 导出空 uids 参数视为未填写。
+	expectStatus(t, send(t, router, "GET", "/api/v1/exports/users/2001?format=markdown&uids=", cfg.APIToken, nil), 200)
+
+	// 管理页：TID 页展示 UID 过滤输入框，UID 页不展示。
+	tidPage := request(t, router, "GET", "/admin/threads/1001", "")
+	expectStatus(t, tidPage, 200)
+	if strings.Count(tidPage.Body.String(), `name="uids"`) != 3 {
+		t.Fatalf("expected UID filter input in dialog and two no-JS forms, got %d", strings.Count(tidPage.Body.String(), `name="uids"`))
+	}
+	uidPage := request(t, router, "GET", "/admin/users/2001", "")
+	expectStatus(t, uidPage, 200)
+	if strings.Contains(uidPage.Body.String(), `name="uids"`) {
+		t.Fatal("UID content page must not display UID filter input")
+	}
+}
+
+func TestAsyncContentExportLifecycle(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.BackgroundEnabled = true
+	cfg.AsyncExportThreshold = 3
+	cfg.ExportRetentionDays = 7
+	var logs bytes.Buffer
+	router, store, m := openAppWithTransport(t, cfg, &logs, exportNoNetwork{t})
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	assets := infrastructure.Assets{Path: cfg.AssetsPath}
+	savedAsset, err := assets.Save(ctx, []byte("async-zip-asset"), "image/png", "https://img.nga.cn/async.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.SaveResource(ctx, &repository.Resource{URL: "https://img.nga.cn/async.png", Path: savedAsset, MIME: "image/png", Size: 15}); err != nil {
+		t.Fatal(err)
+	}
+	posts := []repository.Post{}
+	for i := 1; i <= 5; i++ {
+		uid := int64(2001)
+		if i > 3 {
+			uid = 9000
+		}
+		posts = append(posts, repository.Post{
+			TID: 1001, Key: fmt.Sprintf("pid:%d", 100+i), PID: int64(100 + i), Kind: "reply", Floor: int64(i),
+			AuthorUID: uid, Author: "author", Body: fmt.Sprintf("post-%d [img]https://img.nga.cn/async.png[/img]", i),
+			PublishedAt: &now, SourceURL: fmt.Sprintf("https://bbs.nga.cn/read.php?tid=1001&pid=%d", 100+i),
+			Resources: []string{"https://img.nga.cn/async.png"},
+		})
+	}
+	if _, err = store.InsertPosts(ctx, posts); err != nil {
+		t.Fatal(err)
+	}
+
+	// 运行设置页与 API 展示生效阈值与保留天数。
+	settingsResp := send(t, router, "GET", "/api/v1/settings", cfg.APIToken, nil)
+	expectStatus(t, settingsResp, 200)
+	if !strings.Contains(settingsResp.Body.String(), `"async_export_threshold":3`) || !strings.Contains(settingsResp.Body.String(), `"export_retention_days":7`) {
+		t.Fatalf("settings API missing async export settings: %s", settingsResp.Body.String())
+	}
+	runtimePage := request(t, router, "GET", "/admin/settings/runtime", "")
+	expectStatus(t, runtimePage, 200)
+	if !strings.Contains(runtimePage.Body.String(), "3 条") || !strings.Contains(runtimePage.Body.String(), "7 天") {
+		t.Fatal("runtime settings page missing async export settings")
+	}
+
+	// 匹配条数 <= 阈值（UID 2001 共 3 条）保持同步导出。
+	syncResp := send(t, router, "GET", "/api/v1/exports/threads/1001?format=markdown&uids=2001", cfg.APIToken, nil)
+	expectStatus(t, syncResp, 200)
+	if !strings.Contains(syncResp.Body.String(), "post-3") || strings.Contains(syncResp.Body.String(), "post-4") {
+		t.Fatal("sync export within threshold returned unexpected content")
+	}
+
+	// 匹配条数 > 阈值（共 5 条）自动转为异步导出并返回 202。
+	asyncResp := send(t, router, "GET", "/api/v1/exports/threads/1001?format=zip&uids=2001,9000", cfg.APIToken, nil)
+	expectStatus(t, asyncResp, 202)
+	var created repository.ExportTask
+	if err = json.Unmarshal(asyncResp.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID <= 0 || created.PostCount != 5 || created.StatusURL == "" || created.DownloadURL == "" || asyncResp.Header().Get("Location") != created.StatusURL {
+		t.Fatalf("unexpected async export response: %+v, Location=%q", created, asyncResp.Header().Get("Location"))
+	}
+
+	// 等待后台任务完成。
+	var task repository.ExportTask
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		poll := send(t, router, "GET", created.StatusURL, cfg.APIToken, nil)
+		expectStatus(t, poll, 200)
+		if err = json.Unmarshal(poll.Body.Bytes(), &task); err != nil {
+			t.Fatal(err)
+		}
+		if task.Status == "completed" || task.Status == "failed" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if task.Status != "completed" || task.FileSize <= 0 || task.ExpiresAt == nil || task.FinishedAt == nil {
+		t.Fatalf("async export task did not complete cleanly: %+v", task)
+	}
+	if diff := task.ExpiresAt.Sub(*task.FinishedAt); diff < 6*24*time.Hour || diff > 8*24*time.Hour {
+		t.Fatalf("unexpected retention window: %v", diff)
+	}
+
+	// 有效期内可多次下载，ZIP 内容完整。
+	for attempt := 0; attempt < 2; attempt++ {
+		dl := send(t, router, "GET", task.DownloadURL, cfg.APIToken, nil)
+		expectStatus(t, dl, 200)
+		if dl.Header().Get("Content-Type") != "application/zip" || !strings.Contains(dl.Header().Get("Content-Disposition"), "threads-1001.zip") {
+			t.Fatalf("unexpected download headers: %v", dl.Header())
+		}
+		archive, zipErr := zip.NewReader(bytes.NewReader(dl.Body.Bytes()), int64(dl.Body.Len()))
+		if zipErr != nil {
+			t.Fatal(zipErr)
+		}
+		if len(archive.File) != 3 {
+			t.Fatalf("expected 3 ZIP entries, got %d", len(archive.File))
+		}
+	}
+
+	// 管理后台提交超阈值导出时跳转到导出任务页，并可浏览与下载。
+	webExport := request(t, router, "GET", "/admin/exports/threads/1001?format=markdown&uids=2001,9000", "")
+	expectStatus(t, webExport, 303)
+	loc := webExport.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/admin/exports?created=") {
+		t.Fatalf("web async export redirect = %q", loc)
+	}
+	var secondID int64
+	if _, err = fmt.Sscanf(loc, "/admin/exports?created=%d", &secondID); err != nil {
+		t.Fatal(err)
+	}
+	for time.Now().Before(deadline) {
+		item, _ := store.ExportTask(ctx, secondID)
+		if item.Status == "completed" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	tasksPage := request(t, router, "GET", loc, "")
+	expectStatus(t, tasksPage, 200)
+	body := tasksPage.Body.String()
+	for _, want := range []string{"导出任务", fmt.Sprintf("#%d", secondID), "作者 UID：2001,9000", fmt.Sprintf("/admin/exports/tasks/%d/download", secondID)} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exports admin page missing %q", want)
+		}
+	}
+	webDL := request(t, router, "GET", fmt.Sprintf("/admin/exports/tasks/%d/download", secondID), "")
+	expectStatus(t, webDL, 200)
+	if !strings.Contains(webDL.Body.String(), "post-5") {
+		t.Fatal("web async export download returned wrong content")
+	}
+
+	// 资源维护页的 24 小时清理不会误删未过期的异步导出文件。
+	stored, err := store.ExportTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportFilePath := filepath.Join(infrastructure.ExportsDir(cfg.DatabasePath), stored.FileName)
+	old := time.Now().Add(-48 * time.Hour)
+	if err = os.Chtimes(exportFilePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	expectStatus(t, send(t, router, "POST", "/api/v1/resources/cleanup", cfg.APIToken, map[string]bool{"confirm": true}), 200)
+	if _, err = os.Stat(exportFilePath); err != nil {
+		t.Fatal("resource cleanup deleted an active async export file", err)
+	}
+	expectStatus(t, send(t, router, "GET", task.DownloadURL, cfg.APIToken, nil), 200)
+
+	// 未完成任务下载返回 409，不存在任务返回 404。
+	queued := repository.ExportTask{Kind: "threads", TargetID: 1001, Format: "markdown", Status: "queued", PostCount: 5, DownloadName: "threads-1001.md"}
+	if err = store.CreateExportTask(ctx, &queued); err != nil {
+		t.Fatal(err)
+	}
+	expectStatus(t, send(t, router, "GET", fmt.Sprintf("/api/v1/export-tasks/%d/download", queued.ID), cfg.APIToken, nil), 409)
+	expectStatus(t, send(t, router, "GET", "/api/v1/export-tasks/999999", cfg.APIToken, nil), 404)
+	expectStatus(t, send(t, router, "GET", "/api/v1/export-tasks/999999/download", cfg.APIToken, nil), 404)
+
+	// 超过 7 天后自动清理本地过期文件，下载返回 410。
+	expiredCount, err := m.Exports().CleanupExpired(ctx, time.Now().UTC().Add(8*24*time.Hour))
+	if err != nil || expiredCount != 2 {
+		t.Fatalf("CleanupExpired = %d, %v; want 2, nil", expiredCount, err)
+	}
+	if _, err = os.Stat(exportFilePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("expired export file was not removed")
+	}
+	expectStatus(t, send(t, router, "GET", task.DownloadURL, cfg.APIToken, nil), 410)
+	expiredPage := request(t, router, "GET", "/admin/exports", "")
+	expectStatus(t, expiredPage, 200)
+	if strings.Contains(expiredPage.Body.String(), fmt.Sprintf("/admin/exports/tasks/%d/download", task.ID)) {
+		t.Fatal("expired export task still displayed a download link")
+	}
+
+	// 重启时将遗留排队/运行中任务标记为中断，并清理未完成的 .tmp-* 文件。
+	abandonedTmp := filepath.Join(infrastructure.ExportsDir(cfg.DatabasePath), ".tmp-abandoned.md")
+	if err = os.WriteFile(abandonedTmp, []byte("incomplete"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if err = store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, reopenedStore, _ := openAppWithTransport(t, cfg, &logs, exportNoNetwork{t})
+	interrupted, err := reopenedStore.ExportTask(ctx, queued.ID)
+	if err != nil || interrupted.Status != "interrupted" || interrupted.FinishedAt == nil {
+		t.Fatalf("leftover queued task was not marked interrupted on restart: %+v, %v", interrupted, err)
+	}
+	if _, err = os.Stat(abandonedTmp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("abandoned temp export file was not cleaned on restart")
+	}
+}

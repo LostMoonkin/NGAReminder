@@ -23,7 +23,7 @@ func adminPageMeta(name string) pageMeta {
 		return pageMeta{"新建监控", "watches", ""}
 	case "watch":
 		return pageMeta{"监控详情", "watches", ""}
-	case "library", "users", "posts":
+	case "library", "users", "posts", "exports":
 		return pageMeta{"内容库", "library", ""}
 	case "notifications":
 		return pageMeta{"收件箱", "inbox", ""}

@@ -159,7 +159,9 @@ if (exportDialog) {
       event.preventDefault();
       times[1].setCustomValidity('结束时间不能早于开始时间');
       times[1].reportValidity();
+      return;
     }
+    setTimeout(() => exportDialog.close(), 0);
   });
   times.forEach(input => input.addEventListener('input', () => times.forEach(item => item.setCustomValidity(''))));
   exportDialog.querySelectorAll('[data-close-export]').forEach(button => button.addEventListener('click', () => exportDialog.close()));

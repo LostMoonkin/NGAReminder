@@ -82,7 +82,7 @@ func Open(ctx context.Context, path string) (store *Store, err error) {
 		seedSources := tx.Migrator().HasTable(&EventWatch{}) && !tx.Migrator().HasColumn(&EventWatch{}, "kind")
 		seedThreads := !tx.Migrator().HasTable(&Thread{})
 		seedObservations := !tx.Migrator().HasTable(&WatchPost{})
-		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}, &Thread{}, &FeishuApp{}, &Channel{}, &InboxEvent{}, &EventWatch{}, &WatchPost{}, &Delivery{}, &SystemAlert{}, &BotSettings{}, &BotBinding{}, &BotReceipt{}, &RenewalSettings{}, &RenewalRequest{}, &ResourceSettings{}, &Resource{}, &Backfill{}, &FloorGap{}); e != nil {
+		if e := tx.AutoMigrate(&Account{}, &Watch{}, &Run{}, &Post{}, &Thread{}, &FeishuApp{}, &Channel{}, &InboxEvent{}, &EventWatch{}, &WatchPost{}, &Delivery{}, &SystemAlert{}, &BotSettings{}, &BotBinding{}, &BotReceipt{}, &RenewalSettings{}, &RenewalRequest{}, &ResourceSettings{}, &Resource{}, &ExportTask{}, &Backfill{}, &FloorGap{}); e != nil {
 			return e
 		}
 		if seedSources {

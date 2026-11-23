@@ -12,6 +12,7 @@ import (
 
 type ContentFilter struct {
 	TID, UID       int64
+	AuthorUIDs     []int64
 	StartAt, EndAt *time.Time
 }
 
@@ -22,6 +23,9 @@ func (s *Store) contentQuery(ctx context.Context, f ContentFilter) *gorm.DB {
 	}
 	if f.UID > 0 {
 		q = q.Where("author_uid = ?", f.UID)
+	}
+	if len(f.AuthorUIDs) > 0 {
+		q = q.Where("author_uid IN ?", f.AuthorUIDs)
 	}
 	if f.StartAt != nil {
 		q = q.Where("published_at >= ?", *f.StartAt)
@@ -129,4 +133,100 @@ func (s *Store) ResourceReferences(ctx context.Context) (urls []string, err erro
 	defer span.End(&err)
 	err = s.db.WithContext(ctx).Raw("SELECT DISTINCT j.value FROM posts p, json_each(p.resources) j WHERE j.type = 'text' ORDER BY j.value").Scan(&urls).Error
 	return urls, logging.Wrap(err, "read saved content resource references")
+}
+
+type ExportTask struct {
+	ID            int64      `json:"id"`
+	Kind          string     `json:"kind"`
+	TargetID      int64      `json:"target_id"`
+	Format        string     `json:"format"`
+	StartAt       *time.Time `json:"start_at,omitempty"`
+	EndAt         *time.Time `json:"end_at,omitempty"`
+	AuthorUIDs    []int64    `json:"author_uids,omitempty" gorm:"serializer:json"`
+	SnapshotMaxID int64      `json:"snapshot_max_id"`
+	PostCount     int64      `json:"post_count"`
+	Status        string     `json:"status" gorm:"index"`
+	FileName      string     `json:"-"`
+	DownloadName  string     `json:"download_name"`
+	FileSize      int64      `json:"file_size"`
+	Error         string     `json:"error,omitempty"`
+	TraceID       string     `json:"trace_id,omitempty"`
+	SourceTraceID string     `json:"source_trace_id,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty" gorm:"index"`
+	StatusURL     string     `json:"status_url,omitempty" gorm:"-"`
+	DownloadURL   string     `json:"download_url,omitempty" gorm:"-"`
+}
+
+func (s *Store) CreateExportTask(ctx context.Context, task *ExportTask) (err error) {
+	ctx, span := logging.Start(ctx, "repository.create_export_task")
+	defer span.End(&err)
+	return logging.Wrap(s.db.WithContext(ctx).Create(task).Error, "create export task")
+}
+
+func (s *Store) SaveExportTask(ctx context.Context, task *ExportTask) (err error) {
+	ctx, span := logging.Start(ctx, "repository.save_export_task")
+	defer span.End(&err)
+	return logging.Wrap(s.db.WithContext(ctx).Save(task).Error, "save export task")
+}
+
+func (s *Store) ExportTask(ctx context.Context, id int64) (task ExportTask, err error) {
+	ctx, span := logging.Start(ctx, "repository.export_task")
+	defer span.End(&err)
+	err = s.db.WithContext(ctx).First(&task, id).Error
+	return task, logging.Wrap(err, "read export task")
+}
+
+func (s *Store) ExportTasks(ctx context.Context, limit int) (items []ExportTask, err error) {
+	ctx, span := logging.Start(ctx, "repository.export_tasks")
+	defer span.End(&err)
+	if limit <= 0 {
+		limit = 100
+	}
+	items = []ExportTask{}
+	err = s.db.WithContext(ctx).Order("id DESC").Limit(limit).Find(&items).Error
+	return items, logging.Wrap(err, "list export tasks")
+}
+
+func (s *Store) NextQueuedExportTask(ctx context.Context) (task ExportTask, found bool, err error) {
+	ctx, span := logging.Start(ctx, "repository.next_queued_export_task")
+	defer span.End(&err)
+	err = s.db.WithContext(ctx).Where("status = ?", "queued").Order("id ASC").First(&task).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ExportTask{}, false, nil
+	}
+	if err != nil {
+		return ExportTask{}, false, logging.Wrap(err, "read next queued export task")
+	}
+	return task, true, nil
+}
+
+func (s *Store) InterruptExportTasks(ctx context.Context) (err error) {
+	ctx, span := logging.Start(ctx, "repository.interrupt_export_tasks")
+	defer span.End(&err)
+	now := time.Now().UTC()
+	err = s.db.WithContext(ctx).Model(&ExportTask{}).
+		Where("status IN ?", []string{"queued", "running"}).
+		Updates(map[string]any{"status": "interrupted", "finished_at": now, "error": "服务重启，异步导出已中断，请重新发起"}).Error
+	return logging.Wrap(err, "mark interrupted export tasks")
+}
+
+func (s *Store) ExpiredExportTasks(ctx context.Context, now time.Time) (items []ExportTask, err error) {
+	ctx, span := logging.Start(ctx, "repository.expired_export_tasks")
+	defer span.End(&err)
+	items = []ExportTask{}
+	err = s.db.WithContext(ctx).
+		Where("status = ? AND expires_at IS NOT NULL AND expires_at <= ?", "completed", now.UTC()).
+		Order("id ASC").Find(&items).Error
+	return items, logging.Wrap(err, "list expired export tasks")
+}
+
+func (s *Store) MarkExportTaskExpired(ctx context.Context, id int64) (err error) {
+	ctx, span := logging.Start(ctx, "repository.mark_export_task_expired")
+	defer span.End(&err)
+	err = s.db.WithContext(ctx).Model(&ExportTask{}).Where("id = ?", id).
+		Updates(map[string]any{"status": "expired", "file_name": ""}).Error
+	return logging.Wrap(err, "mark export task expired")
 }

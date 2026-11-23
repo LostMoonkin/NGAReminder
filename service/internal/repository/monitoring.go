@@ -98,7 +98,7 @@ type Post struct {
 	RawPayload    json.RawMessage   `json:"raw_payload,omitempty" gorm:"type:text"`
 	Thread        *Thread           `json:"-" gorm:"-"`
 	ID            int64             `json:"id"`
-	TID           int64             `json:"tid" gorm:"column:tid;uniqueIndex:post_key;index"`
+	TID           int64             `json:"tid" gorm:"column:tid;uniqueIndex:post_key;index;index:idx_posts_tid_author"`
 	Key           string            `json:"key" gorm:"uniqueIndex:post_key"`
 	PID           int64             `json:"pid" gorm:"column:pid"`
 	Kind          string            `json:"kind"`
@@ -106,7 +106,7 @@ type Post struct {
 	ParentKey     string            `json:"parent_key"`
 	ParentFloor   int64             `json:"parent_floor"`
 	CommentToID   string            `json:"comment_to_id"`
-	AuthorUID     int64             `json:"author_uid"`
+	AuthorUID     int64             `json:"author_uid" gorm:"index:idx_posts_tid_author"`
 	Author        string            `json:"author"`
 	Subject       string            `json:"subject"`
 	Body          string            `json:"body"`

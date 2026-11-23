@@ -179,6 +179,7 @@ func (m *Monitoring) StartScheduler() {
 				case <-m.ctx.Done():
 					return
 				case now := <-ticker.C:
+					_, _ = m.exports.CleanupExpired(background, now)
 					err := m.renewal.Expire(background, now)
 					if err == nil {
 						_ = m.Tick(background, now)

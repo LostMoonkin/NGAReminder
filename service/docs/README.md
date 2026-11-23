@@ -26,6 +26,10 @@ TID/UID 内容的秒级闭区间导出与统一导出悬浮窗见 [Spec16](spec/
 
 资源容量展示、404 记录、选择性补下载与忽略见 [Spec19](spec/19-resource-retry-management.md)。
 
+大帖子自动异步导出、任务状态与 7 天文件保留见 [Spec20](spec/20-async-content-export.md)。
+
+主题导出按作者 UID 列表过滤见 [Spec21](spec/21-thread-export-uid-filter.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。
@@ -159,6 +163,8 @@ docker compose up -d --no-build server
 | `timezone` | `Asia/Shanghai`，有效的 IANA 时区 |
 | `nga_user_agent` | `Mozilla/5.0 (compatible; NGA-Reminder/0.1)`，沿用旧 Rust 默认值，供 NGA 请求使用 |
 | `max_download_bytes` | `10485760`（10 MiB），资源下载字节上限，正整数 |
+| `async_export_threshold` | `10000`，单次导出匹配帖子数超过该阈值时自动转为异步导出，正整数 |
+| `export_retention_days` | `7`，异步导出文件本地保留天数，正整数 |
 | `store_raw_payload` | `false`；开启后为新保存的帖子保留完整原始 JSON，不回抓旧内容 |
 | `background_enabled` | `true`；设置 `false` 进入关闭后台任务的核验模式 |
 
@@ -389,7 +395,7 @@ TID 内容在 `/admin/threads/:tid`，UID watch 详情中的“查看用户帖�
 
 Markdown 按 [Spec13](spec/13-markdown-rendering.md) 复刻 ngapost2md 的渲染规则，支持 NGA app_api 混合标记、表情、匿名编码、骰子、折叠、音视频及带作者/时间的引用。接口已经提供可读匿名名时直接保留；仅转换仍为 `#anony_…` 的文本，不改写数据库。代码块保持原文，折叠使用 `<details>`。引用目标在本次导出中时使用文内跳转，否则回退原帖链接；跨主题主楼锚点互不冲突。普通 Markdown 引用远程资源，ZIP 优先引用已打包文件；表情保持在线地址，导出不补抓正文或下载资源。
 
-页面提供 Markdown 和 ZIP 下载。以开始时的最大帖子 ID 固定内容范围，每批最多 200 条、按 TID/楼层/父子关系/内部 ID 稳定排序。Markdown 包含标题、作者、时间、楼层/父帖和原帖链接。ZIP 包含 `content.md`、`metadata.json` 和 `assets/` 中已保存的相关资源，共享文件只打包一次，缺失项使用远程地址。服务生成临时文件后流式发送，批量导出和资源补下载解除普通 HTTP 响应的 30 秒写入期限，仍随客户端断开取消。完成、客户端断开或生成失败都会清理；异常退出遗留项可从资源页清理。
+页面提供 Markdown 和 ZIP 下载。以开始时的最大帖子 ID 固定内容范围，每批最多 200 条、按 TID/楼层/父子关系/内部 ID 稳定排序。主题导出支持可选作者 UID 列表过滤（逗号或空白分隔，留空表示全部作者），并可与时段闭区间筛选组合；文内引用和 ZIP 打包均遵守过滤后的导出范围。匹配帖子数不超过 `async_export_threshold`（默认 10000 条）时沿用同步流式下载；超过阈值时自动创建后台异步导出任务，文件保存在数据库同级 `exports/` 目录并默认保留 `export_retention_days`（默认 7 天），可在内容库 `/admin/exports` 查看进度与下载，过期自动清理且不受资源维护 24 小时清理影响。Markdown 包含标题、作者、时间、楼层/父帖和原帖链接。ZIP 包含 `content.md`、`metadata.json` 和 `assets/` 中已保存的相关资源，共享文件只打包一次，缺失项使用远程地址。批量导出、异步导出下载和资源补下载均解除普通 HTTP 响应的 30 秒写入期限，仍随客户端断开取消。
 
 `/admin/resources` 管理下载开关及维护。默认关闭下载，仅保留资源地址；开启后采集在正文提交后下载，单个失败不会回滚正文、水位或通知。也可重新下载已有内容缺失的资源。下载仅允许 HTTPS 的 `img.nga.cn`、`img.nga.178.com`、`img4.nga.178.com`、`img6.nga.cn`、`img7.nga.cn`、`img8.nga.cn`，禁止跳转、自定义端口和 userinfo。接受成功 2xx，不限制附件 MIME，支持音视频、7z 和未知二进制；按 `max_download_bytes` 检查声明长度及实际字节数，默认 10 MiB。文件名使用内容 SHA-256，扩展名优先取附件原文件名（其次 URL），清洗为最多 10 位 ASCII 字母数字；未知类型用 `.bin`。二进制不写入 SQLite。飞书图片上传仍单独限制前三个域名。
 
@@ -401,7 +407,8 @@ Markdown 按 [Spec13](spec/13-markdown-rendering.md) 复刻 ngapost2md 的渲染
 | --- | --- |
 | `GET /api/v1/users` | `users` 汇总：`watch_id`、`uid`、`username`、`post_count`、`thread_count`、`last_published_at` |
 | `GET /api/v1/users/:uid/posts?page=1` | 目标用户的已保存内容及分页信息 |
-| `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`；可选 `start_at`、`end_at` 按 `published_at` 秒级闭区间筛选，可只传单边。API 使用 RFC 3339，管理页本地时间按配置时区解释；时间参数均为空时下载全部已有内容 |
+| `GET /api/v1/exports/threads/:id?format=markdown`、`.../users/:id?format=zip` | `format` 为 `markdown` 或 `zip`；可选 `start_at`、`end_at` 按 `published_at` 秒级闭区间筛选；主题导出额外支持可选 `uids`（或 `author_uids`，逗号/空白分隔或重复参数）过滤作者 UID。匹配条数不超过 `async_export_threshold` 时直接流式返回文件，超过阈值时返回 `202` 与异步任务详情 |
+| `GET /api/v1/export-tasks`、`GET /api/v1/export-tasks/:id`、`GET /api/v1/export-tasks/:id/download` | 查询异步导出任务列表、单条任务详情及下载有效期内已完成文件（未完成返回 409，已过期返回 410） |
 | `GET /api/v1/resources` | 只读资源扫描及下载设置；`database_bytes`、`assets_bytes`、`assets_count`、`not_found_count`、`ignored_count` 返回当次统计 |
 | `POST /api/v1/resources` | `{"download_enabled":true}`，修改下载开关 |
 | `POST /api/v1/resources/redownload` | `{"urls":["https://..."]}`，只重新下载所选可处理缺失项，返回成功数；失败项保留错误并写日志 |

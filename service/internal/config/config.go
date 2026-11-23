@@ -17,36 +17,63 @@ import (
 	"ngareminder/service/internal/logging"
 )
 
-const DefaultMaxDownloadBytes int64 = 10 * 1024 * 1024
+const (
+	DefaultMaxDownloadBytes     int64 = 10 * 1024 * 1024
+	DefaultAsyncExportThreshold int64 = 10000
+	DefaultExportRetentionDays  int   = 7
+)
 
 type Config struct {
-	MaxDownloadBytes  int64  `json:"max_download_bytes"`
-	StoreRawPayload   bool   `json:"store_raw_payload"`
-	ListenAddress     string `json:"listen_address"`
-	DatabasePath      string `json:"database_path"`
-	AssetsPath        string `json:"assets_path"`
-	LogsPath          string `json:"logs_path"`
-	APIToken          string `json:"api_token"`
-	EncryptionKey     string `json:"encryption_key"`
-	Timezone          string `json:"timezone"`
-	NGAUserAgent      string `json:"nga_user_agent"`
-	BackgroundEnabled bool   `json:"background_enabled"`
+	MaxDownloadBytes     int64  `json:"max_download_bytes"`
+	AsyncExportThreshold int64  `json:"async_export_threshold"`
+	ExportRetentionDays  int    `json:"export_retention_days"`
+	StoreRawPayload      bool   `json:"store_raw_payload"`
+	ListenAddress        string `json:"listen_address"`
+	DatabasePath         string `json:"database_path"`
+	AssetsPath           string `json:"assets_path"`
+	LogsPath             string `json:"logs_path"`
+	APIToken             string `json:"api_token"`
+	EncryptionKey        string `json:"encryption_key"`
+	Timezone             string `json:"timezone"`
+	NGAUserAgent         string `json:"nga_user_agent"`
+	BackgroundEnabled    bool   `json:"background_enabled"`
 }
 
 // Public 是管理页/API 的允许字段；新增凭据不会因序列化 Config 而泄露。
 type Public struct {
-	MaxDownloadBytes  int64  `json:"max_download_bytes"`
-	StoreRawPayload   bool   `json:"store_raw_payload"`
-	ListenAddress     string `json:"listen_address"`
-	DatabasePath      string `json:"database_path"`
-	AssetsPath        string `json:"assets_path"`
-	LogsPath          string `json:"logs_path"`
-	Timezone          string `json:"timezone"`
-	BackgroundEnabled bool   `json:"background_enabled"`
+	MaxDownloadBytes     int64  `json:"max_download_bytes"`
+	AsyncExportThreshold int64  `json:"async_export_threshold"`
+	ExportRetentionDays  int    `json:"export_retention_days"`
+	StoreRawPayload      bool   `json:"store_raw_payload"`
+	ListenAddress        string `json:"listen_address"`
+	DatabasePath         string `json:"database_path"`
+	AssetsPath           string `json:"assets_path"`
+	LogsPath             string `json:"logs_path"`
+	Timezone             string `json:"timezone"`
+	BackgroundEnabled    bool   `json:"background_enabled"`
 }
 
 func (c Config) Public() Public {
-	return Public{ListenAddress: c.ListenAddress, DatabasePath: c.DatabasePath, AssetsPath: c.AssetsPath, LogsPath: c.LogsPath, Timezone: c.Timezone, BackgroundEnabled: c.BackgroundEnabled, MaxDownloadBytes: c.MaxDownloadBytes, StoreRawPayload: c.StoreRawPayload}
+	threshold := c.AsyncExportThreshold
+	if threshold <= 0 {
+		threshold = DefaultAsyncExportThreshold
+	}
+	retention := c.ExportRetentionDays
+	if retention <= 0 {
+		retention = DefaultExportRetentionDays
+	}
+	return Public{
+		ListenAddress:        c.ListenAddress,
+		DatabasePath:         c.DatabasePath,
+		AssetsPath:           c.AssetsPath,
+		LogsPath:             c.LogsPath,
+		Timezone:             c.Timezone,
+		BackgroundEnabled:    c.BackgroundEnabled,
+		MaxDownloadBytes:     c.MaxDownloadBytes,
+		AsyncExportThreshold: threshold,
+		ExportRetentionDays:  retention,
+		StoreRawPayload:      c.StoreRawPayload,
+	}
 }
 
 func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey} }
@@ -54,7 +81,18 @@ func (c Config) Secrets() []string { return []string{c.APIToken, c.EncryptionKey
 func Load(ctx context.Context, filename string) (cfg Config, err error) {
 	_, span := logging.Start(ctx, "config.load")
 	defer span.End(&err)
-	cfg = Config{MaxDownloadBytes: DefaultMaxDownloadBytes, ListenAddress: "0.0.0.0:8989", DatabasePath: "data/nga-reminder.db", AssetsPath: "data/assets", LogsPath: "data/logs", Timezone: "Asia/Shanghai", NGAUserAgent: "Mozilla/5.0 (compatible; NGA-Reminder/0.1)", BackgroundEnabled: true}
+	cfg = Config{
+		MaxDownloadBytes:     DefaultMaxDownloadBytes,
+		AsyncExportThreshold: DefaultAsyncExportThreshold,
+		ExportRetentionDays:  DefaultExportRetentionDays,
+		ListenAddress:        "0.0.0.0:8989",
+		DatabasePath:         "data/nga-reminder.db",
+		AssetsPath:           "data/assets",
+		LogsPath:             "data/logs",
+		Timezone:             "Asia/Shanghai",
+		NGAUserAgent:         "Mozilla/5.0 (compatible; NGA-Reminder/0.1)",
+		BackgroundEnabled:    true,
+	}
 	base := "."
 	if filename != "" {
 		var file *os.File
@@ -102,6 +140,18 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 			return cfg, logging.WithStack(errors.New("NGA_REMINDER_MAX_DOWNLOAD_BYTES must be an integer"))
 		}
 	}
+	if value, ok := os.LookupEnv("NGA_REMINDER_ASYNC_EXPORT_THRESHOLD"); ok {
+		cfg.AsyncExportThreshold, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return cfg, logging.WithStack(errors.New("NGA_REMINDER_ASYNC_EXPORT_THRESHOLD must be an integer"))
+		}
+	}
+	if value, ok := os.LookupEnv("NGA_REMINDER_EXPORT_RETENTION_DAYS"); ok {
+		cfg.ExportRetentionDays, err = strconv.Atoi(value)
+		if err != nil {
+			return cfg, logging.WithStack(errors.New("NGA_REMINDER_EXPORT_RETENTION_DAYS must be an integer"))
+		}
+	}
 	if err = cfg.validate(); err != nil {
 		return cfg, err
 	}
@@ -120,6 +170,12 @@ func Load(ctx context.Context, filename string) (cfg Config, err error) {
 func (c Config) validate() error {
 	if c.MaxDownloadBytes <= 0 || c.MaxDownloadBytes == int64(^uint64(0)>>1) {
 		return logging.WithStack(errors.New("max_download_bytes must be positive and allow a one-byte overflow check"))
+	}
+	if c.AsyncExportThreshold <= 0 {
+		return logging.WithStack(errors.New("async_export_threshold must be a positive integer"))
+	}
+	if c.ExportRetentionDays <= 0 {
+		return logging.WithStack(errors.New("export_retention_days must be a positive integer"))
 	}
 	_, port, err := net.SplitHostPort(c.ListenAddress)
 	if err != nil {

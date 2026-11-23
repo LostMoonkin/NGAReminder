@@ -221,7 +221,14 @@ func (h *Handler) posts(c *gin.Context) {
 	if int64(page)*50 < data.Total {
 		next = page + 1
 	}
-	h.render(c, http.StatusOK, "posts", gin.H{"Data": data, "Previous": previous, "Next": next, "TraceID": logging.TraceID(c.Request.Context())})
+	h.render(c, http.StatusOK, "posts", gin.H{
+		"Data":           data,
+		"Previous":       previous,
+		"Next":           next,
+		"AsyncThreshold": h.monitor.Exports().Threshold(),
+		"RetentionDays":  h.monitor.Exports().RetentionDays(),
+		"TraceID":        logging.TraceID(c.Request.Context()),
+	})
 }
 
 func (h *Handler) id(c *gin.Context, key string) (int64, bool) {
@@ -251,7 +258,9 @@ func (h *Handler) problem(c *gin.Context, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, repository.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, service.ErrBusy), errors.Is(err, service.ErrPaused), errors.Is(err, service.ErrBackgroundDisabled):
+	case errors.Is(err, service.ErrExportExpired):
+		status = http.StatusGone
+	case errors.Is(err, service.ErrBusy), errors.Is(err, service.ErrPaused), errors.Is(err, service.ErrBackgroundDisabled), errors.Is(err, service.ErrExportNotReady):
 		status = http.StatusConflict
 	case errors.Is(err, infrastructure.ErrNGAAuth):
 		status = http.StatusUnprocessableEntity

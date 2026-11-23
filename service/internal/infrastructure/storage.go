@@ -12,10 +12,15 @@ import (
 	"ngareminder/service/internal/logging"
 )
 
+func ExportsDir(databasePath string) string {
+	return filepath.Join(filepath.Dir(databasePath), "exports")
+}
+
 func PrepareStorage(ctx context.Context, databasePath, assetsPath string) (err error) {
 	ctx, span := logging.Start(ctx, "infrastructure.prepare_storage")
 	defer span.End(&err)
-	for _, dir := range []string{filepath.Dir(databasePath), assetsPath} {
+	exportsPath := ExportsDir(databasePath)
+	for _, dir := range []string{filepath.Dir(databasePath), assetsPath, exportsPath} {
 		if err = os.MkdirAll(dir, 0700); err != nil {
 			return logging.Wrap(err, "create data directory")
 		}
@@ -32,7 +37,7 @@ func PrepareStorage(ctx context.Context, databasePath, assetsPath string) (err e
 			return logging.Wrap(removeErr, "remove directory probe file")
 		}
 	}
-	zerolog.Ctx(ctx).Info().Str("database_path", databasePath).Str("assets_path", assetsPath).Msg("Data directories are ready")
+	zerolog.Ctx(ctx).Info().Str("database_path", databasePath).Str("assets_path", assetsPath).Str("exports_path", exportsPath).Msg("Data directories are ready")
 	return nil
 }
 

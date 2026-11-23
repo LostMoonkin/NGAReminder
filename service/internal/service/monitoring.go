@@ -42,6 +42,7 @@ type Monitoring struct {
 	bot           *Bot
 	renewal       *Renewal
 	resources     *Resources
+	exports       *Exports
 	// 账号替换和资源清理独占；不同 watch 共享，只对同一 watch 的运行/修改互斥。
 	work          sync.RWMutex
 	watchWork     sync.Mutex
@@ -62,6 +63,9 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	if err = store.InterruptRuns(initCtx); err != nil {
 		return nil, err
 	}
+	if err = store.InterruptExportTasks(initCtx); err != nil {
+		return nil, err
+	}
 	location, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
 		return nil, logging.Wrap(err, "load monitoring timezone")
@@ -72,6 +76,29 @@ func NewMonitoring(ctx context.Context, cfg config.Config, store *repository.Sto
 	monitor.bot = &Bot{monitor: monitor}
 	monitor.renewal = &Renewal{monitor: monitor}
 	monitor.resources = &Resources{monitor: monitor, files: &infrastructure.Assets{Path: cfg.AssetsPath}, databasePath: cfg.DatabasePath, maxDownloadBytes: cfg.MaxDownloadBytes}
+	threshold := cfg.AsyncExportThreshold
+	if threshold <= 0 {
+		threshold = config.DefaultAsyncExportThreshold
+	}
+	retentionDays := cfg.ExportRetentionDays
+	if retentionDays <= 0 {
+		retentionDays = config.DefaultExportRetentionDays
+	}
+	monitor.exports = &Exports{
+		monitor:   monitor,
+		files:     &infrastructure.Exports{Path: infrastructure.ExportsDir(cfg.DatabasePath)},
+		threshold: threshold,
+		retention: time.Duration(retentionDays) * 24 * time.Hour,
+		notify:    make(chan struct{}, 1),
+	}
+	if _, err = monitor.exports.files.CleanIncomplete(initCtx); err != nil {
+		cancel()
+		return nil, err
+	}
+	if _, err = monitor.exports.CleanupExpired(initCtx, time.Now().UTC()); err != nil {
+		cancel()
+		return nil, err
+	}
 	if err = store.InterruptRenewals(initCtx); err != nil {
 		cancel()
 		return nil, err
@@ -94,6 +121,7 @@ func (m *Monitoring) Close() {
 	defer span.End(nil)
 	m.cancel()
 	m.scheduler.Wait()
+	m.exports.Close()
 	m.bot.Close()
 	m.renewal.Close()
 	m.notifications.Close()
@@ -532,7 +560,7 @@ func FailureMessage(err error) string {
 	if errors.As(err, &input) {
 		return input.Message
 	}
-	for _, known := range []error{ErrBusy, ErrPaused, ErrBackgroundDisabled, infrastructure.ErrCredentials, infrastructure.ErrNGAAuth,
+	for _, known := range []error{ErrBusy, ErrPaused, ErrBackgroundDisabled, ErrExportNotReady, ErrExportExpired, infrastructure.ErrCredentials, infrastructure.ErrNGAAuth,
 		infrastructure.ErrNGAMissing, infrastructure.ErrNGAPending, infrastructure.ErrNGABusy, infrastructure.ErrNGASearchUnavailable} {
 		if errors.Is(err, known) {
 			return known.Error()

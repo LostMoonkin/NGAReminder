@@ -1,7 +1,7 @@
 {{define "library"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
 <header class="page-heading"><div><p class="eyebrow">SAVED CONTENT</p><h1>内容库</h1><p class="muted">让值得保留的讨论，成为随时可读的收藏。</p></div></header>
-<nav class="tabs" aria-label="内容分类"><a href="/admin/library" aria-current="page">已保存主题</a><a href="/admin/users">用户内容</a></nav>
+<nav class="tabs" aria-label="内容分类"><a href="/admin/library" aria-current="page">已保存主题</a><a href="/admin/users">用户内容</a><a href="/admin/exports">导出任务</a></nav>
 <section class="card" data-filter-group>
 <div class="section-heading"><div><h2>按主题浏览</h2><p class="small muted">删除监控后，已保存帖子仍会保留。</p></div><label class="search-box js-only">{{template "icon" "search"}}<input type="search" data-search placeholder="搜索主题名称或 TID" aria-label="搜索已保存主题"></label></div>
 <p class="small muted js-only" data-filter-result aria-live="polite"></p>
@@ -14,7 +14,7 @@
 {{define "users"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
 <header class="page-heading"><div><p class="eyebrow">SAVED CONTENT</p><h1>内容库</h1><p class="muted">按关注的用户，回看已保存的发言。</p></div></header>
-<nav class="tabs" aria-label="内容分类"><a href="/admin/library">已保存主题</a><a href="/admin/users" aria-current="page">用户内容</a></nav>
+<nav class="tabs" aria-label="内容分类"><a href="/admin/library">已保存主题</a><a href="/admin/users" aria-current="page">用户内容</a><a href="/admin/exports">导出任务</a></nav>
 <section class="card" data-filter-group><div class="section-heading"><div><h2>用户内容汇总</h2><p class="small muted">仅展示已监控用户的本地内容。</p></div><label class="search-box js-only">{{template "icon" "search"}}<input data-search type="search" placeholder="搜索昵称或 UID" aria-label="搜索用户内容"></label></div><p class="small muted js-only" data-filter-result aria-live="polite"></p>
 <div class="scroll"><table><thead><tr><th>用户</th><th>已保存帖子</th><th>涉及主题</th><th>最近发布时间</th><th>监控</th></tr></thead><tbody>
 {{range .Users}}<tr data-filter-item data-search-text="{{.UID}} {{.Username}}"><td class="table-title"><a href="/admin/users/{{.UID}}">{{if .Username}}{{.Username}}{{else}}UID {{.UID}}{{end}}</a><span class="table-meta">UID {{.UID}}</span></td><td>{{.PostCount}}</td><td>{{.ThreadCount}}</td><td class="small muted">{{when .LastPublishedAt}}</td><td><a class="text-link" href="/admin/watches/{{.WatchID}}">查看监控 {{template "icon" "arrow"}}</a></td></tr>{{else}}<tr><td colspan="5" class="empty">暂无 UID 监控</td></tr>{{end}}
@@ -33,15 +33,17 @@
 <label class="option"><input type="radio" name="export_range" value="period" data-export-range>指定时间段</label>
 </div></fieldset>
 <fieldset class="export-period" data-export-period disabled><legend>时间段</legend><div class="grid"><label>开始时间<input type="datetime-local" name="start_at" step="1" disabled></label><label>结束时间<input type="datetime-local" name="end_at" step="1" disabled></label></div><p class="small muted">精确到秒，首尾均包含；按配置时区 {{.Data.Timezone}} 解释。</p></fieldset>
+{{if not .Data.UID}}<fieldset><legend>作者 UID 过滤（可选）</legend><label>仅导出指定作者的帖子<input type="text" name="uids" placeholder="多个 UID 用逗号或空格分隔，留空表示全部作者" spellcheck="false"></label><p class="small muted">包含匹配作者的主楼、回复与楼中楼评论。</p></fieldset>{{end}}
 <fieldset><legend>导出格式</legend><div class="option-grid">
 <label class="option"><input type="radio" name="format" value="markdown" checked>Markdown</label>
 <label class="option"><input type="radio" name="format" value="zip">ZIP（包含已下载资源）</label>
 </div></fieldset>
+<p class="small muted">匹配帖子超过 {{.AsyncThreshold}} 条将自动转为后台异步导出，导出文件本地保留 {{.RetentionDays}} 天。</p>
 <div class="form-actions"><button type="button" class="secondary" data-close-export>取消</button><button type="submit">{{template "icon" "download"}}开始导出</button></div>
 </form></dialog>
-<details class="card no-js-only" id="export-options"><summary>导出内容</summary><p class="small muted">时间范围精确到秒、首尾均包含，并按配置时区 {{.Data.Timezone}} 解释。</p>
-<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}全量导出</button></form>
-<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><div class="grid"><label>开始时间<input type="datetime-local" name="start_at" step="1" required></label><label>结束时间<input type="datetime-local" name="end_at" step="1" required></label></div><label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}按时段导出</button></form>
+<details class="card no-js-only" id="export-options"><summary>导出内容</summary><p class="small muted">时间范围精确到秒、首尾均包含，并按配置时区 {{.Data.Timezone}} 解释；匹配超过 {{.AsyncThreshold}} 条自动转为后台异步导出（保留 {{.RetentionDays}} 天）。</p>
+<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}">{{if not .Data.UID}}<label>作者 UID 过滤（可选，逗号或空格分隔）<input type="text" name="uids" placeholder="留空表示全部作者" spellcheck="false"></label>{{end}}<label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}全量导出</button></form>
+<form method="get" action="/admin/exports/{{if .Data.UID}}users/{{.Data.UID}}{{else}}threads/{{.Data.TID}}{{end}}"><div class="grid"><label>开始时间<input type="datetime-local" name="start_at" step="1" required></label><label>结束时间<input type="datetime-local" name="end_at" step="1" required></label></div>{{if not .Data.UID}}<label>作者 UID 过滤（可选，逗号或空格分隔）<input type="text" name="uids" placeholder="留空表示全部作者" spellcheck="false"></label>{{end}}<label>导出格式<select name="format"><option value="markdown">Markdown</option><option value="zip">ZIP（包含已下载资源）</option></select></label><button type="submit">{{template "icon" "download"}}按时段导出</button></form>
 </details>
 <section class="card">
 {{$tid := 0}}
@@ -55,6 +57,28 @@
 <nav class="pagination" aria-label="帖子分页"><span>第 {{.Data.Page}} 页 · 共 {{.Data.Total}} 条</span><div class="pagination-links">{{if .Previous}}<a href="?page={{.Previous}}">← 上一页</a>{{end}}{{if .Next}}<a href="?page={{.Next}}">下一页 →</a>{{end}}</div></nav>
 </section><details class="card"><summary>相关采集记录</summary>{{template "runs" .Data.Runs}}</details>
 {{template "footer" .}}</main></body></html>{{end}}
+
+{{define "exports"}}<!doctype html>
+<html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main">
+<header class="page-heading"><div><p class="eyebrow">SAVED CONTENT</p><h1>内容库</h1><p class="muted">管理大帖子的后台异步导出任务与本地下载文件。</p></div></header>
+<nav class="tabs" aria-label="内容分类"><a href="/admin/library">已保存主题</a><a href="/admin/users">用户内容</a><a href="/admin/exports" aria-current="page">导出任务</a></nav>
+{{if .CreatedID}}<div class="notice" role="status">{{template "icon" "info"}}<p>已创建异步导出任务 #{{.CreatedID}}，正在后台生成。完成后可直接在此页下载。</p></div>{{end}}
+<div class="notice neutral">{{template "icon" "library"}}<p>匹配帖子超过 {{.AsyncThreshold}} 条时自动转为后台异步导出，导出文件本地保留 {{.RetentionDays}} 天，过期自动清理。</p></div>
+<section class="card"{{if .HasActive}} data-auto-refresh{{end}}>
+<div class="section-heading"><div><h2>异步导出任务</h2><p class="small muted">{{if .HasActive}}存在进行中的导出任务，页面将每 5 秒自动刷新。{{else}}展示最近 100 条异步导出任务。{{end}}</p></div></div>
+<div class="scroll"><table><thead><tr><th>任务</th><th>目标</th><th>格式与条数</th><th>筛选条件</th><th>状态</th><th>文件大小</th><th>时间</th><th>操作</th></tr></thead><tbody>
+{{range .Tasks}}<tr>
+<td>#{{.ID}}</td>
+<td class="table-title">{{if eq .Kind "users"}}<a href="/admin/users/{{.TargetID}}">UID {{.TargetID}}</a>{{else}}<a href="/admin/threads/{{.TargetID}}">TID {{.TargetID}}</a>{{end}}<span class="table-meta">{{.DownloadName}}</span></td>
+<td>{{if eq .Format "zip"}}ZIP{{else}}Markdown{{end}}<span class="table-meta">{{.PostCount}} 条</span></td>
+<td class="small">{{if or .StartAt .EndAt}}<div>时段：{{if .StartAt}}{{when .StartAt}}{{else}}不限{{end}} ～ {{if .EndAt}}{{when .EndAt}}{{else}}不限{{end}}</div>{{end}}{{if .AuthorUIDs}}<div>作者 UID：{{intlist .AuthorUIDs}}</div>{{end}}{{if and (not .StartAt) (not .EndAt) (not .AuthorUIDs)}}<span class="muted">全量</span>{{end}}</td>
+<td><span class="badge{{if or (eq .Status "queued") (eq .Status "running")}} amber{{else if ne .Status "completed"}} gray{{end}}">{{status .Status}}</span>{{if .Error}}<span class="table-meta">{{.Error}}</span>{{end}}</td>
+<td class="small">{{if gt .FileSize 0}}{{bytesize .FileSize}}{{else}}—{{end}}</td>
+<td class="small muted"><div>创建：{{when .CreatedAt}}</div>{{if .ExpiresAt}}<div>过期：{{when .ExpiresAt}}</div>{{end}}</td>
+<td>{{if eq .Status "completed"}}<a class="button" href="/admin/exports/tasks/{{.ID}}/download">{{template "icon" "download"}}下载</a>{{else}}<span class="small muted">—</span>{{end}}</td>
+</tr>{{else}}<tr><td colspan="8" class="empty">暂无异步导出任务，在主题或用户内容页导出超过 {{.AsyncThreshold}} 条内容时会出现在这里。</td></tr>{{end}}
+</tbody></table></div>
+</section>{{template "footer" .}}</main></body></html>{{end}}
 
 {{define "problem"}}<!doctype html>
 <html lang="zh-CN"><head>{{template "head" .}}</head><body>{{template "nav" .}}<main id="main" class="narrow">
