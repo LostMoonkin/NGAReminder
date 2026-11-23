@@ -2,6 +2,8 @@ package service
 
 import (
 	"archive/zip"
+	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,9 +11,12 @@ import (
 	"github.com/rs/zerolog"
 	"io"
 	"ngareminder/service/internal/content"
+	"ngareminder/service/internal/infrastructure"
 	"ngareminder/service/internal/logging"
 	"ngareminder/service/internal/repository"
 	"os"
+	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -286,42 +291,125 @@ func (m *Monitoring) exportSync(ctx context.Context, kind string, id int64, form
 	return file, nil
 }
 
+const exportBatchSize = 500
+
+func exportSortFloor(row repository.ExportRowKey) int64 {
+	if row.Kind == "comment" {
+		return row.ParentFloor
+	}
+	return row.Floor
+}
+
+func exportIsComment(row repository.ExportRowKey) int {
+	if row.Kind == "comment" {
+		return 1
+	}
+	return 0
+}
+
+func zipMethodForAsset(name string) uint16 {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+		".mp3", ".m4a", ".aac", ".ogg", ".opus",
+		".mp4", ".mkv", ".webm", ".mov",
+		".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".pdf":
+		return zip.Store
+	default:
+		return zip.Deflate
+	}
+}
+
 func (m *Monitoring) writeExport(ctx context.Context, file *os.File, kind string, id int64, format string, filter repository.ContentFilter, total, maxID int64) (int, error) {
-	writer := io.Writer(file)
-	var archive *zip.Writer
-	var err error
-	if format == "zip" {
-		archive = zip.NewWriter(file)
-		writer, err = archive.Create("content.md")
-		if err != nil {
-			return 0, logging.Wrap(err, "create Markdown ZIP entry")
+	index, err := m.store.ExportIndex(ctx, filter, maxID)
+	if err != nil {
+		return 0, err
+	}
+	refSet := make(map[content.PostReference]struct{}, len(index))
+	for _, row := range index {
+		if row.Kind == "main" {
+			refSet[content.PostReference{TID: row.TID, PID: 0}] = struct{}{}
+		}
+		if row.PID > 0 {
+			refSet[content.PostReference{TID: row.TID, PID: row.PID}] = struct{}{}
 		}
 	}
+	slices.SortFunc(index, func(a, b repository.ExportRowKey) int {
+		if c := cmp.Compare(a.TID, b.TID); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(exportSortFloor(a), exportSortFloor(b)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(exportIsComment(a), exportIsComment(b)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+
+	fileBuf := bufio.NewWriterSize(file, 256*1024)
+	writer := io.Writer(fileBuf)
+	var archive *zip.Writer
+	var mdBuf *bufio.Writer
+	var resourcePaths map[string]string
+	var assetReader *infrastructure.AssetReader
+	if format == "zip" {
+		resourcePaths, err = m.store.ResourcePaths(ctx)
+		if err != nil {
+			return 0, err
+		}
+		assetReader, err = m.resources.files.OpenReader(ctx)
+		if err != nil {
+			return 0, err
+		}
+		defer assetReader.Close()
+		archive = zip.NewWriter(fileBuf)
+		entry, e := archive.Create("content.md")
+		if e != nil {
+			return 0, logging.Wrap(e, "create Markdown ZIP entry")
+		}
+		mdBuf = bufio.NewWriterSize(entry, 256*1024)
+		writer = mdBuf
+	}
+
 	currentTID := int64(0)
 	assets := map[string]bool{}
-	for offset := 0; int64(offset) < total; offset += 200 {
+	checkedAssets := map[string]bool{}
+	batchIDs := make([]int64, 0, exportBatchSize)
+	for start := 0; start < len(index); start += exportBatchSize {
 		if err = ctx.Err(); err != nil {
 			return 0, logging.WithStack(err)
 		}
-		posts, e := m.store.ContentBatch(ctx, filter, offset, 200, maxID)
+		end := start + exportBatchSize
+		if end > len(index) {
+			end = len(index)
+		}
+		batchIDs = batchIDs[:0]
+		for _, row := range index[start:end] {
+			batchIDs = append(batchIDs, row.ID)
+		}
+		posts, e := m.store.ExportPostsByIDs(ctx, batchIDs)
 		if e != nil {
 			return 0, e
 		}
-		// 缓存只在当前批次内有效；目标查找遵守同一 UID/TID 和快照范围。
-		links := map[content.PostReference]string{}
+		byID := make(map[int64]repository.Post, len(posts))
 		for _, post := range posts {
+			byID[post.ID] = post
+		}
+		for _, postID := range batchIDs {
+			post, ok := byID[postID]
+			if !ok {
+				continue
+			}
 			body := content.ParseMarkdown(post.Body, post.TID)
-			for _, ref := range body.References {
-				if _, checked := links[ref]; checked {
-					continue
-				}
-				found, e := m.store.ContentReferenceExists(ctx, filter, maxID, ref.TID, ref.PID)
-				if e != nil {
-					return 0, e
-				}
-				links[ref] = ref.URL()
-				if found {
-					links[ref] = "#" + ref.Anchor()
+			var links map[content.PostReference]string
+			if len(body.References) > 0 {
+				links = make(map[content.PostReference]string, len(body.References))
+				for _, ref := range body.References {
+					if _, exists := refSet[ref]; exists {
+						links[ref] = "#" + ref.Anchor()
+					} else {
+						links[ref] = ref.URL()
+					}
 				}
 			}
 			if currentTID != post.TID {
@@ -334,26 +422,31 @@ func (m *Monitoring) writeExport(ctx context.Context, file *os.File, kind string
 					return 0, logging.Wrap(err, "write export topic heading")
 				}
 			}
-			replacements := map[string]string{}
-			if archive != nil {
+			var replacements map[string]string
+			if archive != nil && len(post.Resources) > 0 {
 				for _, source := range post.Resources {
-					item, e := m.store.Resource(ctx, source)
-					if e != nil {
-						return 0, e
-					}
-					if item.Path == "" {
+					localPath := resourcePaths[source]
+					if localPath == "" {
 						continue
 					}
-					asset, e := m.resources.files.Open(ctx, item.Path)
-					if e != nil {
-						logging.Error(ctx, e, "Export resource unavailable; using remote link", zerolog.WarnLevel)
+					available, checked := checkedAssets[localPath]
+					if !checked {
+						if checkErr := assetReader.Check(localPath); checkErr != nil {
+							logging.Error(ctx, checkErr, "Export resource unavailable; using remote link", zerolog.WarnLevel)
+							checkedAssets[localPath] = false
+							continue
+						}
+						checkedAssets[localPath] = true
+						available = true
+					}
+					if !available {
 						continue
 					}
-					if e = asset.Close(); e != nil {
-						return 0, logging.Wrap(e, "close checked export resource")
+					if replacements == nil {
+						replacements = make(map[string]string, len(post.Resources))
 					}
-					replacements[source] = "assets/" + item.Path
-					assets[item.Path] = true
+					replacements[source] = "assets/" + localPath
+					assets[localPath] = true
 				}
 			}
 			if err = writePost(writer, post, replacements, body, links); err != nil {
@@ -362,11 +455,14 @@ func (m *Monitoring) writeExport(ctx context.Context, file *os.File, kind string
 		}
 	}
 	if archive != nil {
+		if err = mdBuf.Flush(); err != nil {
+			return 0, logging.Wrap(err, "flush Markdown ZIP entry")
+		}
 		metadata, e := archive.Create("metadata.json")
 		if e != nil {
 			return 0, logging.Wrap(e, "create export metadata")
 		}
-		meta := map[string]any{"version": 1, "kind": kind, "id": id, "post_count": total, "snapshot_max_id": maxID, "created_at": time.Now().UTC()}
+		meta := map[string]any{"version": 1, "kind": kind, "id": id, "post_count": int64(len(index)), "snapshot_max_id": maxID, "created_at": time.Now().UTC()}
 		if filter.StartAt != nil {
 			meta["start_at"] = filter.StartAt.UTC().Format(time.RFC3339)
 		}
@@ -379,15 +475,27 @@ func (m *Monitoring) writeExport(ctx context.Context, file *os.File, kind string
 		if e = json.NewEncoder(metadata).Encode(meta); e != nil {
 			return 0, logging.Wrap(e, "write export metadata")
 		}
-		// 只保留唯一文件名集合；复制每个文件时使用固定缓冲，不把资源载入内存。
+		// 只保留唯一文件名集合；按确定顺序使用固定缓冲流式复制，不把资源载入内存。
+		assetNames := make([]string, 0, len(assets))
 		for name := range assets {
-			asset, e := m.resources.files.Open(ctx, name)
+			assetNames = append(assetNames, name)
+		}
+		sort.Strings(assetNames)
+		copyBuf := make([]byte, 64*1024)
+		for _, name := range assetNames {
+			if err = ctx.Err(); err != nil {
+				return 0, logging.WithStack(err)
+			}
+			asset, e := assetReader.Open(name)
 			if e != nil {
 				return 0, e
 			}
-			entry, e := archive.Create("assets/" + name)
+			entry, e := archive.CreateHeader(&zip.FileHeader{
+				Name:   "assets/" + name,
+				Method: zipMethodForAsset(name),
+			})
 			if e == nil {
-				_, e = copyContext(ctx, entry, asset)
+				_, e = copyContextBuf(ctx, entry, asset, copyBuf)
 			}
 			closeErr := asset.Close()
 			if e != nil || closeErr != nil {
@@ -397,6 +505,9 @@ func (m *Monitoring) writeExport(ctx context.Context, file *os.File, kind string
 		if err = archive.Close(); err != nil {
 			return 0, logging.Wrap(err, "finish ZIP export")
 		}
+	}
+	if err = fileBuf.Flush(); err != nil {
+		return 0, logging.Wrap(err, "flush export file")
 	}
 	return len(assets), nil
 }
@@ -440,7 +551,10 @@ func writePost(writer io.Writer, post repository.Post, replacements map[string]s
 	return nil
 }
 func copyContext(ctx context.Context, to io.Writer, from io.Reader) (written int64, err error) {
-	buffer := make([]byte, 32*1024)
+	return copyContextBuf(ctx, to, from, make([]byte, 32*1024))
+}
+
+func copyContextBuf(ctx context.Context, to io.Writer, from io.Reader, buffer []byte) (written int64, err error) {
 	for {
 		if err = ctx.Err(); err != nil {
 			return written, logging.WithStack(err)

@@ -50,6 +50,8 @@
 
 补充功能：[Spec21：帖子导出按 UID 过滤](../spec/21-thread-export-uid-filter.md)，已完成实现与自测。主题导出支持传入作者 UID 列表，仅导出匹配作者的已保存内容，兼容时段筛选与异步导出。
 
+性能优化：[Spec22：大规模内容导出性能优化](../spec/22-export-performance-optimization.md)，已完成实现与自测。消除大帖子导出中的 $O(N^2)$ 分页排序与引用 N+1 查库，优化 ZIP 资源缓存、流式写入与 Markdown 转义复用。
+
 实际切换顺序：**Rust server 停机 → PG 迁移 SQLite → 核验 → Go 服务上线**。Go 制品、迁移工具、部署配置和副本演练在正式停机前准备完成；阶段编号不是停机期间的开发顺序。
 
 ## 本轮的简化边界

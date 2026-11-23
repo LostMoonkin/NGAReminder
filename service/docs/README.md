@@ -30,6 +30,8 @@ TID/UID 内容的秒级闭区间导出与统一导出悬浮窗见 [Spec16](spec/
 
 主题导出按作者 UID 列表过滤见 [Spec21](spec/21-thread-export-uid-filter.md)。
 
+大规模内容导出的性能优化与基准约束见 [Spec22](spec/22-export-performance-optimization.md)。
+
 行为对照见 [Rust / Go 功能与实现差异核验表](plan/rust-go-parity-audit.md)，包含 API 对应、功能内部差异、后期修复迁移情况及本地验证结果。
 
 真实数据迁移的配置、水位及导出核验见 [2026-09-20 迁移实机测试](plan/live-migration-test-2026-09-20.md)。

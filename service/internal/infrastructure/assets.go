@@ -104,37 +104,76 @@ func (a *Assets) Save(ctx context.Context, data []byte, mime string, source ...s
 	}
 	return name, logging.Wrap(root.Rename(temp, name), "publish resource file")
 }
+
+type AssetReader struct{ root *os.Root }
+
+func (a *Assets) OpenReader(ctx context.Context) (reader *AssetReader, err error) {
+	_, span := logging.Start(ctx, "infrastructure.open_asset_reader")
+	defer span.End(&err)
+	root, err := a.root()
+	if err != nil {
+		return nil, err
+	}
+	return &AssetReader{root: root}, nil
+}
+
+func (r *AssetReader) Close() error {
+	if r == nil || r.root == nil {
+		return nil
+	}
+	return logging.Wrap(r.root.Close(), "close resource directory")
+}
+
+func validateAssetPath(root *os.Root, name string) error {
+	if !fs.ValidPath(name) || strings.Contains(name, "\\") {
+		return logging.WithStack(errors.New("invalid resource file name"))
+	}
+	// 兼容 Rust 的分层资源路径；每一级都拒绝隐藏路径和符号链接。
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, ".") {
+			return logging.WithStack(errors.New("invalid resource file name"))
+		}
+		info, e := root.Lstat(strings.Join(parts[:i+1], "/"))
+		if e != nil {
+			return logging.Wrap(e, "inspect resource path")
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (i < len(parts)-1 && !info.IsDir()) {
+			return logging.WithStack(errors.New("resource path contains a symbolic link or non-directory"))
+		}
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return logging.Wrap(err, "inspect resource file")
+	}
+	if !info.Mode().IsRegular() {
+		return logging.WithStack(errors.New("resource is not an ordinary file"))
+	}
+	return nil
+}
+
+func (r *AssetReader) Check(name string) error {
+	return validateAssetPath(r.root, name)
+}
+
+func (r *AssetReader) Open(name string) (*os.File, error) {
+	if err := validateAssetPath(r.root, name); err != nil {
+		return nil, err
+	}
+	file, err := r.root.Open(name)
+	return file, logging.Wrap(err, "open resource file")
+}
+
 func (a *Assets) Open(ctx context.Context, name string) (file *os.File, err error) {
 	_, span := logging.Start(ctx, "infrastructure.open_asset")
 	defer span.End(&err)
-	if !fs.ValidPath(name) || strings.Contains(name, "\\") {
-		return nil, logging.WithStack(errors.New("invalid resource file name"))
-	}
 	root, err := a.root()
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	// 兼容 Rust 的分层资源路径；每一级都拒绝隐藏路径和符号链接。
-	parts := strings.Split(name, "/")
-	for i, part := range parts {
-		if strings.HasPrefix(part, ".") {
-			return nil, logging.WithStack(errors.New("invalid resource file name"))
-		}
-		info, e := root.Lstat(strings.Join(parts[:i+1], "/"))
-		if e != nil {
-			return nil, logging.Wrap(e, "inspect resource path")
-		}
-		if info.Mode()&os.ModeSymlink != 0 || (i < len(parts)-1 && !info.IsDir()) {
-			return nil, logging.WithStack(errors.New("resource path contains a symbolic link or non-directory"))
-		}
-	}
-	info, err := root.Lstat(name)
-	if err != nil {
-		return nil, logging.Wrap(err, "inspect resource file")
-	}
-	if !info.Mode().IsRegular() {
-		return nil, logging.WithStack(errors.New("resource is not an ordinary file"))
+	if err = validateAssetPath(root, name); err != nil {
+		return nil, err
 	}
 	file, err = root.Open(name)
 	return file, logging.Wrap(err, "open resource file")

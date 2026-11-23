@@ -117,11 +117,17 @@ func ResourceAliases(urls []string, local map[string]string) map[string]string {
 	}
 	return result
 }
+
+var (
+	destinationReplacer    = strings.NewReplacer("\\", "%5C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E", "\"", "%22", " ", "%20")
+	markdownEscapeReplacer = strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "|", "\\|")
+)
+
 func Destination(target string) string {
-	return strings.NewReplacer("\\", "%5C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E", "\"", "%22", " ", "%20").Replace(target)
+	return destinationReplacer.Replace(target)
 }
 func EscapeMarkdown(text string) string {
-	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "|", "\\|").Replace(text)
+	return markdownEscapeReplacer.Replace(text)
 }
 func renderHTML(n *node, resources map[string]string) string {
 	var b strings.Builder

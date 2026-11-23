@@ -65,6 +65,81 @@ func (s *Store) ContentReferenceExists(ctx context.Context, f ContentFilter, max
 	return len(rows) > 0, logging.Wrap(err, "check exported reference target")
 }
 
+type ExportRowKey struct {
+	ID          int64
+	TID         int64
+	PID         int64
+	Kind        string
+	Floor       int64
+	ParentFloor int64
+}
+
+// ExportIndex 一次性读取导出范围内的轻量排序与引用键，不读取正文或 raw_payload，读取完立即释放 SQLite 连接。
+func (s *Store) ExportIndex(ctx context.Context, f ContentFilter, maxID int64) (items []ExportRowKey, err error) {
+	ctx, span := logging.Start(ctx, "repository.export_index")
+	defer span.End(&err)
+	cursor, err := s.contentQuery(ctx, f).
+		Where("id <= ?", maxID).
+		Select("id, tid, pid, kind, floor, parent_floor").
+		Rows()
+	if err != nil {
+		return nil, logging.Wrap(err, "query export sort and reference index")
+	}
+	defer func() { err = errors.Join(err, logging.Wrap(cursor.Close(), "close export index cursor")) }()
+	for cursor.Next() {
+		var item ExportRowKey
+		if scanErr := cursor.Scan(&item.ID, &item.TID, &item.PID, &item.Kind, &item.Floor, &item.ParentFloor); scanErr != nil {
+			return nil, logging.Wrap(scanErr, "scan export index row")
+		}
+		items = append(items, item)
+	}
+	if rowErr := cursor.Err(); rowErr != nil {
+		return nil, logging.Wrap(rowErr, "iterate export index rows")
+	}
+	return items, nil
+}
+
+// ExportPostsByIDs 按主键批量读取导出实际需要的列，避免读取 raw_payload 与重复全表排序。
+func (s *Store) ExportPostsByIDs(ctx context.Context, ids []int64) (items []Post, err error) {
+	ctx, span := logging.Start(ctx, "repository.export_posts_by_ids")
+	defer span.End(&err)
+	if len(ids) == 0 {
+		return []Post{}, nil
+	}
+	items = make([]Post, 0, len(ids))
+	err = s.db.WithContext(ctx).Model(&Post{}).
+		Select("id, tid, pid, kind, floor, parent_key, parent_floor, author_uid, author, subject, body, published_at, source_url, resources").
+		Where("id IN ?", ids).
+		Find(&items).Error
+	return items, logging.Wrap(err, "read export post batch by IDs")
+}
+
+// ResourcePaths 一次性加载已落盘资源的 URL 到本地路径映射，避免 ZIP 导出逐条查库。
+func (s *Store) ResourcePaths(ctx context.Context) (paths map[string]string, err error) {
+	ctx, span := logging.Start(ctx, "repository.resource_paths")
+	defer span.End(&err)
+	cursor, err := s.db.WithContext(ctx).Model(&Resource{}).
+		Select("url, path").
+		Where("path <> ''").
+		Rows()
+	if err != nil {
+		return nil, logging.Wrap(err, "query downloaded resource paths")
+	}
+	defer func() { err = errors.Join(err, logging.Wrap(cursor.Close(), "close resource paths cursor")) }()
+	paths = map[string]string{}
+	for cursor.Next() {
+		var source, localPath string
+		if scanErr := cursor.Scan(&source, &localPath); scanErr != nil {
+			return nil, logging.Wrap(scanErr, "scan downloaded resource path")
+		}
+		paths[source] = localPath
+	}
+	if rowErr := cursor.Err(); rowErr != nil {
+		return nil, logging.Wrap(rowErr, "iterate downloaded resource paths")
+	}
+	return paths, nil
+}
+
 type ResourceSettings struct {
 	ID              int  `json:"-"`
 	DownloadEnabled bool `json:"download_enabled"`
